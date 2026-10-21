@@ -19,3 +19,8 @@
 - **Context**: Cross-protocol or cross-context signature replay attacks can occur if identity keys sign raw public keys without context.
 - **Decision**: Prepend fixed context prefix `b"bitchat2/noise-static/v1"` before signing or verifying the Noise static public key.
 - **Consequences**: Cryptographically binds the signature to Bitchat 2.0 Noise static key verification and prevents reuse in other signature contexts.
+
+## ADR-0005: Exact LRU Deduplication Cache as Default, Bloom Filter as Compact Alternative
+- **Context**: Mesh flooding requires nodes to detect and drop previously seen packets to avoid broadcast storms and loops. A Bloom filter saves RAM but exhibits a non-zero false positive rate (FPR), which causes genuine, unseen messages to be silently dropped.
+- **Decision**: Make `LruSeenCache` (exact hash map with bounded capacity and TTL eviction) the default deduplication cache in `bitchat2_core`. Retain `BloomSeenCache` (dual rotating Bloom filters with double hashing) as an optional, space-constrained alternative for constrained embedded microcontrollers or Phase 6 scaling benchmarks.
+- **Consequences**: 0% false positive rate guarantees no genuine user messages are erroneously suppressed. Memory cost for 1,000 entries is ~24 KB (negligible on modern smartphones and BLE companion devices). Bloom filter provides $O(1)$ constant bit-level overhead when memory is strictly constrained.
