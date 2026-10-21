@@ -4,7 +4,7 @@ pub mod relay;
 pub mod seen;
 pub mod stats;
 
-pub use policy::{NaiveFlood, RelayContext, RelayPolicy};
+pub use policy::{AdaptiveFlood, AdaptiveFloodConfig, NaiveFlood, RelayContext, RelayPolicy};
 pub use relay::{InboundMessage, MeshNode};
 pub use stats::{MeshStats, MeshStatsSnapshot};
 

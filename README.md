@@ -11,7 +11,7 @@ Decentralized, privacy-preserving mesh messenger combining Bluetooth Low Energy 
   - [x] **Task 1**: Seen-message cache (`LruSeenCache`, `BloomSeenCache`, ADR-0005).
   - [x] **Task 2**: Link-layer fragmentation (`Fragmenter`, `Reassembler`, memory bounds).
   - [x] **Task 3**: Mesh node & baseline relay engine (`NaiveFlood`, `MeshStats`).
-  - [ ] **Task 4**: Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression).
+  - [x] **Task 4**: Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression).
   - [ ] **Task 5**: Evaluation harness (5 topologies, 20+ seeds, `docs/EVALUATION.md`).
   - [ ] **Task 6**: End-to-end encryption across relays (E2E Noise over mesh).
   - [ ] **Task 7**: Rust `BridgeTransport` and `flutter_rust_bridge` API.
