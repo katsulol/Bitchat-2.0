@@ -2,21 +2,21 @@
 
 ## Status Overview
 - Total Phase 1 Share: 15%
-- Current Status: Task 4 completed (Task 5 next)
+- Current Status: Task 5 completed (Task 6 next)
 
 ## Task Checklist
 - [x] Task 1 — Workspace and tooling
 - [x] Task 2 — Error type and identity
 - [x] Task 3 — Envelope wire format
 - [x] Task 4 — Noise session with identity binding (CRYPTO-REVIEW)
-- [ ] Task 5 — Transport trait and simulator
+- [x] Task 5 — Transport trait and simulator
 - [ ] Task 6 — Docs and wrap-up
 
 ## Test Counts & Verification Run
-- Tests passing: 21 (unit tests across `identity`, `envelope`, and `crypto` modules)
+- Tests passing: 25 (covering identity, envelope, crypto, and transport simulation)
 - Clippy: `-D warnings` clean
 - Fmt: pass
-- No `unwrap()` / `expect()` in non-test code
+- No `unwrap()` / `expect()` / `panic!` in non-test code
 
 ## Not Verified
 - Physical Bluetooth Low Energy (BLE) radio hardware (simulated in software only).

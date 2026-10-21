@@ -9,7 +9,7 @@ Phase 1 establishes the Rust core library (`bitchat2_core`):
 - [x] **Task 2: Error type and identity** (Ed25519 `Identity`, `PeerId`, `ShortId`, `zeroize`, `KeyStore`, secret redaction)
 - [x] **Task 3: Envelope wire format** (31-byte compact header, hand-written codec, `proptest`, reversible bucket padding)
 - [x] **Task 4: Noise session with identity binding** (Noise_XX with signed static keys, replay/tamper rejection)
-- [ ] **Task 5: Transport trait and simulator** (Deterministic simulated mesh network)
+- [x] **Task 5: Transport trait and simulator** (Deterministic simulated mesh network with loss and latency)
 - [ ] **Task 6: Docs and wrap-up**
 
 ## Repository Structure
@@ -24,7 +24,10 @@ Phase 1 establishes the Rust core library (`bitchat2_core`):
 │       ├── error.rs            # Unified Error type (thiserror)
 │       ├── identity.rs         # Ed25519 identity, PeerId, ShortId, KeyStore
 │       ├── envelope.rs         # 31-byte binary wire codec & padding
-│       └── crypto.rs           # Noise_XX session with identity binding
+│       ├── crypto.rs           # Noise_XX session with identity binding
+│       └── transport/          # Transport trait and SimNetwork simulator
+│           ├── mod.rs
+│           └── sim.rs
 ├── docs/                       # Architecture, threat model, crypto review, ADRs
 ├── .agents/skills/             # Engineering standards and review rules
 ├── .github/workflows/ci.yml    # Continuous integration workflow

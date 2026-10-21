@@ -4,3 +4,4 @@ pub mod crypto;
 pub mod envelope;
 pub mod error;
 pub mod identity;
+pub mod transport;
