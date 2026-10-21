@@ -1,0 +1,4 @@
+# Default rustfmt configuration
+edition = "2021"
+newline_style = "Auto"
+use_small_heuristics = "Default"

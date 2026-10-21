@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+]
+
+[profile.dev]
+incremental = false
+debug = 0
+opt-level = 0
+
+[profile.dev.build-override]
+incremental = false
+debug = 0
+opt-level = 0
+
+[profile.test]
+incremental = false
+debug = 0
+opt-level = 0
+
+[profile.test.build-override]
+incremental = false
+debug = 0
+opt-level = 0
+
+[profile.release]
+incremental = false
+debug = 0
+opt-level = 1
+
+[profile.release.build-override]
+incremental = false
+debug = 0
+opt-level = 0

@@ -1,0 +1,19 @@
+[package]
+name = "bitchat2_core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
+thiserror = "2.0.11"
+tracing = "0.1.41"
+bytes = "1.10.0"
+blake3 = "1.5.5"
+ed25519-dalek = { version = "2.1.1", features = ["rand_core", "zeroize"] }
+snow = "0.9.6"
+rand = "0.8.5"
+zeroize = { version = "1.8.1", features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1.6.0"
+tokio-test = "0.4.4"
