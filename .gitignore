@@ -4,6 +4,7 @@
 *.key
 identity.key
 .cargo/config.toml
+proptest-regressions/
 
 # Flutter & Dart artifacts
 app/.dart_tool/

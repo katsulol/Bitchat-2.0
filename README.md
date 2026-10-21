@@ -9,7 +9,7 @@ Decentralized, privacy-preserving mesh messenger combining Bluetooth Low Energy 
 - **Phase 2 (20%)**: BLE mesh logic, adaptive relaying, evaluation harness, Flutter shell. [In Progress]
   - [x] **Task 0**: Phase 1 carry-overs (Stateless Noise transport, sliding replay window, domain separation, compiler no-panic denies).
   - [x] **Task 1**: Seen-message cache (`LruSeenCache`, `BloomSeenCache`, ADR-0005).
-  - [ ] **Task 2**: Link-layer fragmentation (`Fragmenter`, `Reassembler`, memory bounds).
+  - [x] **Task 2**: Link-layer fragmentation (`Fragmenter`, `Reassembler`, memory bounds).
   - [ ] **Task 3**: Mesh node & baseline relay engine (`NaiveFlood`, `MeshStats`).
   - [ ] **Task 4**: Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression).
   - [ ] **Task 5**: Evaluation harness (5 topologies, 20+ seeds, `docs/EVALUATION.md`).

@@ -14,6 +14,9 @@ pub enum Error {
     #[error("KeyStore error: {0}")]
     KeyStore(String),
 
+    #[error("Fragmentation error: {0}")]
+    Fragmentation(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
