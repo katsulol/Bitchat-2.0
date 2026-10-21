@@ -12,4 +12,4 @@ Every file touching key generation, signing, verification, Noise handshakes, or 
 | File | Primitives / Crates | Purpose | Reviewer Checklist |
 |---|---|---|---|
 | `core/src/identity.rs` | `ed25519-dalek`, `blake3`, `zeroize` | Ed25519 signing, verification, PeerId, ShortId derivation | 1. Key generation uses `OsRng`.<br>2. `ZeroizeOnDrop` implemented for `Identity`.<br>3. `Debug` implementations redact key material.<br>4. Rejection of tampered signatures. |
-| *Pending Task 4: `core/src/crypto.rs`* | `snow`, `ed25519-dalek` | Noise_XX handshake with Ed25519 static-key binding | Static key signing, peer identity validation, nonce safety |
+| `core/src/crypto.rs` | `snow`, `ed25519-dalek` | Noise_XX handshake with Ed25519 static-key binding & ChaChaPoly AEAD transport | 1. Strict pattern `Noise_XX_25519_ChaChaPoly_BLAKE2s`.<br>2. Local Noise static key is signed with Ed25519 long-term identity.<br>3. Remote signature over Noise static key must verify before transitioning to transport.<br>4. Replay attack rejection by monotonic AEAD nonce.<br>5. Redacted `Debug` output prevents session key leakage. |

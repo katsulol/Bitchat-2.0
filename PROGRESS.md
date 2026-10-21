@@ -2,18 +2,18 @@
 
 ## Status Overview
 - Total Phase 1 Share: 15%
-- Current Status: Task 3 completed (Task 4 next)
+- Current Status: Task 4 completed (Task 5 next)
 
 ## Task Checklist
 - [x] Task 1 — Workspace and tooling
 - [x] Task 2 — Error type and identity
 - [x] Task 3 — Envelope wire format
-- [ ] Task 4 — Noise session with identity binding (CRYPTO-REVIEW)
+- [x] Task 4 — Noise session with identity binding (CRYPTO-REVIEW)
 - [ ] Task 5 — Transport trait and simulator
 - [ ] Task 6 — Docs and wrap-up
 
 ## Test Counts & Verification Run
-- Tests passing: 16 (all unit tests in `core::identity` and `core::envelope`, including property tests)
+- Tests passing: 21 (unit tests across `identity`, `envelope`, and `crypto` modules)
 - Clippy: `-D warnings` clean
 - Fmt: pass
 - No `unwrap()` / `expect()` in non-test code
