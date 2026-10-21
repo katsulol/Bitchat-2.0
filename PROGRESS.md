@@ -3,7 +3,7 @@
 ## Status Overview
 - Cumulative Phase 1 + 2 Share: 35%
 - Phase 2 Share: 20%
-- Current Status: Task 0 completed (Starting Part A: Task 1 next)
+- Current Status: Phase 2 100% Complete (Part A simulator-verified; Part B Flutter/BLE UNVERIFIED awaiting physical hardware testing per docs/DEVICE_TEST_PLAN.md)
 
 ## Phase 2 Task Checklist
 
@@ -21,7 +21,7 @@
 ### Part B — Flutter Shell & BLE Bridge (UNVERIFIED until physical device tests)
 - [x] Task 7 — Rust `BridgeTransport` and `flutter_rust_bridge` API (UNVERIFIED — awaiting hardware test)
 - [x] Task 8 — Flutter app & dual-role BLE GATT layer (UNVERIFIED — awaiting hardware test)
-- [ ] Task 9 — Docs & device test plan (`docs/DEVICE_TEST_PLAN.md`) (UNVERIFIED)
+- [x] Task 9 — Docs & device test plan (`docs/DEVICE_TEST_PLAN.md`) (UNVERIFIED — awaiting hardware test)
 
 ## Test Counts & Verification Run
 - **Total Tests Passing**: 54 tests (0 failures, 0 ignored)
@@ -36,9 +36,9 @@
   - `transport::bridge`: 2 tests (inbound/outbound queues, neighbor tracking, mesh node integration)
   - `api`: 1 test (lifecycle, identity generation, direct & broadcast sends, stats snapshot)
 - **Evaluation Suite**: 200 simulation runs executed across 5 topologies (Line, Grid, Dense Cluster, Random Geometric, Partitioned Bridge) with 20 seeds at 5% loss. Full data logged in `docs/EVALUATION.md` and `evaluation_results.csv`.
-- **Clippy**: `cargo clippy --all-targets -- -D warnings` clean with zero warnings.
-- **Compiler Denies**: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` active in `core/src/lib.rs`.
-- **Formatter**: `cargo fmt --check` clean.
+- **Flutter Verification**:
+  - `flutter analyze app`: Clean (0 issues).
+  - `flutter test app`: Clean (1/1 tests passed).
 - **Clippy**: `cargo clippy --all-targets -- -D warnings` clean with zero warnings.
 - **Compiler Denies**: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` active in `core/src/lib.rs`.
 - **Formatter**: `cargo fmt --check` clean.

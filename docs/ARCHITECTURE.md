@@ -13,9 +13,19 @@ Bitchat 2.0 is a decentralized peer-to-peer and mesh messaging platform designed
 
 ```mermaid
 flowchart TD
-    subgraph UI ["User Experience (Phase 2+)"]
-        Flutter["Flutter / Dart UI"]
-        FRB["flutter_rust_bridge FFI"]
+    subgraph MobileApp ["Mobile Shell & Platform (Phase 2 Part B)"]
+        FlutterUI["Flutter UI (Dart)"]
+        NativeBLE["Native Kotlin BLE Service\n(Foreground Service, Central + Peripheral)"]
+        FRB["flutter_rust_bridge / JNI FFI"]
+    end
+
+    subgraph CoreMesh ["bitchat2_core Mesh Engine (Phase 2 Part A)"]
+        Bridge["BridgeTransport\n(Inbound/Outbound Queues)"]
+        Fragment["Link Fragmenter & Reassembler\n(4B Header, MTU Bounded)"]
+        MeshNode["MeshNode Engine\n(Neighbor Table, Lockless Stats)"]
+        Relay["Adaptive Relay Policy\n(AdaptiveFlood: Density Jitter + k=2 Suppression)"]
+        Seen["Deduplication Cache\n(LruSeenCache / BloomSeenCache)"]
+        E2ESession["E2E PeerSessionManager\n(Multi-Hop Noise XX Sessions)"]
     end
 
     subgraph Protocol ["Protocol & Routing (Phases 3-6)"]
@@ -25,19 +35,22 @@ flowchart TD
         IrohBridge["Iroh QUIC Gateway Bridge"]
     end
 
-    subgraph CorePhase1 ["bitchat2_core (Phase 1 Foundation)"]
+    subgraph CorePhase1 ["bitchat2_core Foundation (Phase 1)"]
         Session["Session Layer\n(Noise_XX with Ed25519 Identity Binding)"]
         Envelope["Envelope Wire Format\n(31-byte header, hand-written binary codec, padding)"]
         Identity["Identity & KeyStore\n(Ed25519 signing key, PeerId, BLAKE3 ShortId)"]
-        Transport["Transport Layer\n(async Transport trait: SimNetwork / BLE)"]
+        Transport["Transport Trait\n(SimNetwork / BridgeTransport)"]
     end
 
-    Flutter --> FRB
-    FRB --> Modes
-    Modes --> WoT
-    Modes --> Router
-    Router --> IrohBridge
-    Router --> Session
+    FlutterUI --> NativeBLE
+    NativeBLE --> FRB
+    FRB --> Bridge
+    Bridge --> Fragment
+    Fragment --> MeshNode
+    MeshNode --> Relay
+    Relay --> Seen
+    MeshNode --> E2ESession
+    E2ESession --> Session
     Session --> Envelope
     Envelope --> Transport
     Identity -.-> Session
@@ -67,6 +80,29 @@ flowchart TD
 4. **`core::transport`**:
    - `Transport` trait defines asynchronous `send`, `broadcast`, `recv`, and `neighbors`.
    - `SimNetwork` provides an in-memory testbed with configurable adjacency topologies, latency simulation, and deterministic seeded packet loss.
+   - `BridgeTransport` provides cross-thread FIFO queue bridging connecting the Rust async runtime to foreign environments (Flutter / JNI / Kotlin BLE service).
+
+5. **`core::mesh::fragment`**:
+   - Slices envelopes exceeding radio MTU into indexed chunks with a 4-byte header (`frame_id`, `frag_idx`, `total_frags`).
+   - `Reassembler` reassembles out-of-order fragments with DoS memory caps (128 concurrent buffers, 4KB payload limit, 10s TTL expiration).
+
+6. **`core::mesh::seen`**:
+   - Deduplicates incoming envelopes to avoid infinite broadcast loops and redundant forwarding.
+   - `LruSeenCache` provides exact 0% false-positive deduplication with LRU eviction and TTL expiry.
+   - `BloomSeenCache` provides high-density memory-bounded 2-rotation Bloom filtering (ADR-0005).
+
+7. **`core::mesh::relay`**:
+   - `MeshNode` coordinates packet routing, neighbor tables, fragment reassembly, and lockless atomic telemetry (`MeshStats`).
+   - `AdaptiveFlood` mitigates broadcast storms using neighbor-density scaled forwarding delay $[0, D(N)]$ and counter-based duplicate suppression threshold $k=2$ (ADR-0006). Direct unicast neighbors and high-priority packets bypass delays and suppression.
+
+8. **`core::mesh::peer` (`PeerSessionManager`)**:
+   - Manages end-to-end multi-hop Noise XX handshakes and encrypted sessions across untrusted intermediary relays.
+   - Opaque relaying: Relays inspect only the 31-byte outer envelope header, while intermediate ciphertext remains indecipherable and tamper-proof.
+
+9. **`app/android` & Native Dual-Role BLE GATT (`BitchatBleService.kt`)**:
+   - Android Foreground Service maintaining persistent Bluetooth discovery under Doze mode.
+   - Dual-role operation: Simultaneously advertises service UUID `0xFD6F` via `BluetoothLeAdvertiser` and scans for mesh peers via `BluetoothLeScanner`.
+   - GATT Server and GATT Client write/notify characteristic `0x2A06` exchanges fragmented wire frames over PlatformChannel.
 
 ---
 
