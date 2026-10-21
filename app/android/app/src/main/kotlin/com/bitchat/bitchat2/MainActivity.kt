@@ -125,17 +125,26 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
         val intent = Intent(this, BitchatBleService::class.java)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
+                try {
+                    startForegroundService(intent)
+                } catch (fgsEx: Exception) {
+                    android.util.Log.w("MainActivity", "startForegroundService deferred: ${fgsEx.message}")
+                    startService(intent)
+                }
             } else {
                 startService(intent)
             }
-            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        } catch (e: Exception) {
+            android.util.Log.w("MainActivity", "Fallback startService failed: ${e.message}")
+        }
 
+        try {
+            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
             window.decorView.postDelayed({
                 bleService?.startMesh(shortIdHex)
-            }, 300)
+            }, 500)
         } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Failed to start BLE service", e)
+            android.util.Log.e("MainActivity", "Failed to bind BLE service", e)
         }
     }
 
