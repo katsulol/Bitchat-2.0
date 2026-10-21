@@ -3,6 +3,10 @@ name = "bitchat2_core"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "bitchat2_core"
+crate-type = ["lib", "cdylib", "staticlib"]
+
 [dependencies]
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "sync", "time"] }
 thiserror = "2.0.11"

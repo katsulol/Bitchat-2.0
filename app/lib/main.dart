@@ -1,0 +1,369 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'mesh_bridge.dart';
+
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const BitchatApp());
+}
+
+class BitchatApp extends StatelessWidget {
+  const BitchatApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Bitchat 2.0 Mesh',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF121212),
+        colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF4CAF50),
+          secondary: Color(0xFF81C784),
+          surface: Color(0xFF1E1E1E),
+        ),
+        useMaterial3: true,
+      ),
+      home: const MeshChatScreen(),
+    );
+  }
+}
+
+class MeshChatScreen extends StatefulWidget {
+  const MeshChatScreen({super.key});
+
+  @override
+  State<MeshChatScreen> createState() => _MeshChatScreenState();
+}
+
+class _MeshChatScreenState extends State<MeshChatScreen> {
+  final MeshBridge _bridge = MeshBridge();
+  final TextEditingController _inputController = TextEditingController();
+  final List<ChatMessage> _messages = [];
+  List<String> _peers = [];
+  String? _selectedRecipient; // null = Broadcast
+
+  @override
+  void initState() {
+    super.initState();
+    _bridge.startMesh();
+
+    _bridge.messages.listen((msg) {
+      setState(() {
+        _messages.add(msg);
+      });
+    });
+
+    _bridge.peers.listen((peers) {
+      setState(() {
+        _peers = peers;
+        if (_selectedRecipient != null && !_peers.contains(_selectedRecipient)) {
+          _selectedRecipient = null;
+        }
+      });
+    });
+  }
+
+  void _sendMessage() {
+    final text = _inputController.text.trim();
+    if (text.isEmpty) return;
+
+    if (_selectedRecipient == null) {
+      _bridge.sendBroadcast(text);
+    } else {
+      _bridge.sendDirect(_selectedRecipient!, text);
+    }
+
+    _inputController.clear();
+  }
+
+  @override
+  void dispose() {
+    _bridge.stopMesh();
+    _bridge.dispose();
+    _inputController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Bitchat 2.0 Mesh',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+            Row(
+              children: [
+                Text(
+                  'ID: ${_bridge.myShortId}',
+                  style: const TextStyle(fontSize: 12, color: Color(0xFF81C784), fontFamily: 'monospace'),
+                ),
+                const SizedBox(width: 6),
+                InkWell(
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: _bridge.myShortId));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('ShortId copied to clipboard')),
+                    );
+                  },
+                  child: const Icon(Icons.copy, size: 14, color: Colors.grey),
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            onPressed: _showNodeDetails,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Neighbors bar
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            color: const Color(0xFF181818),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.bluetooth,
+                  size: 18,
+                  color: _peers.isNotEmpty ? Colors.blue : Colors.grey,
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  '${_peers.length} Neighbors:',
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _peers.isEmpty
+                      ? const Text(
+                          'Scanning for BLE mesh peers...',
+                          style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
+                        )
+                      : SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: _peers.map((peer) {
+                              final isSelected = _selectedRecipient == peer;
+                              return Padding(
+                                padding: const EdgeInsets.only(right: 6),
+                                child: FilterChip(
+                                  selected: isSelected,
+                                  label: Text(
+                                    peer.length > 8 ? peer.substring(0, 8) : peer,
+                                    style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                                  ),
+                                  onSelected: (selected) {
+                                    setState(() {
+                                      _selectedRecipient = selected ? peer : null;
+                                    });
+                                  },
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                ),
+              ],
+            ),
+          ),
+
+          // Message feed
+          Expanded(
+            child: _messages.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.wifi_tethering, size: 48, color: Colors.grey.shade700),
+                        const SizedBox(height: 12),
+                        const Text(
+                          'No mesh messages yet.\nBroadcast or select a neighbor to chat.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final msg = _messages[index];
+                      final isMe = msg.sender == _bridge.myShortId;
+
+                      return Align(
+                        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          constraints: BoxConstraints(
+                            maxWidth: MediaQuery.of(context).size.width * 0.78,
+                          ),
+                          decoration: BoxDecoration(
+                            color: isMe ? const Color(0xFF2E7D32) : const Color(0xFF2C2C2C),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    isMe ? 'You' : (msg.sender.length > 8 ? msg.sender.substring(0, 8) : msg.sender),
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                      color: isMe ? Colors.green.shade200 : Colors.blue.shade200,
+                                      fontFamily: 'monospace',
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                    decoration: BoxDecoration(
+                                      color: msg.isBroadcast ? Colors.amber.shade900 : Colors.purple.shade900,
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      msg.isBroadcast ? 'PUB' : 'E2E',
+                                      style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '${msg.hopCount}h',
+                                    style: const TextStyle(fontSize: 9, color: Colors.white54),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                msg.text,
+                                style: const TextStyle(fontSize: 14),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+
+          // Message input bar
+          Container(
+            padding: const EdgeInsets.all(8),
+            color: const Color(0xFF1E1E1E),
+            child: SafeArea(
+              child: Row(
+                children: [
+                  ActionChip(
+                    avatar: Icon(
+                      _selectedRecipient == null ? Icons.campaign : Icons.lock,
+                      size: 16,
+                      color: _selectedRecipient == null ? Colors.amber : Colors.purpleAccent,
+                    ),
+                    label: Text(
+                      _selectedRecipient == null ? 'Broadcast' : 'Direct',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    onPressed: () {
+                      if (_peers.isNotEmpty && _selectedRecipient == null) {
+                        setState(() {
+                          _selectedRecipient = _peers.first;
+                        });
+                      } else {
+                        setState(() {
+                          _selectedRecipient = null;
+                        });
+                      }
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: _inputController,
+                      decoration: InputDecoration(
+                        hintText: _selectedRecipient == null ? 'Broadcast message to mesh...' : 'Private message...',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide.none,
+                        ),
+                        filled: true,
+                        fillColor: const Color(0xFF2C2C2C),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                      ),
+                      onSubmitted: (_) => _sendMessage(),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  IconButton(
+                    icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
+                    onPressed: _sendMessage,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showNodeDetails() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Bitchat 2.0 Node Details',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 12),
+              Text('ShortId: ${_bridge.myShortId}', style: const TextStyle(fontFamily: 'monospace')),
+              const SizedBox(height: 6),
+              const Text('Full Ed25519 PeerId:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+              Text(_bridge.myPeerId, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
+              const Divider(height: 24),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _statItem('Tx', _bridge.transmissions),
+                  _statItem('Delivered', _bridge.deliveries),
+                  _statItem('Suppressed', _bridge.relaysSuppressed),
+                  _statItem('Duplicates', _bridge.duplicatesDropped),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _statItem(String label, int val) {
+    return Column(
+      children: [
+        Text(val.toString(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4CAF50))),
+        Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+      ],
+    );
+  }
+}

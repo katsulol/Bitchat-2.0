@@ -20,7 +20,7 @@
 
 ### Part B — Flutter Shell & BLE Bridge (UNVERIFIED until physical device tests)
 - [x] Task 7 — Rust `BridgeTransport` and `flutter_rust_bridge` API (UNVERIFIED — awaiting hardware test)
-- [ ] Task 8 — Flutter app & dual-role BLE GATT layer (UNVERIFIED)
+- [x] Task 8 — Flutter app & dual-role BLE GATT layer (UNVERIFIED — awaiting hardware test)
 - [ ] Task 9 — Docs & device test plan (`docs/DEVICE_TEST_PLAN.md`) (UNVERIFIED)
 
 ## Test Counts & Verification Run
