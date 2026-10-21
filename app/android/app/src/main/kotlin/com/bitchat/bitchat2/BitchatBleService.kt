@@ -83,6 +83,27 @@ class BitchatBleService : Service() {
 
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         bluetoothAdapter = bluetoothManager?.adapter
+
+        try {
+            val filter = android.content.IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+            registerReceiver(bluetoothReceiver, filter)
+        } catch (_: Exception) {}
+    }
+
+    private val bluetoothReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: android.content.Intent?) {
+            if (intent?.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                if (state == BluetoothAdapter.STATE_ON) {
+                    Log.i(TAG, "Bluetooth switched to STATE_ON. Initializing mesh...")
+                    bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                    bluetoothAdapter = bluetoothManager?.adapter
+                    mainHandler.postDelayed({
+                        startMesh(localShortIdHex)
+                    }, 500)
+                }
+            }
+        }
     }
 
     fun hasRequiredPermissions(): Boolean {
@@ -188,6 +209,8 @@ class BitchatBleService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun startAdvertising() {
+        bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        bluetoothAdapter = bluetoothManager?.adapter
         advertiser = bluetoothAdapter?.bluetoothLeAdvertiser
         if (advertiser == null) {
             Log.e(TAG, "BLE advertiser not supported on this device")
@@ -204,14 +227,20 @@ class BitchatBleService : Service() {
         val pUuid = ParcelUuid(SERVICE_UUID)
         val shortBytes = hexStringToByteArray(localShortIdHex.ifEmpty { "0000000000000000" })
 
+        // Primary 31-byte packet: Service UUID only (<21 bytes)
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
             .addServiceUuid(pUuid)
+            .build()
+
+        // Scan response packet: ShortId service data (<22 bytes)
+        val scanResponse = AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
             .addServiceData(pUuid, shortBytes)
             .build()
 
         try {
-            advertiser?.startAdvertising(settings, data, advertiseCallback)
+            advertiser?.startAdvertising(settings, data, scanResponse, advertiseCallback)
             Log.i(TAG, "BLE advertising started successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start BLE advertising: ${e.message}")
@@ -332,24 +361,23 @@ class BitchatBleService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun startScanning() {
+        bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        bluetoothAdapter = bluetoothManager?.adapter
         scanner = bluetoothAdapter?.bluetoothLeScanner
         if (scanner == null) {
             Log.e(TAG, "BLE scanner not available")
             return
         }
 
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(SERVICE_UUID))
-            .build()
-
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
         try {
-            scanner?.startScan(listOf(filter), settings, scanCallback)
+            // Software filtering avoids OEM HAL hardware filter drops on OnePlus/Xiaomi
+            scanner?.startScan(null, settings, scanCallback)
             isScanning = true
-            Log.i(TAG, "BLE scan started")
+            Log.i(TAG, "BLE scan started (software-filtered)")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start BLE scan: ${e.message}")
         }
@@ -372,9 +400,10 @@ class BitchatBleService : Service() {
                     scanner?.stopScan(scanCallback)
                     mainHandler.postDelayed({
                         if (isScanning) {
-                            val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+                            bluetoothAdapter = bluetoothManager?.adapter
+                            scanner = bluetoothAdapter?.bluetoothLeScanner
                             val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
-                            scanner?.startScan(listOf(filter), settings, scanCallback)
+                            scanner?.startScan(null, settings, scanCallback)
                         }
                     }, 200)
                 } catch (_: Exception) {}
@@ -396,6 +425,15 @@ class BitchatBleService : Service() {
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
             val device = result?.device ?: return
+            val record = result.scanRecord ?: return
+
+            // Match Bitchat Service UUID 0xFD6F in either primary advertisement or scan response
+            val uuids = record.serviceUuids
+            val isMeshPeer = uuids != null && uuids.any {
+                it.uuid == SERVICE_UUID || it.uuid.toString().uppercase().contains("FD6F")
+            }
+            if (!isMeshPeer) return
+
             val addr = device.address
 
             // Prevent connection storm: Only connect if not already connected and not currently negotiating
@@ -559,6 +597,9 @@ class BitchatBleService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            unregisterReceiver(bluetoothReceiver)
+        } catch (_: Exception) {}
         stopMesh()
         super.onDestroy()
     }
