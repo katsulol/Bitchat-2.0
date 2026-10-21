@@ -1,4 +1,7 @@
+pub mod bridge;
 pub mod sim;
+
+pub use bridge::{BridgeHandle, BridgeTransport, OutboundFrame};
 
 use crate::error::Result;
 use crate::identity::ShortId;

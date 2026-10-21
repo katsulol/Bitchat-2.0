@@ -408,6 +408,23 @@ impl MeshNode<crate::transport::sim::SimTransport> {
     }
 }
 
+impl MeshNode<crate::transport::bridge::BridgeTransport> {
+    /// Non-blocking discrete step for mobile BLE bridge transport: processes pending relays
+    /// that matured by `now` and consumes any incoming frame queued from Flutter GATT.
+    pub async fn poll_step(&mut self, now: Instant) -> Result<bool> {
+        if self.fire_matured_relays(now).await? {
+            return Ok(true);
+        }
+
+        if let Some((sender, frame)) = self.transport.try_recv() {
+            self.handle_incoming_frame(sender, frame, now).await?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

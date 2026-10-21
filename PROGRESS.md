@@ -18,13 +18,13 @@
 - [x] Task 5 — Evaluation harness (`docs/EVALUATION.md`, `evaluation_results.csv`, 5 topologies, 20+ seeds)
 - [x] Task 6 — End-to-end encryption across relays (E2E Noise over mesh, `PeerSessionManager`, `docs/CRYPTO_REVIEW.md`)
 
-### Part B — Flutter Shell & BLE Bridge (UNVERIFIED until physical device tests) [PENDING HUMAN REVIEW]
-- [ ] Task 7 — Rust `BridgeTransport` and `flutter_rust_bridge` API (UNVERIFIED)
+### Part B — Flutter Shell & BLE Bridge (UNVERIFIED until physical device tests)
+- [x] Task 7 — Rust `BridgeTransport` and `flutter_rust_bridge` API (UNVERIFIED — awaiting hardware test)
 - [ ] Task 8 — Flutter app & dual-role BLE GATT layer (UNVERIFIED)
 - [ ] Task 9 — Docs & device test plan (`docs/DEVICE_TEST_PLAN.md`) (UNVERIFIED)
 
 ## Test Counts & Verification Run
-- **Total Tests Passing**: 51 tests (0 failures, 0 ignored)
+- **Total Tests Passing**: 54 tests (0 failures, 0 ignored)
   - `identity`: 6 tests
   - `envelope`: 10 tests
   - `crypto`: 8 tests (stateless out-of-order delivery, replay rejection, window age rejection, dropped packet resilience, domain separation)
@@ -33,6 +33,8 @@
   - `mesh::relay`: 7 tests (A-B-C 1-relay line, ring topology termination, TTL 7-hop propagation cutoff, neighbor-scaled delay bounds, direct unicast shortcut flood bypass, dense clique counter-based suppression, priority bypass non-suppression)
   - `mesh::peer`: 1 test (A-B-C relayed Noise XX handshake, mutual identity binding verification, opaque relay isolation at B, authenticated chat decryption at C, transit tampering Poly1305 rejection)
   - `transport::sim`: 4 tests
+  - `transport::bridge`: 2 tests (inbound/outbound queues, neighbor tracking, mesh node integration)
+  - `api`: 1 test (lifecycle, identity generation, direct & broadcast sends, stats snapshot)
 - **Evaluation Suite**: 200 simulation runs executed across 5 topologies (Line, Grid, Dense Cluster, Random Geometric, Partitioned Bridge) with 20 seeds at 5% loss. Full data logged in `docs/EVALUATION.md` and `evaluation_results.csv`.
 - **Clippy**: `cargo clippy --all-targets -- -D warnings` clean with zero warnings.
 - **Compiler Denies**: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` active in `core/src/lib.rs`.

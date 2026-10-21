@@ -5,6 +5,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+pub mod api;
 pub mod crypto;
 pub mod envelope;
 pub mod error;

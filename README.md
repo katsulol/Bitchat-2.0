@@ -14,7 +14,7 @@ Decentralized, privacy-preserving mesh messenger combining Bluetooth Low Energy 
   - [x] **Task 4**: Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression).
   - [x] **Task 5**: Evaluation harness (5 topologies, 20+ seeds, `docs/EVALUATION.md`, `evaluation_results.csv`).
   - [x] **Task 6**: End-to-end encryption across relays (E2E Noise over mesh, `PeerSessionManager`).
-  - [ ] **Task 7**: Rust `BridgeTransport` and `flutter_rust_bridge` API (Part B).
+  - [x] **Task 7**: Rust `BridgeTransport` and `flutter_rust_bridge` API (Part B).
   - [ ] **Task 8**: Flutter app & dual-role BLE GATT client/peripheral.
   - [ ] **Task 9**: Device test plan & documentation (`docs/DEVICE_TEST_PLAN.md`).
 
@@ -57,6 +57,17 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all
 ```
+
+### Flutter Rust Bridge (FRB) Code Generation
+- **Pinned Version**: `flutter_rust_bridge_codegen = 2.8.0`
+- **Install Tool**:
+  ```bash
+  cargo install flutter_rust_bridge_codegen --version 2.8.0
+  ```
+- **Generate Bindings**:
+  ```bash
+  flutter_rust_bridge_codegen generate
+  ```
 
 ### Windows Developer Note (Smart App Control Workaround)
 On Windows 11 with Smart App Control (Device Guard) enabled, debug binaries built in user directories may trigger code integrity blocks. If running on such machines, create a local, gitignored `.cargo/config.toml`:
