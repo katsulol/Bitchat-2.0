@@ -108,7 +108,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: const Text(
-                    'v2.0.2',
+                    'v2.0.3',
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,

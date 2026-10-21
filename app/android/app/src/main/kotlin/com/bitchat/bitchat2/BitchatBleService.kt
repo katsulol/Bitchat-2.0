@@ -112,6 +112,10 @@ class BitchatBleService : Service() {
             val connect = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
             val advertise = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED
             if (!scan || !connect || !advertise) return false
+        } else {
+            val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (!fine && !coarse) return false
         }
         return true
     }
@@ -233,9 +237,10 @@ class BitchatBleService : Service() {
             .addServiceUuid(pUuid)
             .build()
 
-        // Scan response packet: ShortId service data (<22 bytes)
+        // Scan response packet: Service UUID + ShortId service data (<22 bytes)
         val scanResponse = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
+            .addServiceUuid(pUuid)
             .addServiceData(pUuid, shortBytes)
             .build()
 
@@ -427,17 +432,31 @@ class BitchatBleService : Service() {
             val device = result?.device ?: return
             val record = result.scanRecord ?: return
 
-            // Match Bitchat Service UUID 0xFD6F in either primary advertisement or scan response
+            // Robust software match: check serviceUuids, serviceData keys, or raw bytes
             val uuids = record.serviceUuids
-            val isMeshPeer = uuids != null && uuids.any {
+            val hasUuid = uuids != null && uuids.any {
                 it.uuid == SERVICE_UUID || it.uuid.toString().uppercase().contains("FD6F")
             }
-            if (!isMeshPeer) return
+
+            val hasServiceData = record.serviceData.keys.any {
+                it.uuid == SERVICE_UUID || it.uuid.toString().uppercase().contains("FD6F")
+            }
+
+            val rawBytes = record.bytes ?: ByteArray(0)
+            var hasRawUuid = false
+            for (i in 0 until (rawBytes.size - 1)) {
+                if (rawBytes[i] == 0x6F.toByte() && rawBytes[i + 1] == 0xFD.toByte()) {
+                    hasRawUuid = true
+                    break
+                }
+            }
+
+            if (!hasUuid && !hasServiceData && !hasRawUuid) return
 
             val addr = device.address
 
-            // Prevent connection storm: Only connect if not already connected and not currently negotiating
-            if (outgoingGatts.containsKey(addr) || connectingDevices.contains(addr)) {
+            // Prevent redundant connection if already central, already peripheral, or currently connecting
+            if (outgoingGatts.containsKey(addr) || connectingDevices.contains(addr) || serverConnectedDevices.any { it.address == addr }) {
                 return
             }
 
@@ -449,12 +468,14 @@ class BitchatBleService : Service() {
                 connectingDevices.remove(addr)
             }, 8000)
 
-            device.connectGatt(
-                this@BitchatBleService,
-                false,
-                gattClientCallback,
-                BluetoothDevice.TRANSPORT_LE
-            )
+            mainHandler.post {
+                device.connectGatt(
+                    this@BitchatBleService,
+                    false,
+                    gattClientCallback,
+                    BluetoothDevice.TRANSPORT_LE
+                )
+            }
         }
 
         override fun onScanFailed(errorCode: Int) {

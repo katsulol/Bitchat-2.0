@@ -84,6 +84,8 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
             permissions.add(Manifest.permission.BLUETOOTH_ADVERTISE)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
+        permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -91,9 +93,17 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
     }
 
     private fun hasAllPermissions(): Boolean {
-        return getRequiredPermissions().all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val scan = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            val connect = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            val advertise = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED
+            if (!scan || !connect || !advertise) return false
+        } else {
+            val fine = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            val coarse = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (!fine && !coarse) return false
         }
+        return true
     }
 
     private fun checkPermissionsAndStart(shortIdHex: String) {
@@ -122,6 +132,11 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
     }
 
     private fun startBleService(shortIdHex: String) {
+        if (isBound && bleService != null) {
+            bleService?.startMesh(shortIdHex)
+            return
+        }
+
         val intent = Intent(this, BitchatBleService::class.java)
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -140,9 +155,6 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
 
         try {
             bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
-            window.decorView.postDelayed({
-                bleService?.startMesh(shortIdHex)
-            }, 500)
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Failed to bind BLE service", e)
         }
