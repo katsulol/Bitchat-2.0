@@ -7,7 +7,7 @@ Decentralized, privacy-preserving mesh messenger combining Bluetooth Low Energy 
 Phase 1 establishes the Rust core library (`bitchat2_core`):
 - [x] **Task 1: Workspace and tooling** (Cargo workspace, pinned dependencies, CI pipeline, quality enforcement skills)
 - [x] **Task 2: Error type and identity** (Ed25519 `Identity`, `PeerId`, `ShortId`, `zeroize`, `KeyStore`, secret redaction)
-- [ ] **Task 3: Envelope wire format** (31-byte compact header, hand-written codec, padding)
+- [x] **Task 3: Envelope wire format** (31-byte compact header, hand-written codec, `proptest`, reversible bucket padding)
 - [ ] **Task 4: Noise session with identity binding** (Noise_XX with signed static keys)
 - [ ] **Task 5: Transport trait and simulator** (Deterministic simulated mesh network)
 - [ ] **Task 6: Docs and wrap-up**
@@ -22,7 +22,8 @@ Phase 1 establishes the Rust core library (`bitchat2_core`):
 │   └── src/
 │       ├── lib.rs              # Library entry point
 │       ├── error.rs            # Unified Error type (thiserror)
-│       └── identity.rs         # Ed25519 identity, PeerId, ShortId, KeyStore
+│       ├── identity.rs         # Ed25519 identity, PeerId, ShortId, KeyStore
+│       └── envelope.rs         # 31-byte binary wire codec & padding
 ├── docs/                       # Architecture, threat model, crypto review, ADRs
 ├── .agents/skills/             # Engineering standards and review rules
 ├── .github/workflows/ci.yml    # Continuous integration workflow
