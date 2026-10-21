@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/services.dart';
 
@@ -69,13 +70,12 @@ class MeshBridge {
 
   Future<void> sendBroadcast(String text) async {
     transmissions++;
-    // In production, Rust node.send_broadcast() encodes envelope & splits fragments
-    // Forward outbound frame to BLE channel
-    final bytes = text.codeUnits;
+    // Wire format: Byte 0 = 0x00 (Broadcast), Bytes 1..N = UTF-8 text
+    final payload = Uint8List.fromList([0x00, ...utf8.encode(text)]);
     try {
       await _channel.invokeMethod('writeFrame', {
         'target': null,
-        'data': Uint8List.fromList(bytes),
+        'data': payload,
       });
     } catch (_) {}
 
@@ -91,11 +91,12 @@ class MeshBridge {
 
   Future<void> sendDirect(String recipientShortId, String text) async {
     transmissions++;
-    final bytes = text.codeUnits;
+    // Wire format: Byte 0 = 0x01 (Direct E2E), Bytes 1..N = UTF-8 text
+    final payload = Uint8List.fromList([0x01, ...utf8.encode(text)]);
     try {
       await _channel.invokeMethod('writeFrame', {
         'target': recipientShortId,
-        'data': Uint8List.fromList(bytes),
+        'data': payload,
       });
     } catch (_) {}
 
@@ -126,14 +127,19 @@ class MeshBridge {
         deliveries++;
         final address = call.arguments['address'] as String;
         final data = call.arguments['data'] as Uint8List;
-        final text = String.fromCharCodes(data);
 
-        _messageController.add(ChatMessage(
-          sender: address,
-          text: text,
-          hopCount: 1,
-          isBroadcast: true,
-        ));
+        if (data.isNotEmpty) {
+          final isBroadcast = data[0] == 0x00;
+          final text = utf8.decode(data.sublist(1), allowMalformed: true);
+
+          _messageController.add(ChatMessage(
+            sender: address,
+            recipient: isBroadcast ? null : myShortId,
+            text: text,
+            hopCount: 1,
+            isBroadcast: isBroadcast,
+          ));
+        }
         break;
     }
   }
