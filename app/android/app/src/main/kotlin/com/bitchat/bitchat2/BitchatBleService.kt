@@ -1,5 +1,6 @@
 package com.bitchat.bitchat2
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -9,12 +10,15 @@ import android.bluetooth.*
 import android.bluetooth.le.*
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelUuid
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
@@ -29,6 +33,7 @@ import java.util.concurrent.ConcurrentHashMap
 class BitchatBleService : Service() {
 
     companion object {
+        const val TAG = "BitchatBleService"
         const val CHANNEL_ID = "bitchat_ble_mesh"
         const val NOTIFICATION_ID = 2001
 
@@ -69,10 +74,22 @@ class BitchatBleService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startServiceInForeground()
+        if (hasRequiredPermissions()) {
+            startServiceInForeground()
+        }
 
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
         bluetoothAdapter = bluetoothManager?.adapter
+    }
+
+    fun hasRequiredPermissions(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val scan = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            val connect = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            val advertise = ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_ADVERTISE) == PackageManager.PERMISSION_GRANTED
+            if (!scan || !connect || !advertise) return false
+        }
+        return true
     }
 
     private fun createNotificationChannel() {
@@ -98,19 +115,29 @@ class BitchatBleService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "Foreground service start deferred: ${e.message}")
         }
     }
 
     @SuppressLint("MissingPermission")
     fun startMesh(localShortIdHex: String) {
+        if (!hasRequiredPermissions()) {
+            Log.w(TAG, "Cannot start mesh: missing Bluetooth permissions")
+            return
+        }
+        startServiceInForeground()
+
         val adapter = bluetoothAdapter ?: return
         if (!adapter.isEnabled) return
 
