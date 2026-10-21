@@ -11,5 +11,5 @@ Every file touching key generation, signing, verification, Noise handshakes, or 
 ## Registered Files
 | File | Primitives / Crates | Purpose | Reviewer Checklist |
 |---|---|---|---|
-| *Pending Task 2: `core/src/identity.rs`* | `ed25519-dalek`, `blake3`, `zeroize` | Ed25519 signing, verification, PeerId, ShortId derivation | Key generation entropy, zeroize on drop, Debug sanitization |
+| `core/src/identity.rs` | `ed25519-dalek`, `blake3`, `zeroize` | Ed25519 signing, verification, PeerId, ShortId derivation | 1. Key generation uses `OsRng`.<br>2. `ZeroizeOnDrop` implemented for `Identity`.<br>3. `Debug` implementations redact key material.<br>4. Rejection of tampered signatures. |
 | *Pending Task 4: `core/src/crypto.rs`* | `snow`, `ed25519-dalek` | Noise_XX handshake with Ed25519 static-key binding | Static key signing, peer identity validation, nonce safety |
