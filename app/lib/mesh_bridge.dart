@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/services.dart';
 
 /// Data model representing a mesh chat message.
@@ -45,10 +46,12 @@ class MeshBridge {
   }
 
   Future<void> startMesh() async {
-    // Generate deterministic/mock shortId for development if native bridge not built
+    // Generate unique shortId per node instance
     if (myShortId == "Initializing...") {
-      myShortId = "A1B2C3D4E5F60708";
-      myPeerId = "7f8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b";
+      final rand = Random();
+      final bytes = List<int>.generate(8, (_) => rand.nextInt(256));
+      myShortId = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join().toUpperCase();
+      myPeerId = "$myShortId${List<int>.generate(24, (_) => rand.nextInt(256)).map((b) => b.toRadixString(16).padLeft(2, '0')).join().toLowerCase()}";
     }
 
     try {

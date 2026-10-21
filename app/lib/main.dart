@@ -120,6 +120,19 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
         ),
         actions: [
           IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Rescan Mesh',
+            onPressed: () {
+              _bridge.startMesh();
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Rescanning BLE mesh...'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.info_outline),
             onPressed: _showNodeDetails,
           ),

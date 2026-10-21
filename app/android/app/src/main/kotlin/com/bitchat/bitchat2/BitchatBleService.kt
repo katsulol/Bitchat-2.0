@@ -12,10 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.os.Binder
-import android.os.Build
-import android.os.IBinder
-import android.os.ParcelUuid
+import android.os.*
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -23,7 +20,7 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Dual-role BLE Mesh Foreground Service.
+ * Robust Dual-role BLE Mesh Foreground Service.
  *
  * Runs simultaneously as:
  * 1. BLE Peripheral (Advertising service 0xFD6F, hosting GATT server)
@@ -44,17 +41,23 @@ class BitchatBleService : Service() {
     }
 
     private val binder = LocalBinder()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var bluetoothManager: BluetoothManager? = null
     private var bluetoothAdapter: BluetoothAdapter? = null
 
     // Peripheral
     private var advertiser: BluetoothLeAdvertiser? = null
     private var gattServer: BluetoothGattServer? = null
+    private val serverConnectedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>()
 
     // Central
     private var scanner: BluetoothLeScanner? = null
-    private val connectedCentrals = ConcurrentHashMap<String, BluetoothGatt>()
-    private val subscribedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>()
+    private val outgoingGatts = ConcurrentHashMap<String, BluetoothGatt>()
+    private val connectingDevices = ConcurrentHashMap.newKeySet<String>()
+
+    // Current Short ID
+    private var localShortIdHex: String = ""
+    private var isScanning = false
 
     // Callback listener for Flutter integration
     var listener: BleEventListener? = null
@@ -131,40 +134,75 @@ class BitchatBleService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    fun startMesh(localShortIdHex: String) {
+    fun startMesh(shortIdHex: String) {
         if (!hasRequiredPermissions()) {
             Log.w(TAG, "Cannot start mesh: missing Bluetooth permissions")
             return
         }
         startServiceInForeground()
+        localShortIdHex = shortIdHex
 
         val adapter = bluetoothAdapter ?: return
-        if (!adapter.isEnabled) return
+        if (!adapter.isEnabled) {
+            Log.w(TAG, "Bluetooth adapter is disabled")
+            return
+        }
 
-        startGattServer()
-        startAdvertising(localShortIdHex)
-        startScanning()
+        // Clean any existing state
+        stopMeshInternal()
+
+        mainHandler.postDelayed({
+            startGattServer()
+            startAdvertising()
+            startScanning()
+            startPeriodicScanRefresh()
+        }, 300)
     }
 
     @SuppressLint("MissingPermission")
     fun stopMesh() {
-        stopAdvertising()
-        stopScanning()
-        closeGattServer()
+        stopPeriodicScanRefresh()
+        stopMeshInternal()
     }
 
     @SuppressLint("MissingPermission")
-    private fun startAdvertising(localShortIdHex: String) {
-        advertiser = bluetoothAdapter?.bluetoothLeAdvertiser ?: return
+    private fun stopMeshInternal() {
+        stopAdvertising()
+        stopScanning()
+        closeGattServer()
+        disconnectAllOutgoing()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun disconnectAllOutgoing() {
+        for ((_, gatt) in outgoingGatts) {
+            try {
+                gatt.disconnect()
+                gatt.close()
+            } catch (_: Exception) {}
+        }
+        outgoingGatts.clear()
+        connectingDevices.clear()
+        serverConnectedDevices.clear()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startAdvertising() {
+        advertiser = bluetoothAdapter?.bluetoothLeAdvertiser
+        if (advertiser == null) {
+            Log.e(TAG, "BLE advertiser not supported on this device")
+            return
+        }
 
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
             .setConnectable(true)
+            .setTimeout(0)
             .build()
 
         val pUuid = ParcelUuid(SERVICE_UUID)
-        val shortBytes = hexStringToByteArray(localShortIdHex)
+        val shortBytes = hexStringToByteArray(localShortIdHex.ifEmpty { "0000000000000000" })
 
         val data = AdvertiseData.Builder()
             .setIncludeDeviceName(false)
@@ -172,7 +210,12 @@ class BitchatBleService : Service() {
             .addServiceData(pUuid, shortBytes)
             .build()
 
-        advertiser?.startAdvertising(settings, data, advertiseCallback)
+        try {
+            advertiser?.startAdvertising(settings, data, advertiseCallback)
+            Log.i(TAG, "BLE advertising started successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start BLE advertising: ${e.message}")
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -183,14 +226,23 @@ class BitchatBleService : Service() {
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
-        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {}
-        override fun onStartFailure(errorCode: Int) {}
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            Log.i(TAG, "AdvertiseCallback onStartSuccess")
+        }
+        override fun onStartFailure(errorCode: Int) {
+            Log.e(TAG, "AdvertiseCallback onStartFailure code: $errorCode")
+        }
     }
 
     @SuppressLint("MissingPermission")
     private fun startGattServer() {
         val manager = bluetoothManager ?: return
-        gattServer = manager.openGattServer(this, gattServerCallback)
+        try {
+            gattServer = manager.openGattServer(this, gattServerCallback)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open GATT server: ${e.message}")
+            return
+        }
 
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
 
@@ -212,6 +264,7 @@ class BitchatBleService : Service() {
         service.addCharacteristic(writeChar)
         service.addCharacteristic(notifyChar)
         gattServer?.addService(service)
+        Log.i(TAG, "GATT server configured and running")
     }
 
     @SuppressLint("MissingPermission")
@@ -225,12 +278,18 @@ class BitchatBleService : Service() {
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(device: BluetoothDevice?, status: Int, newState: Int) {
-            val addr = device?.address ?: return
+            val dev = device ?: return
+            val addr = dev.address
+            Log.i(TAG, "GattServer onConnectionStateChange: $addr -> $newState (status: $status)")
+
             if (newState == BluetoothProfile.STATE_CONNECTED) {
+                serverConnectedDevices.add(dev)
                 listener?.onPeerConnected(addr)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                subscribedDevices.remove(device)
-                listener?.onPeerDisconnected(addr)
+                serverConnectedDevices.remove(dev)
+                if (!outgoingGatts.containsKey(addr)) {
+                    listener?.onPeerDisconnected(addr)
+                }
             }
         }
 
@@ -263,7 +322,7 @@ class BitchatBleService : Service() {
             value: ByteArray?
         ) {
             if (descriptor?.uuid == CCCD_UUID && device != null) {
-                subscribedDevices.add(device)
+                serverConnectedDevices.add(device)
             }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
@@ -273,7 +332,11 @@ class BitchatBleService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun startScanning() {
-        scanner = bluetoothAdapter?.bluetoothLeScanner ?: return
+        scanner = bluetoothAdapter?.bluetoothLeScanner
+        if (scanner == null) {
+            Log.e(TAG, "BLE scanner not available")
+            return
+        }
 
         val filter = ScanFilter.Builder()
             .setServiceUuid(ParcelUuid(SERVICE_UUID))
@@ -283,14 +346,50 @@ class BitchatBleService : Service() {
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        scanner?.startScan(listOf(filter), settings, scanCallback)
+        try {
+            scanner?.startScan(listOf(filter), settings, scanCallback)
+            isScanning = true
+            Log.i(TAG, "BLE scan started")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start BLE scan: ${e.message}")
+        }
     }
 
     @SuppressLint("MissingPermission")
     private fun stopScanning() {
+        if (!isScanning) return
         try {
             scanner?.stopScan(scanCallback)
+            isScanning = false
         } catch (_: Exception) {}
+    }
+
+    private val scanRefreshRunnable = object : Runnable {
+        @SuppressLint("MissingPermission")
+        override fun run() {
+            if (hasRequiredPermissions() && isScanning) {
+                try {
+                    scanner?.stopScan(scanCallback)
+                    mainHandler.postDelayed({
+                        if (isScanning) {
+                            val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+                            val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
+                            scanner?.startScan(listOf(filter), settings, scanCallback)
+                        }
+                    }, 200)
+                } catch (_: Exception) {}
+            }
+            mainHandler.postDelayed(this, 15000)
+        }
+    }
+
+    private fun startPeriodicScanRefresh() {
+        mainHandler.removeCallbacks(scanRefreshRunnable)
+        mainHandler.postDelayed(scanRefreshRunnable, 15000)
+    }
+
+    private fun stopPeriodicScanRefresh() {
+        mainHandler.removeCallbacks(scanRefreshRunnable)
     }
 
     private val scanCallback = object : ScanCallback() {
@@ -299,94 +398,161 @@ class BitchatBleService : Service() {
             val device = result?.device ?: return
             val addr = device.address
 
-            if (!connectedCentrals.containsKey(addr)) {
-                device.connectGatt(this@BitchatBleService, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
+            // Prevent connection storm: Only connect if not already connected and not currently negotiating
+            if (outgoingGatts.containsKey(addr) || connectingDevices.contains(addr)) {
+                return
             }
+
+            Log.i(TAG, "Discovered mesh peer $addr. Connecting GATT client...")
+            connectingDevices.add(addr)
+
+            // Connection timeout fallback
+            mainHandler.postDelayed({
+                connectingDevices.remove(addr)
+            }, 8000)
+
+            device.connectGatt(
+                this@BitchatBleService,
+                false,
+                gattClientCallback,
+                BluetoothDevice.TRANSPORT_LE
+            )
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e(TAG, "Scan failed with error code: $errorCode")
         }
     }
 
     private val gattClientCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
-            val addr = gatt?.device?.address ?: return
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                connectedCentrals[addr] = gatt
-                gatt.requestMtu(512)
-                gatt.discoverServices()
+            val g = gatt ?: return
+            val addr = g.device.address
+            connectingDevices.remove(addr)
+
+            Log.i(TAG, "GattClient onConnectionStateChange: $addr -> $newState (status: $status)")
+
+            if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                outgoingGatts[addr] = g
+                g.requestMtu(512)
+                mainHandler.postDelayed({
+                    g.discoverServices()
+                }, 300)
                 listener?.onPeerConnected(addr)
-            } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                connectedCentrals.remove(addr)
-                listener?.onPeerDisconnected(addr)
-                try { gatt.close() } catch (_: Exception) {}
+            } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
+                outgoingGatts.remove(addr)
+                try {
+                    g.disconnect()
+                    g.close()
+                } catch (_: Exception) {}
+                if (!serverConnectedDevices.any { it.address == addr }) {
+                    listener?.onPeerDisconnected(addr)
+                }
             }
         }
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
-            val service = gatt?.getService(SERVICE_UUID) ?: return
+            if (status != BluetoothGatt.GATT_SUCCESS) return
+            val g = gatt ?: return
+            val service = g.getService(SERVICE_UUID) ?: return
             val notifyChar = service.getCharacteristic(CHAR_NOTIFY_UUID) ?: return
 
-            gatt.setCharacteristicNotification(notifyChar, true)
-            val cccd = notifyChar.getDescriptor(CCCD_UUID)
-            if (cccd != null) {
+            g.setCharacteristicNotification(notifyChar, true)
+            val cccd = notifyChar.getDescriptor(CCCD_UUID) ?: return
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            } else {
+                @Suppress("DEPRECATION")
                 cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(cccd)
+                @Suppress("DEPRECATION")
+                g.writeDescriptor(cccd)
             }
+            Log.i(TAG, "Subscribed to peer notifications: ${g.device.address}")
         }
 
+        // Support for pre-Android 13
+        @Deprecated("Deprecated in Java")
         override fun onCharacteristicChanged(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?) {
             val addr = gatt?.device?.address ?: return
             val data = characteristic?.value ?: return
             listener?.onFrameReceived(addr, data)
         }
-    }
 
-    /**
-     * Transmit frame to peer(s).
-     */
-    @SuppressLint("MissingPermission")
-    fun writeFrame(targetAddress: String?, data: ByteArray) {
-        if (targetAddress != null) {
-            val gatt = connectedCentrals[targetAddress]
-            if (gatt != null) {
-                val service = gatt.getService(SERVICE_UUID)
-                val writeChar = service?.getCharacteristic(CHAR_WRITE_UUID)
-                if (writeChar != null) {
-                    writeChar.value = data
-                    writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                    gatt.writeCharacteristic(writeChar)
-                }
-            }
-        } else {
-            // Broadcast: notify all subscribed peripherals and write to all connected centrals
-            val notifyChar = gattServer?.getService(SERVICE_UUID)?.getCharacteristic(CHAR_NOTIFY_UUID)
-            if (notifyChar != null) {
-                notifyChar.value = data
-                for (dev in subscribedDevices) {
-                    try {
-                        gattServer?.notifyCharacteristicChanged(dev, notifyChar, false)
-                    } catch (_: Exception) {}
-                }
-            }
-
-            for ((_, gatt) in connectedCentrals) {
-                val service = gatt.getService(SERVICE_UUID)
-                val writeChar = service?.getCharacteristic(CHAR_WRITE_UUID)
-                if (writeChar != null) {
-                    writeChar.value = data
-                    writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                    gatt.writeCharacteristic(writeChar)
-                }
-            }
+        // Support for Android 13+ (API 33+)
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            val addr = gatt.device.address
+            listener?.onFrameReceived(addr, value)
         }
     }
 
+    /**
+     * Transmit frame to peer(s) bidirectionally.
+     * Uses outgoing GATT client writes AND incoming GATT server notifications.
+     */
+    @SuppressLint("MissingPermission")
+    fun writeFrame(targetAddress: String?, data: ByteArray) {
+        var sentCount = 0
+
+        // 1. Send via outgoing GATT client connections (we are central)
+        for ((addr, gatt) in outgoingGatts) {
+            if (targetAddress == null || targetAddress == addr) {
+                val service = gatt.getService(SERVICE_UUID)
+                val writeChar = service?.getCharacteristic(CHAR_WRITE_UUID)
+                if (writeChar != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeCharacteristic(writeChar, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        writeChar.value = data
+                        @Suppress("DEPRECATION")
+                        writeChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                        @Suppress("DEPRECATION")
+                        gatt.writeCharacteristic(writeChar)
+                    }
+                    sentCount++
+                }
+            }
+        }
+
+        // 2. Send via GATT server notifications (we are peripheral to connected centrals)
+        val notifyChar = gattServer?.getService(SERVICE_UUID)?.getCharacteristic(CHAR_NOTIFY_UUID)
+        if (notifyChar != null) {
+            for (dev in serverConnectedDevices) {
+                if (targetAddress == null || targetAddress == dev.address) {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            gattServer?.notifyCharacteristicChanged(dev, notifyChar, false, data)
+                        } else {
+                            @Suppress("DEPRECATION")
+                            notifyChar.value = data
+                            @Suppress("DEPRECATION")
+                            gattServer?.notifyCharacteristicChanged(dev, notifyChar, false)
+                        }
+                        sentCount++
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Notification write failed: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        Log.i(TAG, "writeFrame dispatched to $sentCount channels (target: $targetAddress)")
+    }
+
     private fun hexStringToByteArray(s: String): ByteArray {
-        val len = s.length
+        val clean = if (s.length % 2 != 0) "0$s" else s
+        val len = clean.length
         val data = ByteArray(len / 2)
         var i = 0
         while (i < len) {
-            data[i / 2] = ((Character.digit(s[i], 16) shl 4) + Character.digit(s[i + 1], 16)).toByte()
+            data[i / 2] = ((Character.digit(clean[i], 16) shl 4) + Character.digit(clean[i + 1], 16)).toByte()
             i += 2
         }
         return data
