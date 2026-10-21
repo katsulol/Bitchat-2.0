@@ -390,6 +390,24 @@ impl<T: Transport> MeshNode<T> {
     }
 }
 
+impl MeshNode<crate::transport::sim::SimTransport> {
+    /// Non-blocking discrete step: processes pending relays that matured by `now`
+    /// and immediately consumes any available incoming frame from the simulation inbox.
+    /// Returns `true` if any event was processed.
+    pub async fn poll_step(&mut self, now: Instant) -> Result<bool> {
+        if self.fire_matured_relays(now).await? {
+            return Ok(true);
+        }
+
+        if let Some((sender, frame)) = self.transport.try_recv() {
+            self.handle_incoming_frame(sender, frame, now).await?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

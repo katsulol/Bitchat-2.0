@@ -232,6 +232,17 @@ impl Transport for SimTransport {
     }
 }
 
+impl SimTransport {
+    /// Non-blocking check for available frame in the inbox.
+    pub fn try_recv(&self) -> Option<(ShortId, Vec<u8>)> {
+        if let Ok(mut rx) = self.rx.try_lock() {
+            rx.try_recv().ok()
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

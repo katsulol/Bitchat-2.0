@@ -15,7 +15,7 @@
 - [x] Task 2 — Link-layer fragmentation (`Fragmenter`, `Reassembler`, DoS bounds)
 - [x] Task 3 — Mesh node and relay engine (`MeshNode`, `NaiveFlood` baseline, `MeshStats`)
 - [x] Task 4 — Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression, ADR-0006)
-- [ ] Task 5 — Evaluation harness (`docs/EVALUATION.md`, 5 topologies, 20+ seeds)
+- [x] Task 5 — Evaluation harness (`docs/EVALUATION.md`, `evaluation_results.csv`, 5 topologies, 20+ seeds)
 - [ ] Task 6 — End-to-end encryption across relays (E2E Noise over mesh)
 
 ### Part B — Flutter Shell & BLE Bridge (UNVERIFIED until physical device tests)
@@ -32,6 +32,7 @@
   - `mesh::fragment`: 9 tests (single fragment fast path, empty frame, multi-fragment ordered, out-of-order reassembly, duplicate ignored, missing fragment timeout, overflow eviction, malformed header validation, proptest split/reassemble roundtrip)
   - `mesh::relay`: 7 tests (A-B-C 1-relay line, ring topology termination, TTL 7-hop propagation cutoff, neighbor-scaled delay bounds, direct unicast shortcut flood bypass, dense clique counter-based suppression, priority bypass non-suppression)
   - `transport::sim`: 4 tests
+- **Evaluation Harness**: 200 simulation runs executed across 5 topologies (Line, Grid, Dense Cluster, Random Geometric, Partitioned Bridge) with 20 seeds at 5% loss. Full data logged in `docs/EVALUATION.md` and `evaluation_results.csv`.
 - **Clippy**: `cargo clippy --all-targets -- -D warnings` clean with zero warnings.
 - **Compiler Denies**: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` active in `core/src/lib.rs`.
 - **Formatter**: `cargo fmt --check` clean.
