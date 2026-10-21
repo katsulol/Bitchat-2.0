@@ -13,7 +13,7 @@
 ### Part A — Rust Mesh Logic (Simulator-verified)
 - [x] Task 1 — Seen-message cache (`LruSeenCache`, `BloomSeenCache`, ADR-0005)
 - [x] Task 2 — Link-layer fragmentation (`Fragmenter`, `Reassembler`, DoS bounds)
-- [ ] Task 3 — Mesh node and relay engine (`MeshNode`, `NaiveFlood` baseline, `MeshStats`)
+- [x] Task 3 — Mesh node and relay engine (`MeshNode`, `NaiveFlood` baseline, `MeshStats`)
 - [ ] Task 4 — Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression)
 - [ ] Task 5 — Evaluation harness (`docs/EVALUATION.md`, 5 topologies, 20+ seeds)
 - [ ] Task 6 — End-to-end encryption across relays (E2E Noise over mesh)
@@ -24,12 +24,13 @@
 - [ ] Task 9 — Docs & device test plan (`docs/DEVICE_TEST_PLAN.md`) (UNVERIFIED)
 
 ## Test Counts & Verification Run
-- **Total Tests Passing**: 43 tests (0 failures, 0 ignored)
+- **Total Tests Passing**: 46 tests (0 failures, 0 ignored)
   - `identity`: 6 tests
   - `envelope`: 10 tests
   - `crypto`: 8 tests (including stateless out-of-order delivery, replay rejection, window age rejection, dropped packet resilience, domain separation)
   - `mesh::seen`: 6 tests (LRU no false negatives, capacity bound, TTL expiry, Bloom no false negatives, measured FPR <= 3.5%, 2-rotation expiry)
   - `mesh::fragment`: 9 tests (single fragment fast path, empty frame, multi-fragment ordered, out-of-order reassembly, duplicate ignored, missing fragment timeout, overflow eviction, malformed header validation, proptest split/reassemble roundtrip)
+  - `mesh::relay`: 3 tests (A-B-C 1-relay line, ring topology termination, TTL 7-hop propagation cutoff)
   - `transport::sim`: 4 tests
 - **Clippy**: `cargo clippy --all-targets -- -D warnings` clean with zero warnings.
 - **Compiler Denies**: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` active in `core/src/lib.rs`.

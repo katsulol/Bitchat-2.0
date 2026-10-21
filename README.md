@@ -10,7 +10,7 @@ Decentralized, privacy-preserving mesh messenger combining Bluetooth Low Energy 
   - [x] **Task 0**: Phase 1 carry-overs (Stateless Noise transport, sliding replay window, domain separation, compiler no-panic denies).
   - [x] **Task 1**: Seen-message cache (`LruSeenCache`, `BloomSeenCache`, ADR-0005).
   - [x] **Task 2**: Link-layer fragmentation (`Fragmenter`, `Reassembler`, memory bounds).
-  - [ ] **Task 3**: Mesh node & baseline relay engine (`NaiveFlood`, `MeshStats`).
+  - [x] **Task 3**: Mesh node & baseline relay engine (`NaiveFlood`, `MeshStats`).
   - [ ] **Task 4**: Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression).
   - [ ] **Task 5**: Evaluation harness (5 topologies, 20+ seeds, `docs/EVALUATION.md`).
   - [ ] **Task 6**: End-to-end encryption across relays (E2E Noise over mesh).
