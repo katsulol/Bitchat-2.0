@@ -1,3 +1,18 @@
 /target
 **/*.rs.bk
 *.pdb
+*.key
+identity.key
+.cargo/config.toml
+
+# Flutter & Dart artifacts
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/.packages
+app/build/
+app/android/.gradle/
+app/android/local.properties
+app/android/app/build/
+app/ios/.symlinks/
+app/ios/Pods/

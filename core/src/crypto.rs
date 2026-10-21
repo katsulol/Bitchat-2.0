@@ -1,31 +1,104 @@
 // CRYPTO-REVIEW:
 // What it does: Implements secure forward-secret sessions using the Noise Protocol Framework
-// (Noise_XX_25519_ChaChaPoly_BLAKE2s) with Ed25519 identity key binding.
+// (Noise_XX_25519_ChaChaPoly_BLAKE2s) with Ed25519 identity key binding and stateless
+// AEAD transport with a sliding replay window.
 // Primitives / crates: `snow` (Noise Protocol), `ed25519-dalek` (Identity signatures).
 // Reviewer checklist:
 // 1. Noise pattern is strictly Noise_XX_25519_ChaChaPoly_BLAKE2s.
 // 2. Both initiator and responder generate a dedicated X25519 Noise static keypair and sign
 //    their Noise static public key using their long-term Ed25519 Identity signing key.
-// 3. The handshake payload contains (PeerId: 32 bytes || Ed25519 Signature: 64 bytes).
-// 4. Before completing handshake and transitioning to Transport mode, the remote signature
+// 3. Domain separation prefix `b"bitchat2/noise-static/v1"` is prepended before signing and
+//    verifying the Noise static key.
+// 4. The handshake payload contains (PeerId: 32 bytes || Ed25519 Signature: 64 bytes).
+// 5. Before completing handshake and transitioning to Transport mode, the remote signature
 //    over the remote Noise static public key MUST verify against the claimed PeerId.
-// 5. If verification fails, handshake immediately terminates and returns Error::Crypto.
-// 6. Transport mode protects all data with ChaCha20-Poly1305 AEAD; tampered or replayed
-//    packets fail decryption.
-// 7. Debug implementation for Session explicitly redacts all key and state material.
+// 6. Transport mode uses snow's StatelessTransportState with an explicit 64-bit big-endian
+//    nonce prepended to each encrypted payload: [nonce: 8 bytes] || [ciphertext: N bytes + 16-byte tag].
+// 7. A 128-packet sliding replay window accepts out-of-order packets while rejecting duplicate nonces
+//    and nonces older than the window.
+// 8. The replay window is updated ONLY after AEAD tag verification succeeds.
+// 9. Debug implementation for Session explicitly redacts all key and state material.
 
 use std::fmt;
 
 use ed25519_dalek::Signature;
 use snow::params::NoiseParams;
-use snow::{Builder, HandshakeState, TransportState};
+use snow::{Builder, HandshakeState, StatelessTransportState};
 
 use crate::error::{Error, Result};
 use crate::identity::{Identity, PeerId};
 
 pub const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
+pub const NOISE_STATIC_SIG_CONTEXT: &[u8] = b"bitchat2/noise-static/v1";
 pub const BINDING_PAYLOAD_LEN: usize = 32 + 64; // PeerId (32) + Signature (64)
 pub const MAX_HANDSHAKE_BUF: usize = 512;
+pub const REPLAY_WINDOW_SIZE: u64 = 128;
+pub const NONCE_LEN: usize = 8;
+pub const TAG_LEN: usize = 16;
+
+/// Produce canonical domain-separated message for Noise static key signing.
+pub fn noise_static_binding_message(noise_static_pubkey: &[u8]) -> Vec<u8> {
+    let mut msg = Vec::with_capacity(NOISE_STATIC_SIG_CONTEXT.len() + noise_static_pubkey.len());
+    msg.extend_from_slice(NOISE_STATIC_SIG_CONTEXT);
+    msg.extend_from_slice(noise_static_pubkey);
+    msg
+}
+
+/// 128-packet sliding replay window for out-of-order mesh delivery.
+#[derive(Clone, Debug, Default)]
+pub struct ReplayWindow {
+    max_nonce: u64,
+    bitmap: u128,
+    initialized: bool,
+}
+
+impl ReplayWindow {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if nonce is valid (not replayed and within acceptable window).
+    pub fn is_valid(&self, nonce: u64) -> bool {
+        if !self.initialized {
+            return true;
+        }
+        if nonce > self.max_nonce {
+            true
+        } else {
+            let diff = self.max_nonce - nonce;
+            if diff >= REPLAY_WINDOW_SIZE {
+                false // Too old
+            } else {
+                ((self.bitmap >> diff) & 1) == 0 // Unseen
+            }
+        }
+    }
+
+    /// Record newly verified nonce. Must be called only after AEAD decryption succeeds.
+    pub fn update(&mut self, nonce: u64) {
+        if !self.initialized {
+            self.initialized = true;
+            self.max_nonce = nonce;
+            self.bitmap = 1;
+            return;
+        }
+
+        if nonce > self.max_nonce {
+            let diff = nonce - self.max_nonce;
+            if diff >= REPLAY_WINDOW_SIZE {
+                self.bitmap = 1;
+            } else {
+                self.bitmap = (self.bitmap << diff) | 1;
+            }
+            self.max_nonce = nonce;
+        } else {
+            let diff = self.max_nonce - nonce;
+            if diff < REPLAY_WINDOW_SIZE {
+                self.bitmap |= 1u128 << diff;
+            }
+        }
+    }
+}
 
 enum SessionState {
     Handshaking {
@@ -37,13 +110,15 @@ enum SessionState {
         read_count: usize,
     },
     Transport {
-        transport: TransportState,
+        transport: StatelessTransportState,
         remote_peer_id: PeerId,
+        send_nonce: u64,
+        replay_window: ReplayWindow,
     },
     Failed,
 }
 
-/// Secure session wrapper providing Noise XX mutual authentication and AEAD transport.
+/// Secure session wrapper providing Noise XX mutual authentication and stateless AEAD transport.
 pub struct Session {
     state: SessionState,
 }
@@ -68,8 +143,9 @@ impl Session {
             .generate_keypair()
             .map_err(|e| Error::Crypto(format!("Failed to generate static keypair: {e}")))?;
 
-        // Sign the Noise static public key with the Ed25519 identity key
-        let sig = identity.sign(&static_keypair.public);
+        // Domain-separated signature over the Noise static public key
+        let binding_msg = noise_static_binding_message(&static_keypair.public);
+        let sig = identity.sign(&binding_msg);
 
         let mut local_binding_payload = Vec::with_capacity(BINDING_PAYLOAD_LEN);
         local_binding_payload.extend_from_slice(identity.peer_id().as_bytes());
@@ -124,10 +200,6 @@ impl Session {
                 write_count,
                 ..
             } => {
-                // Determine whether to attach binding payload on this message
-                // In XX:
-                // Initiator sends payload on message 3 (write_count == 1)
-                // Responder sends payload on message 2 (write_count == 0)
                 let should_send_payload =
                     (*is_initiator && *write_count == 1) || (!*is_initiator && *write_count == 0);
 
@@ -195,7 +267,6 @@ impl Session {
 
                 *read_count += 1;
 
-                // If remote side sent its static key in this step, verify identity binding
                 if let Some(remote_static) = handshake.get_remote_static() {
                     if remote_peer_id.is_none() {
                         if payload_len < BINDING_PAYLOAD_LEN {
@@ -211,8 +282,9 @@ impl Session {
                         sig_bytes.copy_from_slice(&payload_buf[32..96]);
                         let signature = Signature::from_bytes(&sig_bytes);
 
-                        // VERIFY that remote PeerId actually signed the Noise static public key
-                        Identity::verify(&peer_id, remote_static, &signature).map_err(|e| {
+                        // VERIFY domain-separated signature over the Noise static public key
+                        let binding_msg = noise_static_binding_message(remote_static);
+                        Identity::verify(&peer_id, &binding_msg, &signature).map_err(|e| {
                             Error::Crypto(format!(
                                 "Identity binding signature verification failed: {e}"
                             ))
@@ -251,12 +323,14 @@ impl Session {
     fn transition_to_transport(&mut self, remote_peer_id: PeerId) -> Result<()> {
         let old_state = std::mem::replace(&mut self.state, SessionState::Failed);
         if let SessionState::Handshaking { handshake, .. } = old_state {
-            let transport = handshake
-                .into_transport_mode()
-                .map_err(|e| Error::Crypto(format!("Failed to enter transport mode: {e}")))?;
+            let transport = handshake.into_stateless_transport_mode().map_err(|e| {
+                Error::Crypto(format!("Failed to enter stateless transport mode: {e}"))
+            })?;
             self.state = SessionState::Transport {
                 transport,
                 remote_peer_id,
+                send_nonce: 0,
+                replay_window: ReplayWindow::new(),
             };
             Ok(())
         } else {
@@ -266,15 +340,28 @@ impl Session {
         }
     }
 
-    /// Encrypt plaintext using Noise ChaCha20-Poly1305 AEAD in transport mode.
+    /// Encrypt plaintext into a stateless frame carrying an explicit 64-bit nonce:
+    /// `[nonce: 8 bytes] || [ciphertext: N bytes + 16-byte Poly1305 MAC tag]`.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
         match &mut self.state {
-            SessionState::Transport { transport, .. } => {
-                let mut out = vec![0u8; plaintext.len() + 16];
+            SessionState::Transport {
+                transport,
+                send_nonce,
+                ..
+            } => {
+                let nonce = *send_nonce;
+                let mut out = vec![0u8; NONCE_LEN + plaintext.len() + TAG_LEN];
+                out[0..NONCE_LEN].copy_from_slice(&nonce.to_be_bytes());
+
                 let len = transport
-                    .write_message(plaintext, &mut out)
-                    .map_err(|e| Error::Crypto(format!("Encryption failed: {e}")))?;
-                out.truncate(len);
+                    .write_message(nonce, plaintext, &mut out[NONCE_LEN..])
+                    .map_err(|e| Error::Crypto(format!("Stateless encryption failed: {e}")))?;
+                out.truncate(NONCE_LEN + len);
+
+                *send_nonce = send_nonce
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Crypto("Send nonce counter overflowed".into()))?;
+
                 Ok(out)
             }
             _ => Err(Error::Crypto(
@@ -283,15 +370,42 @@ impl Session {
         }
     }
 
-    /// Decrypt ciphertext using Noise ChaCha20-Poly1305 AEAD in transport mode.
-    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    /// Decrypt a stateless frame with explicit 64-bit nonce, verifying against the sliding replay window.
+    pub fn decrypt(&mut self, frame: &[u8]) -> Result<Vec<u8>> {
         match &mut self.state {
-            SessionState::Transport { transport, .. } => {
-                let mut out = vec![0u8; ciphertext.len()];
+            SessionState::Transport {
+                transport,
+                replay_window,
+                ..
+            } => {
+                if frame.len() < NONCE_LEN + TAG_LEN {
+                    return Err(Error::Crypto(format!(
+                        "Encrypted frame too short: expected at least {} bytes, got {}",
+                        NONCE_LEN + TAG_LEN,
+                        frame.len()
+                    )));
+                }
+
+                let mut nonce_bytes = [0u8; 8];
+                nonce_bytes.copy_from_slice(&frame[0..NONCE_LEN]);
+                let nonce = u64::from_be_bytes(nonce_bytes);
+
+                // Check replay window before attempting decryption
+                if !replay_window.is_valid(nonce) {
+                    return Err(Error::Crypto(format!(
+                        "Replay window rejected nonce {nonce}"
+                    )));
+                }
+
+                let mut out = vec![0u8; frame.len() - NONCE_LEN];
                 let len = transport
-                    .read_message(ciphertext, &mut out)
-                    .map_err(|e| Error::Crypto(format!("Decryption failed: {e}")))?;
+                    .read_message(nonce, &frame[NONCE_LEN..], &mut out)
+                    .map_err(|e| Error::Crypto(format!("Stateless decryption failed: {e}")))?;
                 out.truncate(len);
+
+                // Update replay window only after successful AEAD tag authentication
+                replay_window.update(nonce);
+
                 Ok(out)
             }
             _ => Err(Error::Crypto(
@@ -316,15 +430,12 @@ mod tests {
     use super::*;
 
     fn establish_handshake(initiator: &mut Session, responder: &mut Session) -> Result<()> {
-        // Step 1: Initiator -> Responder (Msg 1: -> e)
         let msg1 = initiator.write_handshake_vec()?;
         responder.read_handshake(&msg1)?;
 
-        // Step 2: Responder -> Initiator (Msg 2: <- e, ee, s, es)
         let msg2 = responder.write_handshake_vec()?;
         initiator.read_handshake(&msg2)?;
 
-        // Step 3: Initiator -> Responder (Msg 3: -> s, se)
         let msg3 = initiator.write_handshake_vec()?;
         responder.read_handshake(&msg3)?;
 
@@ -361,36 +472,31 @@ mod tests {
     }
 
     #[test]
-    fn test_handshake_rejects_forged_identity_signature() {
+    fn test_handshake_rejects_missing_domain_separation_prefix() {
         let alice_id = Identity::generate();
         let bob_id = Identity::generate();
-        let eve_id = Identity::generate(); // attacker
 
         let mut alice = Session::initiator(&alice_id).unwrap();
         let mut bob = Session::responder(&bob_id).unwrap();
 
-        // Step 1: Alice -> Bob
         let msg1 = alice.write_handshake_vec().unwrap();
         bob.read_handshake(&msg1).unwrap();
 
-        // Step 2: Bob writes msg2, but Eve intercepts and replaces identity with Eve's
-        // without valid signature over Bob's Noise static key
         let mut msg2 = bob.write_handshake_vec().unwrap();
 
-        // Tamper with payload in msg2: substitute Eve's PeerId
-        // In msg2, the encrypted payload is at the end. Tampering with ciphertext causes Poly1305 failure;
-        // Even if an attacker produces plaintext with Eve's key and forged signature, verify() fails.
-        let forged_sig = eve_id.sign(b"invalid static key target");
-        let mut forged_payload = Vec::new();
-        forged_payload.extend_from_slice(eve_id.peer_id().as_bytes());
-        forged_payload.extend_from_slice(&forged_sig.to_bytes());
+        // Simulate signature made WITHOUT domain separation prefix
+        let dummy_static = [42u8; 32];
+        let raw_sig = bob_id.sign(&dummy_static); // Signed raw static key directly without context
 
-        // Verify that verifying against a mismatched Noise static key fails
-        let dummy_static = [7u8; 32];
-        let verify_result = Identity::verify(&eve_id.peer_id(), &dummy_static, &forged_sig);
-        assert!(verify_result.is_err());
+        // Verifying raw signature against domain-separated binding message fails
+        let binding_msg = noise_static_binding_message(&dummy_static);
+        let verify_result = Identity::verify(&bob_id.peer_id(), &binding_msg, &raw_sig);
+        assert!(
+            verify_result.is_err(),
+            "Raw signature without domain prefix must fail"
+        );
 
-        // Now test tampered msg2 directly against Alice:
+        // Tamper with msg2 payload to ensure read_handshake rejects invalid signature
         let last_idx = msg2.len() - 1;
         msg2[last_idx] ^= 0x55;
         let read_res = alice.read_handshake(&msg2);
@@ -410,15 +516,15 @@ mod tests {
         let plaintext = b"critical mesh command";
         let mut ciphertext = alice.encrypt(plaintext).unwrap();
 
-        // Tamper with one bit of ciphertext
-        ciphertext[0] ^= 0x01;
+        // Tamper with one bit of ciphertext (after 8-byte nonce)
+        ciphertext[10] ^= 0x01;
 
         let res = bob.decrypt(&ciphertext);
         assert!(res.is_err());
     }
 
     #[test]
-    fn test_replayed_ciphertext_rejected_by_nonce() {
+    fn test_stateless_out_of_order_within_window_succeeds() {
         let alice_id = Identity::generate();
         let bob_id = Identity::generate();
 
@@ -427,19 +533,97 @@ mod tests {
 
         establish_handshake(&mut alice, &mut bob).unwrap();
 
-        let msg1 = alice.encrypt(b"frame 1").unwrap();
-        let msg2 = alice.encrypt(b"frame 2").unwrap();
+        // Generate 4 packets with nonces 0, 1, 2, 3
+        let p0 = alice.encrypt(b"packet 0").unwrap();
+        let p1 = alice.encrypt(b"packet 1").unwrap();
+        let p2 = alice.encrypt(b"packet 2").unwrap();
+        let p3 = alice.encrypt(b"packet 3").unwrap();
 
-        // Bob decrypts msg1 then msg2
-        assert_eq!(bob.decrypt(&msg1).unwrap(), b"frame 1");
-        assert_eq!(bob.decrypt(&msg2).unwrap(), b"frame 2");
+        // Deliver out of order: 0, 2, 1, 3
+        assert_eq!(bob.decrypt(&p0).unwrap(), b"packet 0");
+        assert_eq!(bob.decrypt(&p2).unwrap(), b"packet 2");
+        assert_eq!(bob.decrypt(&p1).unwrap(), b"packet 1");
+        assert_eq!(bob.decrypt(&p3).unwrap(), b"packet 3");
+    }
 
-        // Attacker replays msg1
-        let replay_res = bob.decrypt(&msg1);
+    #[test]
+    fn test_stateless_replay_rejected_by_replay_window() {
+        let alice_id = Identity::generate();
+        let bob_id = Identity::generate();
+
+        let mut alice = Session::initiator(&alice_id).unwrap();
+        let mut bob = Session::responder(&bob_id).unwrap();
+
+        establish_handshake(&mut alice, &mut bob).unwrap();
+
+        let p0 = alice.encrypt(b"first packet").unwrap();
+        let p1 = alice.encrypt(b"second packet").unwrap();
+
+        assert_eq!(bob.decrypt(&p0).unwrap(), b"first packet");
+        assert_eq!(bob.decrypt(&p1).unwrap(), b"second packet");
+
+        // Replay of p0 rejected
+        let replay_res = bob.decrypt(&p0);
         assert!(
             replay_res.is_err(),
-            "Replay of msg1 must be rejected by AEAD nonce"
+            "Replay of p0 must be rejected by window"
         );
+
+        // Replay of p1 rejected
+        let replay_res_1 = bob.decrypt(&p1);
+        assert!(
+            replay_res_1.is_err(),
+            "Replay of p1 must be rejected by window"
+        );
+    }
+
+    #[test]
+    fn test_stateless_packet_older_than_window_rejected() {
+        let alice_id = Identity::generate();
+        let bob_id = Identity::generate();
+
+        let mut alice = Session::initiator(&alice_id).unwrap();
+        let mut bob = Session::responder(&bob_id).unwrap();
+
+        establish_handshake(&mut alice, &mut bob).unwrap();
+
+        let p0 = alice.encrypt(b"packet 0").unwrap();
+
+        // Advance Alice by generating 130 packets (exceeding REPLAY_WINDOW_SIZE of 128)
+        let mut latest = Vec::new();
+        for i in 1..=135 {
+            latest = alice.encrypt(format!("packet {i}").as_bytes()).unwrap();
+        }
+
+        // Deliver latest packet (nonce 135) to Bob
+        let decrypted_latest = bob.decrypt(&latest).unwrap();
+        assert_eq!(decrypted_latest, b"packet 135");
+
+        // Now attempt to deliver p0 (nonce 0, age is 135 > 128)
+        let stale_res = bob.decrypt(&p0);
+        assert!(
+            stale_res.is_err(),
+            "Packet older than 128 nonces must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_stateless_dropped_packet_does_not_break_later_packets() {
+        let alice_id = Identity::generate();
+        let bob_id = Identity::generate();
+
+        let mut alice = Session::initiator(&alice_id).unwrap();
+        let mut bob = Session::responder(&bob_id).unwrap();
+
+        establish_handshake(&mut alice, &mut bob).unwrap();
+
+        let _dropped = alice.encrypt(b"dropped packet 0").unwrap();
+        let p1 = alice.encrypt(b"packet 1").unwrap();
+        let p2 = alice.encrypt(b"packet 2").unwrap();
+
+        // Bob never receives dropped packet 0, receives packet 1 and 2
+        assert_eq!(bob.decrypt(&p1).unwrap(), b"packet 1");
+        assert_eq!(bob.decrypt(&p2).unwrap(), b"packet 2");
     }
 
     #[test]

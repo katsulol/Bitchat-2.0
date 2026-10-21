@@ -2,29 +2,35 @@
 
 Decentralized, privacy-preserving mesh messenger combining Bluetooth Low Energy (BLE) hopping with internet-bridged Iroh P2P QUIC gateways.
 
-## Current Status: Phase 1 — Foundation & Core Tooling (Completed — 15% Total Share)
+## Current Status: Phase 2 — BLE Mesh Logic, Evaluation Harness, Flutter Shell (In Progress)
 
-All Phase 1 tasks are implemented, verified with comprehensive tests, and passing CI criteria:
-- [x] **Task 1: Workspace and tooling** (Cargo workspace, pinned dependencies, CI pipeline, quality enforcement skills)
-- [x] **Task 2: Error type and identity** (Ed25519 `Identity`, `PeerId`, `ShortId`, `zeroize`, `KeyStore`, secret redaction)
-- [x] **Task 3: Envelope wire format** (31-byte compact header, hand-written codec, `proptest`, reversible bucket padding)
-- [x] **Task 4: Noise session with identity binding** (Noise_XX with signed static keys, replay/tamper rejection)
-- [x] **Task 5: Transport trait and simulator** (Deterministic simulated mesh network with loss and latency)
-- [x] **Task 6: Docs and wrap-up** (Architecture, threat model, ADRs, crypto review registry)
+### Roadmap & Progress
+- **Phase 1 (15%)**: Foundation, identity, wire format, crypto, simulated transport. [Completed]
+- **Phase 2 (20%)**: BLE mesh logic, adaptive relaying, evaluation harness, Flutter shell. [In Progress]
+  - [x] **Task 0**: Phase 1 carry-overs (Stateless Noise transport, sliding replay window, domain separation, compiler no-panic denies).
+  - [ ] **Task 1**: Seen-message cache (`LruSeenCache`, `BloomSeenCache`).
+  - [ ] **Task 2**: Link-layer fragmentation (`Fragmenter`, `Reassembler`, memory bounds).
+  - [ ] **Task 3**: Mesh node & baseline relay engine (`NaiveFlood`, `MeshStats`).
+  - [ ] **Task 4**: Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression).
+  - [ ] **Task 5**: Evaluation harness (5 topologies, 20+ seeds, `docs/EVALUATION.md`).
+  - [ ] **Task 6**: End-to-end encryption across relays (E2E Noise over mesh).
+  - [ ] **Task 7**: Rust `BridgeTransport` and `flutter_rust_bridge` API.
+  - [ ] **Task 8**: Flutter app & dual-role BLE GATT client/peripheral.
+  - [ ] **Task 9**: Device test plan & documentation (`docs/DEVICE_TEST_PLAN.md`).
 
 ## Repository Structure
 
 ```
 .
-├── Cargo.toml                  # Cargo workspace definition & build profiles
+├── Cargo.toml                  # Cargo workspace definition
 ├── core/
 │   ├── Cargo.toml              # bitchat2_core library definition
 │   └── src/
-│       ├── lib.rs              # Library entry point
+│       ├── lib.rs              # Library entry point & compiler lint denies
 │       ├── error.rs            # Unified Error type (thiserror)
 │       ├── identity.rs         # Ed25519 identity, PeerId, ShortId, KeyStore
 │       ├── envelope.rs         # 31-byte binary wire codec & padding
-│       ├── crypto.rs           # Noise_XX session with identity binding
+│       ├── crypto.rs           # Stateless Noise_XX with sliding replay window
 │       └── transport/          # Transport trait and SimNetwork simulator
 │           ├── mod.rs
 │           └── sim.rs
@@ -34,16 +40,16 @@ All Phase 1 tasks are implemented, verified with comprehensive tests, and passin
 │   ├── CRYPTO_REVIEW.md        # Cryptographic audit checklist & registered files
 │   └── DECISIONS.md            # Architectural Decision Records (ADRs)
 ├── .agents/skills/             # Engineering standards and review rules
-│   ├── rust-build/SKILL.md     # Build & lint enforcement rules
-│   └── crypto-review/SKILL.md  # Cryptographic review protocols
 ├── .github/workflows/ci.yml    # Continuous integration workflow
-└── PHASE_1.md                  # Phase 1 specification
+├── PHASE_1.md                  # Phase 1 specification
+└── PHASE_2.md                  # Phase 2 specification
 ```
 
-## Quick Start & Verification
+## Developer Setup & Verification
 
 ### Prerequisites
 - Rust stable toolchain 1.98+ (`rustc`, `cargo`, `clippy`, `rustfmt`)
+- Flutter SDK 3.47+ & Android SDK / NDK
 
 ### Running Verification Suite
 ```bash
@@ -51,3 +57,19 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all
 ```
+
+### Windows Developer Note (Smart App Control Workaround)
+On Windows 11 with Smart App Control (Device Guard) enabled, debug binaries built in user directories may trigger code integrity blocks. If running on such machines, create a local, gitignored `.cargo/config.toml`:
+
+```toml
+[profile.dev]
+incremental = false
+debug = 0
+opt-level = 0
+
+[profile.test]
+incremental = false
+debug = 0
+opt-level = 0
+```
+This flag is excluded from git to ensure CI runners compile with standard release and benchmark profiles.

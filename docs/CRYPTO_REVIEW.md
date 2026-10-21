@@ -7,9 +7,10 @@ Every file touching key generation, signing, verification, Noise handshakes, or 
 2. Verify all sensitive keys are wiped from memory on drop (`zeroize`).
 3. Verify debug implementations never log secret key bytes.
 4. Verify nonces are never reused or rolled over insecurely.
+5. Verify sliding replay windows advance only AFTER successful AEAD tag authentication.
 
 ## Registered Files
 | File | Primitives / Crates | Purpose | Reviewer Checklist |
 |---|---|---|---|
 | `core/src/identity.rs` | `ed25519-dalek`, `blake3`, `zeroize` | Ed25519 signing, verification, PeerId, ShortId derivation | 1. Key generation uses `OsRng`.<br>2. `ZeroizeOnDrop` implemented for `Identity`.<br>3. `Debug` implementations redact key material.<br>4. Rejection of tampered signatures. |
-| `core/src/crypto.rs` | `snow`, `ed25519-dalek` | Noise_XX handshake with Ed25519 static-key binding & ChaChaPoly AEAD transport | 1. Strict pattern `Noise_XX_25519_ChaChaPoly_BLAKE2s`.<br>2. Local Noise static key is signed with Ed25519 long-term identity.<br>3. Remote signature over Noise static key must verify before transitioning to transport.<br>4. Replay attack rejection by monotonic AEAD nonce.<br>5. Redacted `Debug` output prevents session key leakage. |
+| `core/src/crypto.rs` | `snow`, `ed25519-dalek` | Noise_XX handshake with Ed25519 static-key binding & stateless ChaChaPoly AEAD transport with sliding replay window | 1. Strict pattern `Noise_XX_25519_ChaChaPoly_BLAKE2s`.<br>2. Domain separation prefix `b"bitchat2/noise-static/v1"` included in static key signature.<br>3. Handshake verifies remote identity signature before transport transition.<br>4. Stateless transport mode uses explicit 64-bit nonce carried in payload header.<br>5. 128-packet sliding replay window rejects duplicate nonces and stale frames.<br>6. Replay window advances only after successful AEAD MAC verification.<br>7. Redacted `Debug` output prevents session key leakage. |

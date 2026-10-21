@@ -1,29 +1,38 @@
-# Phase 1 Progress Log
+# Phase 2 Progress Log
 
 ## Status Overview
-- Total Phase 1 Share: 15%
-- Current Status: Phase 1 Fully Completed (Tasks 1–6)
+- Cumulative Phase 1 + 2 Share: 35%
+- Phase 2 Share: 20%
+- Current Status: Task 0 completed (Starting Part A: Task 1 next)
 
-## Task Checklist
-- [x] Task 1 — Workspace and tooling
-- [x] Task 2 — Error type and identity
-- [x] Task 3 — Envelope wire format
-- [x] Task 4 — Noise session with identity binding (CRYPTO-REVIEW)
-- [x] Task 5 — Transport trait and simulator
-- [x] Task 6 — Docs and wrap-up
+## Phase 2 Task Checklist
+
+### Carry-over & Hardening
+- [x] Task 0 — Phase 1 carry-over fixes (Stateless Noise, 128-packet sliding replay window, domain-separated handshake signature, compiler-enforced no-panic denies, clean committed configs)
+
+### Part A — Rust Mesh Logic (Simulator-verified)
+- [ ] Task 1 — Seen-message cache (`LruSeenCache`, `BloomSeenCache`)
+- [ ] Task 2 — Link-layer fragmentation (`Fragmenter`, `Reassembler`, DoS bounds)
+- [ ] Task 3 — Mesh node and relay engine (`MeshNode`, `NaiveFlood` baseline, `MeshStats`)
+- [ ] Task 4 — Adaptive relay policy (`AdaptiveFlood`, density-scaled delay, suppression)
+- [ ] Task 5 — Evaluation harness (`docs/EVALUATION.md`, 5 topologies, 20+ seeds)
+- [ ] Task 6 — End-to-end encryption across relays (E2E Noise over mesh)
+
+### Part B — Flutter Shell & BLE Bridge (UNVERIFIED until physical device tests)
+- [ ] Task 7 — Rust `BridgeTransport` and `flutter_rust_bridge` API (UNVERIFIED)
+- [ ] Task 8 — Flutter app & dual-role BLE GATT layer (UNVERIFIED)
+- [ ] Task 9 — Docs & device test plan (`docs/DEVICE_TEST_PLAN.md`) (UNVERIFIED)
 
 ## Test Counts & Verification Run
-- **Total Tests Passing**: 25 tests (0 failures, 0 ignored)
-  - `identity`: 6 tests (key generation, signing/verification, tampered signature failure, short id derivation, memory keystore roundtrip, file keystore roundtrip, secret debug redaction)
-  - `envelope`: 10 tests (proptest arbitrary roundtrip, reject wrong version, reject truncated header, reject payload length mismatch, reject hop count > ttl, reject ttl > 7, reject buffer > 512, relay hop increment, unknown msg_type roundtrip, reversible padding helper)
-  - `crypto`: 5 tests (Noise XX full handshake, bidirectional AEAD encryption, forged identity signature rejection, tampered ciphertext rejection, replayed ciphertext nonce rejection, session debug redaction)
-  - `transport::sim`: 4 tests (two-node direct exchange, three-node line topology isolation, link removal delivery cessation, seeded loss determinism)
+- **Total Tests Passing**: 28 tests (0 failures, 0 ignored)
+  - `identity`: 6 tests
+  - `envelope`: 10 tests
+  - `crypto`: 8 tests (including stateless out-of-order delivery, replay rejection, window age rejection, dropped packet resilience, domain separation)
+  - `transport::sim`: 4 tests
 - **Clippy**: `cargo clippy --all-targets -- -D warnings` clean with zero warnings.
+- **Compiler Denies**: `#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` active in `core/src/lib.rs`.
 - **Formatter**: `cargo fmt --check` clean.
-- **Panic Audit**: Zero `unwrap()`, `expect()`, or `panic!` calls in non-test production code.
 
-## Not Verified (Phase 1 Boundaries)
-- **Physical Bluetooth Low Energy (BLE) Hardware**: Real-world 2.4 GHz radio propagation, BLE advertising packet size limits (31-byte legacy / extended advertising), and OS-level Bluetooth stack quirks are simulated purely in software (`SimNetwork`). No hardware verification is claimed.
-- **Hardware Security Module / OS Keystores**: Android Keystore and iOS Keychain hardware-backed key persistence are not tested; `MemoryKeyStore` and development-only `FileKeyStore` are used for Phase 1.
-- **Multi-hop Mesh Flooding & Relay Routing**: Automated mesh forwarding, deduplication caches, and rate-limiting are out of scope for Phase 1 and will be introduced in Phase 2.
-- **Iroh Internet Bridging & Gateway Dialing**: QUIC P2P tunneling over Iroh is out of scope for Phase 1 and will be integrated in Phase 3.
+## Not Verified (Phase 2 Boundaries)
+- **Physical BLE Radio Hardware**: Real 2.4 GHz radio propagation, BLE advertising packet size limits (31-byte legacy / extended advertising), and OS-level Bluetooth stack quirks are simulated in software until Part B hardware testing.
+- **Part B Items**: All mobile app and hardware BLE integration tasks remain explicitly marked UNVERIFIED until physical multi-phone testing is executed.
