@@ -23,6 +23,7 @@ pub struct BridgeStats {
 /// Decoded chat message delivered to Flutter layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeMessage {
+    pub msg_id: String,
     pub sender: String,
     pub recipient: Option<String>,
     pub text: String,
@@ -52,15 +53,16 @@ fn get_service() -> &'static RwLock<Option<BitchatCoreService>> {
 
 fn hex_to_short_id(hex_str: &str) -> Result<ShortId, String> {
     let hex_clean = hex_str.trim().trim_start_matches("0x");
-    if hex_clean.len() != 16 {
+    if !hex_clean.is_ascii() || hex_clean.len() != 16 {
         return Err(format!(
-            "Invalid ShortId hex length: expected 16 characters, got {}",
+            "Invalid ShortId: expected 16 ASCII hexadecimal characters, got len {}",
             hex_clean.len()
         ));
     }
     let mut bytes = [0u8; 8];
     for i in 0..8 {
-        bytes[i] = u8::from_str_radix(&hex_clean[i * 2..i * 2 + 2], 16)
+        let byte_str = &hex_clean[i * 2..i * 2 + 2];
+        bytes[i] = u8::from_str_radix(byte_str, 16)
             .map_err(|e| format!("Invalid hex character at byte {i}: {e}"))?;
     }
     Ok(ShortId(bytes))
@@ -69,6 +71,9 @@ fn hex_to_short_id(hex_str: &str) -> Result<ShortId, String> {
 /// Initialize the Bitchat core service, loading or generating long-term identity in `storage_path`.
 pub async fn init(storage_path: String) -> Result<String, String> {
     let mut lock = get_service().write().await;
+    if let Some(svc) = lock.as_ref() {
+        return Ok(svc.node.identity().short_id().to_string());
+    }
 
     let path = PathBuf::from(storage_path).join("identity.key");
     let keystore = FileKeyStore::new(path);
@@ -145,14 +150,8 @@ pub async fn send_to(recipient_short_id: String, text: String) -> Result<String,
         }
     }
 
-    // Direct addressed send (or initiates handshake if none exists)
-    let msg_id = svc
-        .node
-        .send_to(target, text.into_bytes())
-        .await
-        .map_err(|e| format!("Direct send failed: {e}"))?;
-
-    Ok(hex::encode(msg_id))
+    // Fail closed: Do NOT silently send plaintext
+    Err("Secure E2E session not established with peer. Initiate handshake first.".to_string())
 }
 
 /// Get current routing metrics snapshot.
@@ -212,8 +211,18 @@ pub async fn poll_inbound() -> Result<Option<BridgeMessage>, String> {
     let mut lock = get_service().write().await;
     let svc = lock.as_mut().ok_or("Service not initialized")?;
 
-    // Step discrete event loop with current timestamp
-    while let Ok(true) = svc.node.poll_step(std::time::Instant::now()).await {}
+    // Step discrete event loop with bounded budget (max 10 steps per poll)
+    let mut steps = 0;
+    while steps < 10 {
+        match svc.node.poll_step(std::time::Instant::now()).await {
+            Ok(true) => steps += 1,
+            Ok(false) => break,
+            Err(e) => {
+                tracing::warn!("poll_step error: {e}");
+                break;
+            }
+        }
+    }
 
     if let Some(msg) = svc.node.recv_inbound() {
         // If message is a handshake frame, handle it internally
@@ -226,6 +235,7 @@ pub async fn poll_inbound() -> Result<Option<BridgeMessage>, String> {
         if let Ok(decrypted) = svc.peer_mgr.decrypt_inbound(&msg) {
             let text = String::from_utf8_lossy(&decrypted.plaintext).to_string();
             return Ok(Some(BridgeMessage {
+                msg_id: hex::encode(msg.msg_id),
                 sender: decrypted.origin_sender.to_string(),
                 recipient: Some(svc.node.short_id().to_string()),
                 text,
@@ -234,19 +244,21 @@ pub async fn poll_inbound() -> Result<Option<BridgeMessage>, String> {
             }));
         }
 
-        let text = String::from_utf8_lossy(&msg.payload).to_string();
-        let is_broadcast = msg.recipient.is_broadcast();
-        return Ok(Some(BridgeMessage {
-            sender: msg.origin_sender.to_string(),
-            recipient: if is_broadcast {
-                None
-            } else {
-                Some(msg.recipient.to_string())
-            },
-            text,
-            hop_count: msg.hop_count,
-            is_broadcast,
-        }));
+        // Explicit public chat message validation
+        if msg.msg_type == MsgType::Chat && msg.recipient.is_broadcast() {
+            let text = String::from_utf8_lossy(&msg.payload).to_string();
+            return Ok(Some(BridgeMessage {
+                msg_id: hex::encode(msg.msg_id),
+                sender: msg.origin_sender.to_string(),
+                recipient: None,
+                text,
+                hop_count: msg.hop_count,
+                is_broadcast: true,
+            }));
+        }
+
+        // Section 1.D: Reject failed decryption or invalid message type! Never display ciphertext as text!
+        return Ok(None);
     }
 
     Ok(None)

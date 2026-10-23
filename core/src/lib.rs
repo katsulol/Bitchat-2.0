@@ -9,6 +9,7 @@ pub mod api;
 pub mod crypto;
 pub mod envelope;
 pub mod error;
+pub mod ffi;
 pub mod identity;
 pub mod mesh;
 pub mod transport;

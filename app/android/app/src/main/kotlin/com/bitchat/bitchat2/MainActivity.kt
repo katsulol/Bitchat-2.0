@@ -61,12 +61,20 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
                         stopBleService()
                         result.success(true)
                     }
+                    "getAppStoragePath" -> {
+                        result.success(applicationContext.filesDir.absolutePath)
+                    }
                     "writeFrame" -> {
                         val target = call.argument<String>("target")
                         val data = call.argument<ByteArray>("data")
                         if (data != null) {
-                            bleService?.writeFrame(target, data)
-                            result.success(true)
+                            val svc = bleService
+                            if (svc != null) {
+                                svc.writeFrame(target, data)
+                                result.success(true)
+                            } else {
+                                result.error("SERVICE_NOT_BOUND", "BitchatBleService is not bound", null)
+                            }
                         } else {
                             result.error("INVALID_ARG", "Data buffer cannot be null", null)
                         }
@@ -169,21 +177,21 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
         stopService(intent)
     }
 
-    override fun onPeerConnected(address: String) {
+    override fun onPeerConnected(shortId: String) {
         runOnUiThread {
-            methodChannel?.invokeMethod("onPeerConnected", mapOf("address" to address))
+            methodChannel?.invokeMethod("onPeerConnected", mapOf("shortId" to shortId))
         }
     }
 
-    override fun onPeerDisconnected(address: String) {
+    override fun onPeerDisconnected(shortId: String) {
         runOnUiThread {
-            methodChannel?.invokeMethod("onPeerDisconnected", mapOf("address" to address))
+            methodChannel?.invokeMethod("onPeerDisconnected", mapOf("shortId" to shortId))
         }
     }
 
-    override fun onFrameReceived(address: String, data: ByteArray) {
+    override fun onFrameReceived(senderShortId: String, data: ByteArray) {
         runOnUiThread {
-            methodChannel?.invokeMethod("onFrameReceived", mapOf("address" to address, "data" to data))
+            methodChannel?.invokeMethod("onFrameReceived", mapOf("sender" to senderShortId, "data" to data))
         }
     }
 

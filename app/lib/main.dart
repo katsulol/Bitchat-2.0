@@ -52,30 +52,41 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
     _bridge.messages.listen((msg) {
       setState(() {
         _messages.add(msg);
+        if (_messages.length > 500) {
+          _messages.removeRange(0, _messages.length - 500);
+        }
       });
     });
 
     _bridge.peers.listen((peers) {
       setState(() {
         _peers = peers;
-        if (_selectedRecipient != null && !_peers.contains(_selectedRecipient)) {
-          _selectedRecipient = null;
-        }
+        // corrections.md: Never auto-reset selected recipient to broadcast on disconnect!
       });
     });
   }
 
-  void _sendMessage() {
+  Future<void> _sendMessage() async {
     final text = _inputController.text.trim();
     if (text.isEmpty) return;
 
-    if (_selectedRecipient == null) {
-      _bridge.sendBroadcast(text);
-    } else {
-      _bridge.sendDirect(_selectedRecipient!, text);
+    try {
+      if (_selectedRecipient == null) {
+        await _bridge.sendBroadcast(text);
+      } else {
+        await _bridge.sendDirect(_selectedRecipient!, text);
+      }
+      _inputController.clear();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Send failed: ${e.toString().replaceAll("Exception: ", "")}'),
+            backgroundColor: Colors.red.shade900,
+          ),
+        );
+      }
     }
-
-    _inputController.clear();
   }
 
   @override
@@ -108,7 +119,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     borderRadius: BorderRadius.circular(4),
                   ),
                   child: const Text(
-                    'v2.0.3',
+                    'v2.0.4',
                     style: TextStyle(
                       fontSize: 10,
                       fontWeight: FontWeight.bold,
@@ -212,6 +223,39 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
             ),
           ),
 
+          // Message recipient indicator banner (corrections.md: shows direct peer / offline status)
+          if (_selectedRecipient != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              color: _peers.contains(_selectedRecipient)
+                  ? Colors.blue.shade900.withAlpha(80)
+                  : Colors.orange.shade900.withAlpha(80),
+              child: Row(
+                children: [
+                  Icon(
+                    _peers.contains(_selectedRecipient) ? Icons.send : Icons.cloud_off,
+                    size: 14,
+                    color: _peers.contains(_selectedRecipient) ? Colors.blueAccent : Colors.orangeAccent,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    _peers.contains(_selectedRecipient)
+                        ? 'Direct to: ${_selectedRecipient!.length > 8 ? _selectedRecipient!.substring(0, 8) : _selectedRecipient}'
+                        : 'Peer ${_selectedRecipient!.length > 8 ? _selectedRecipient!.substring(0, 8) : _selectedRecipient} (Offline)',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: _peers.contains(_selectedRecipient) ? Colors.blueAccent : Colors.orangeAccent,
+                    ),
+                  ),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () => setState(() => _selectedRecipient = null),
+                    child: const Text('Cancel', style: TextStyle(fontSize: 12, color: Colors.white70)),
+                  ),
+                ],
+              ),
+            ),
+
           // Message feed
           Expanded(
             child: _messages.isEmpty
@@ -271,7 +315,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                       borderRadius: BorderRadius.circular(4),
                                     ),
                                     child: Text(
-                                      msg.isBroadcast ? 'PUB' : 'E2E',
+                                      msg.isBroadcast ? 'PUB' : 'DIRECT',
                                       style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
                                     ),
                                   ),
