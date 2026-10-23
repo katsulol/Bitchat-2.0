@@ -4,6 +4,8 @@
 **Release**: `v2.0.4+4`  
 **Git Repository**: [Bitchat-2.0](https://github.com/katsulol/Bitchat-2.0.git)  
 **Latest Commits**:
+- `96ab6fb`: `fix(ci): fix rustfmt formatting, remove unwrap/expect in ffi, and add Safety docs`
+- `4f7b8a3`: `docs(report): add final mesh resolution and deployment report`
 - `b232265`: `chore(version): bump app version to 2.0.4+4`
 - `e6b1cef`: `feat(mesh): implement full corrections audit v2.0.4 - native Rust pipeline, MTU tracking, packet chunking, ShortId registry`
 
