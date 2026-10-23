@@ -51,6 +51,7 @@ pub struct MeshNode<T: Transport> {
     origin_counter: u64,
     pending_relays: HashMap<MsgId, PendingRelay>,
     inbound_queue: VecDeque<InboundMessage>,
+    gateway_bridge: Option<Arc<crate::gateway::GatewayBridge>>,
 }
 
 impl<T: Transport> MeshNode<T> {
@@ -71,7 +72,23 @@ impl<T: Transport> MeshNode<T> {
             origin_counter: 0,
             pending_relays: HashMap::new(),
             inbound_queue: VecDeque::new(),
+            gateway_bridge: None,
         }
+    }
+
+    /// Set gateway bridge for internet cross-mesh forwarding.
+    pub fn set_gateway_bridge(&mut self, bridge: Arc<crate::gateway::GatewayBridge>) {
+        self.gateway_bridge = Some(bridge);
+    }
+
+    /// Clear gateway bridge.
+    pub fn clear_gateway_bridge(&mut self) {
+        self.gateway_bridge = None;
+    }
+
+    /// Query optional gateway bridge.
+    pub fn gateway_bridge(&self) -> Option<&Arc<crate::gateway::GatewayBridge>> {
+        self.gateway_bridge.as_ref()
     }
 
     /// Set custom deduplication cache.
@@ -196,6 +213,13 @@ impl<T: Transport> MeshNode<T> {
             for frag in fragments {
                 self.transport.broadcast(frag).await?;
                 self.stats.inc_transmissions();
+            }
+        }
+
+        // Forward to internet gateway if remote route configured
+        if let Some(bridge) = &self.gateway_bridge {
+            if !recipient.is_broadcast() {
+                let _ = bridge.forward_mesh_packet(&env, encoded).await;
             }
         }
 
@@ -334,6 +358,18 @@ impl<T: Transport> MeshNode<T> {
             return Ok(());
         }
 
+        // Forward to internet gateway if remote route configured
+        if let Some(bridge) = &self.gateway_bridge {
+            if !envelope.recipient_short_id.is_broadcast() {
+                if let Ok(true) = bridge
+                    .forward_mesh_packet(&envelope, assembled.clone())
+                    .await
+                {
+                    return Ok(());
+                }
+            }
+        }
+
         // Check hop limit
         if envelope.hop_count >= envelope.ttl_max {
             self.stats.inc_hop_count_exceeded();
@@ -388,6 +424,36 @@ impl<T: Transport> MeshNode<T> {
 
         Ok(())
     }
+
+    /// Process a raw mesh envelope imported across the internet gateway bridge.
+    pub async fn process_imported_gateway_packet(
+        &mut self,
+        imported: Vec<u8>,
+        now: Instant,
+    ) -> Result<()> {
+        if let Ok(env) = Envelope::decode(&imported) {
+            self.seen_cache.check_and_insert(env.msg_id, now);
+            if env.recipient_short_id == self.identity.short_id() {
+                self.inbound_queue.push_back(InboundMessage {
+                    msg_id: env.msg_id,
+                    origin_sender: env.sender_short_id,
+                    recipient: env.recipient_short_id,
+                    msg_type: env.msg_type,
+                    flags: env.flags,
+                    hop_count: env.hop_count,
+                    payload: env.payload,
+                });
+                self.stats.inc_deliveries();
+            } else if !env.recipient_short_id.is_broadcast() {
+                let fragments = self.fragmenter.split(&imported, self.mtu)?;
+                for frag in fragments {
+                    self.transport.broadcast(frag).await?;
+                    self.stats.inc_transmissions();
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl MeshNode<crate::transport::sim::SimTransport> {
@@ -402,6 +468,13 @@ impl MeshNode<crate::transport::sim::SimTransport> {
         if let Some((sender, frame)) = self.transport.try_recv() {
             self.handle_incoming_frame(sender, frame, now).await?;
             return Ok(true);
+        }
+
+        if let Some(bridge) = &self.gateway_bridge {
+            if let Some(imported) = bridge.try_recv_imported_mesh_packet() {
+                self.process_imported_gateway_packet(imported, now).await?;
+                return Ok(true);
+            }
         }
 
         Ok(false)
@@ -419,6 +492,13 @@ impl MeshNode<crate::transport::bridge::BridgeTransport> {
         if let Some((sender, frame)) = self.transport.try_recv() {
             self.handle_incoming_frame(sender, frame, now).await?;
             return Ok(true);
+        }
+
+        if let Some(bridge) = &self.gateway_bridge {
+            if let Some(imported) = bridge.try_recv_imported_mesh_packet() {
+                self.process_imported_gateway_packet(imported, now).await?;
+                return Ok(true);
+            }
         }
 
         Ok(false)

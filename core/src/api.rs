@@ -43,6 +43,7 @@ pub struct BitchatCoreService {
     node: MeshNode<BridgeTransport>,
     handle: BridgeHandle,
     peer_mgr: PeerSessionManager,
+    gateway_bridge: Option<std::sync::Arc<crate::gateway::GatewayBridge>>,
 }
 
 static SERVICE: OnceLock<RwLock<Option<BitchatCoreService>>> = OnceLock::new();
@@ -98,6 +99,7 @@ pub async fn init(storage_path: String) -> Result<String, String> {
         node,
         handle,
         peer_mgr: PeerSessionManager::new(),
+        gateway_bridge: None,
     };
 
     *lock = Some(service);
@@ -276,6 +278,168 @@ pub async fn connected_peers() -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Start internet gateway bridge on local node.
+pub async fn gateway_start(relay_mode_str: Option<String>) -> Result<String, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    if svc.gateway_bridge.is_some() {
+        return Err("Gateway bridge is already active".to_string());
+    }
+
+    let relay_mode = match relay_mode_str.as_deref() {
+        Some("disabled") => iroh::RelayMode::Disabled,
+        _ => iroh::RelayMode::Default,
+    };
+
+    let id_bytes = svc.node.identity().to_bytes();
+    let id_clone = Identity::from_bytes(&id_bytes);
+
+    let bridge = crate::gateway::GatewayBridge::new(id_clone, None, relay_mode)
+        .await
+        .map_err(|e| format!("Failed to create GatewayBridge: {e}"))?;
+
+    let bridge = std::sync::Arc::new(bridge);
+    svc.node.set_gateway_bridge(std::sync::Arc::clone(&bridge));
+
+    // Spawn accept loop for incoming gateway peer connections
+    let ep = bridge.endpoint().clone();
+    let bridge_clone = std::sync::Arc::clone(&bridge);
+    tokio::spawn(async move {
+        while let Ok((_remote_id, conn)) = crate::gateway::iroh_link::accept_gateway_conn(&ep).await
+        {
+            let bridge_inner = std::sync::Arc::clone(&bridge_clone);
+            tokio::spawn(async move {
+                let _ = bridge_inner.spawn_session_handler(conn, None).await;
+            });
+        }
+    });
+
+    let endpoint_id_str = bridge.endpoint_id().to_string();
+    svc.gateway_bridge = Some(bridge);
+    Ok(endpoint_id_str)
+}
+
+/// Stop internet gateway bridge on local node.
+pub async fn gateway_stop() -> Result<(), String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    if let Some(bridge) = svc.gateway_bridge.take() {
+        svc.node.clear_gateway_bridge();
+        bridge.close().await;
+        Ok(())
+    } else {
+        Err("Gateway bridge is not running".to_string())
+    }
+}
+
+/// Export this node's gateway contact string (URI) for out-of-band QR or link sharing.
+pub async fn gateway_export_contact() -> Result<String, String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+
+    let bridge = svc
+        .gateway_bridge
+        .as_ref()
+        .ok_or("Gateway bridge is not running")?;
+    let contact = bridge
+        .export_contact()
+        .await
+        .map_err(|e| format!("Failed to export contact: {e}"))?;
+
+    contact
+        .export_to_string()
+        .map_err(|e| format!("Failed to serialize contact: {e}"))
+}
+
+/// Import, verify, and approve a remote gateway contact string.
+pub async fn gateway_import_and_approve_contact(contact_str: String) -> Result<String, String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+
+    let bridge = svc
+        .gateway_bridge
+        .as_ref()
+        .ok_or("Gateway bridge is not running")?;
+    let contact = bridge
+        .import_and_approve_contact(&contact_str)
+        .await
+        .map_err(|e| format!("Failed to import contact: {e}"))?;
+
+    Ok(contact.iroh_endpoint_id_hex)
+}
+
+/// Dial and establish connection to an approved remote gateway contact URI.
+pub async fn gateway_connect_to_contact(contact_str: String) -> Result<(), String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+
+    let bridge = svc
+        .gateway_bridge
+        .as_ref()
+        .ok_or("Gateway bridge is not running")?;
+    let contact = crate::gateway::GatewayContact::import_from_str(&contact_str)
+        .map_err(|e| format!("Invalid contact string: {e}"))?;
+
+    bridge
+        .connect_to_contact(&contact)
+        .await
+        .map_err(|e| format!("Failed to connect to gateway: {e}"))
+}
+
+/// Set manual route mapping a destination ShortId hex to a target Gateway EndpointId hex.
+pub async fn gateway_set_route(
+    recipient_short_id: String,
+    target_endpoint_id_hex: String,
+) -> Result<(), String> {
+    let short_id = hex_to_short_id(&recipient_short_id)?;
+    let endpoint_id = target_endpoint_id_hex
+        .parse::<iroh::EndpointId>()
+        .map_err(|e| format!("Invalid endpoint ID hex: {e}"))?;
+
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+
+    let bridge = svc
+        .gateway_bridge
+        .as_ref()
+        .ok_or("Gateway bridge is not running")?;
+    bridge
+        .routes()
+        .write()
+        .await
+        .set_route(short_id, endpoint_id);
+
+    Ok(())
+}
+
+/// Get current gateway statistics snapshot as JSON string.
+pub async fn gateway_get_stats() -> Result<String, String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+
+    if let Some(bridge) = svc.gateway_bridge.as_ref() {
+        let stats = bridge.stats().snapshot();
+        let last_err_json = match stats.last_error {
+            Some(e) => format!("\"{}\"", e.replace('\\', "\\\\").replace('\"', "\\\"")),
+            None => "null".to_string(),
+        };
+        Ok(format!(
+            "{{\"is_running\":true,\"endpoint_id\":\"{}\",\"active_connections\":{},\"messages_imported\":{},\"messages_exported\":{},\"loops_prevented\":{},\"messages_rejected\":{},\"last_error\":{}}}",
+            bridge.endpoint_id(),
+            stats.active_connections,
+            stats.forwards_imported,
+            stats.forwards_exported,
+            stats.loops_prevented,
+            stats.forwards_rejected,
+            last_err_json,
+        ))
+    } else {
+        Ok("{\"is_running\":false,\"endpoint_id\":null,\"active_connections\":0,\"messages_imported\":0,\"messages_exported\":0,\"loops_prevented\":0,\"messages_rejected\":0,\"last_error\":null}".to_string())
+    }
+}
+
 mod hex {
     pub fn encode<T: AsRef<[u8]>>(data: T) -> String {
         data.as_ref().iter().map(|b| format!("{b:02x}")).collect()
@@ -326,6 +490,25 @@ mod tests {
             .await
             .unwrap();
         assert!(connected_peers().await.unwrap().is_empty());
+
+        // Test Gateway Bridge Lifecycle
+        let ep_id = gateway_start(Some("disabled".to_string()))
+            .await
+            .expect("Start gateway");
+        assert!(!ep_id.is_empty());
+
+        let contact_uri = gateway_export_contact()
+            .await
+            .expect("Export gateway contact");
+        assert!(contact_uri.starts_with("bitchat-gw://"));
+
+        let gw_stats = gateway_get_stats().await.expect("Get gateway stats");
+        assert!(gw_stats.contains("\"is_running\":true"));
+
+        gateway_stop().await.expect("Stop gateway");
+
+        let gw_stats_after = gateway_get_stats().await.expect("Get stats after stop");
+        assert!(gw_stats_after.contains("\"is_running\":false"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

@@ -52,6 +52,34 @@ class MeshBridge {
     _channel.setMethodCallHandler(_handleNativeCall);
   }
 
+  Future<String?> startGateway([String? relayMode]) async {
+    return CoreFfi.instance.gatewayStart(relayMode);
+  }
+
+  Future<bool> stopGateway() async {
+    return CoreFfi.instance.gatewayStop();
+  }
+
+  String? exportGatewayContact() {
+    return CoreFfi.instance.gatewayExportContact();
+  }
+
+  String? importAndApproveGatewayContact(String contactStr) {
+    return CoreFfi.instance.gatewayImportAndApproveContact(contactStr);
+  }
+
+  bool connectToGatewayContact(String contactStr) {
+    return CoreFfi.instance.gatewayConnectToContact(contactStr);
+  }
+
+  bool setGatewayRoute(String recipientShortId, String targetEndpointIdHex) {
+    return CoreFfi.instance.gatewaySetRoute(recipientShortId, targetEndpointIdHex);
+  }
+
+  RustGatewayStats? getGatewayStats() {
+    return CoreFfi.instance.gatewayGetStats();
+  }
+
   Future<void> startMesh() async {
     // 1. Initialize Rust bitchat2_core with Android storage path
     String storagePath = ".";

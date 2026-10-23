@@ -165,6 +165,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
             },
           ),
           IconButton(
+            icon: const Icon(Icons.cloud_sync_outlined),
+            tooltip: 'Iroh Gateway',
+            onPressed: _showGatewayDialog,
+          ),
+          IconButton(
             icon: const Icon(Icons.info_outline),
             onPressed: _showNodeDetails,
           ),
@@ -442,6 +447,258 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
         Text(val.toString(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4CAF50))),
         Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
       ],
+    );
+  }
+
+  void _showGatewayDialog() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E1E),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            final stats = _bridge.getGatewayStats();
+            final isRunning = stats?.isRunning ?? false;
+            final contactUri = isRunning ? _bridge.exportGatewayContact() : null;
+
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+                top: 16,
+                left: 16,
+                right: 16,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          'Iroh Internet Gateway',
+                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: isRunning ? Colors.green.shade800 : Colors.grey.shade800,
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            isRunning ? 'ONLINE' : 'STOPPED',
+                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    if (isRunning && stats?.endpointId != null) ...[
+                      const Text('Endpoint ID:', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              stats!.endpointId!,
+                              style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: Color(0xFF81C784)),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.copy, size: 16),
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: stats.endpointId!));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Endpoint ID copied')),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (isRunning && contactUri != null) ...[
+                      const SizedBox(height: 8),
+                      const Text('Gateway Contact URI:', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              contactUri,
+                              style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.copy, size: 16),
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: contactUri));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Contact URI copied')),
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ],
+                    const Divider(height: 24),
+                    if (isRunning) ...[
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _statItem('QUIC Conns', stats?.activeConnections ?? 0),
+                          _statItem('Imported', stats?.forwardsImported ?? 0),
+                          _statItem('Exported', stats?.forwardsExported ?? 0),
+                          _statItem('Loops Prevented', stats?.loopsPrevented ?? 0),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              icon: const Icon(Icons.connect_without_contact, size: 16),
+                              label: const Text('Connect to Contact', style: TextStyle(fontSize: 12)),
+                              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2C2C2C)),
+                              onPressed: () => _promptConnectContact(setModalState),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              icon: const Icon(Icons.alt_route, size: 16),
+                              label: const Text('Set Route', style: TextStyle(fontSize: 12)),
+                              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2C2C2C)),
+                              onPressed: () => _promptSetRoute(setModalState),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                    ],
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: isRunning ? Colors.red.shade900 : Colors.green.shade800,
+                        ),
+                        onPressed: () async {
+                          if (isRunning) {
+                            await _bridge.stopGateway();
+                          } else {
+                            await _bridge.startGateway();
+                          }
+                          setModalState(() {});
+                          setState(() {});
+                        },
+                        child: Text(isRunning ? 'Stop Gateway Bridge' : 'Start Gateway Bridge'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _promptConnectContact(void Function(void Function()) setModalState) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Connect Gateway Contact', style: TextStyle(fontSize: 16)),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            hintText: 'bitchat-gw://...',
+            hintStyle: TextStyle(fontSize: 12),
+          ),
+          style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+          maxLines: 3,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              final uri = controller.text.trim();
+              if (uri.isNotEmpty) {
+                final approved = _bridge.importAndApproveGatewayContact(uri);
+                if (approved != null) {
+                  final ok = _bridge.connectToGatewayContact(uri);
+                  Navigator.pop(ctx);
+                  setModalState(() {});
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(ok ? 'Connected to gateway' : 'Dial failed')),
+                  );
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Invalid or untrusted contact URI')),
+                  );
+                }
+              }
+            },
+            child: const Text('Connect'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _promptSetRoute(void Function(void Function()) setModalState) {
+    final recipCtrl = TextEditingController();
+    final targetCtrl = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E1E),
+        title: const Text('Add Recipient Route', style: TextStyle(fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: recipCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Recipient ShortId (16 hex)',
+                labelStyle: TextStyle(fontSize: 12),
+              ),
+              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: targetCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Target Gateway EndpointId (hex)',
+                labelStyle: TextStyle(fontSize: 12),
+              ),
+              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              final recip = recipCtrl.text.trim();
+              final target = targetCtrl.text.trim();
+              if (recip.isNotEmpty && target.isNotEmpty) {
+                final ok = _bridge.setGatewayRoute(recip, target);
+                Navigator.pop(ctx);
+                setModalState(() {});
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(ok ? 'Route configured' : 'Failed to set route')),
+                );
+              }
+            },
+            child: const Text('Save Route'),
+          ),
+        ],
+      ),
     );
   }
 }

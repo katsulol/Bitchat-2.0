@@ -307,6 +307,161 @@ pub unsafe extern "C" fn bitchat_poll_inbound(out_json: *mut *mut c_char) -> i32
     }
 }
 
+/// Start internet gateway bridge on local node.
+///
+/// # Safety
+///
+/// `relay_mode` may be null or a null-terminated C string ("disabled" or "default").
+/// Returned endpoint ID string must be freed using [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_start(relay_mode: *const c_char) -> *mut c_char {
+    let mode = c_str_to_string(relay_mode);
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::gateway_start(mode)) {
+        Ok(endpoint_id) => string_to_c_char(endpoint_id),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Stop internet gateway bridge on local node.
+///
+/// # Safety
+///
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_stop() -> i32 {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::gateway_stop()) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Export this node's gateway contact string (URI).
+///
+/// # Safety
+///
+/// Returned URI string must be freed using [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_export_contact() -> *mut c_char {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::gateway_export_contact()) {
+        Ok(uri) => string_to_c_char(uri),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Import, verify, and approve a remote gateway contact string.
+///
+/// # Safety
+///
+/// `contact_str` must be a valid null-terminated C string.
+/// Returned endpoint public key hex must be freed using [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_import_and_approve_contact(
+    contact_str: *const c_char,
+) -> *mut c_char {
+    let contact = match c_str_to_string(contact_str) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::gateway_import_and_approve_contact(contact)) {
+        Ok(pk) => string_to_c_char(pk),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Dial and establish connection to an approved remote gateway contact URI.
+///
+/// # Safety
+///
+/// `contact_str` must be a valid null-terminated C string.
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_connect_to_contact(contact_str: *const c_char) -> i32 {
+    let contact = match c_str_to_string(contact_str) {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::gateway_connect_to_contact(contact)) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Set manual route mapping a destination ShortId hex to a target Gateway EndpointId hex.
+///
+/// # Safety
+///
+/// `recipient_short_id` and `target_endpoint_id` must be valid null-terminated C strings.
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_set_route(
+    recipient_short_id: *const c_char,
+    target_endpoint_id: *const c_char,
+) -> i32 {
+    let recipient = match c_str_to_string(recipient_short_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let target = match c_str_to_string(target_endpoint_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::gateway_set_route(recipient, target)) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Get current gateway statistics snapshot as JSON string.
+///
+/// # Safety
+///
+/// Returned JSON string must be freed using [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_get_stats() -> *mut c_char {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::gateway_get_stats()) {
+        Ok(json) => string_to_c_char(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Free a C string allocated by Bitchat core.
 ///
 /// # Safety

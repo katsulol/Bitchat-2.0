@@ -39,6 +39,41 @@ class RustInboundMessage {
   }
 }
 
+class RustGatewayStats {
+  final bool isRunning;
+  final String? endpointId;
+  final int activeConnections;
+  final int forwardsImported;
+  final int forwardsExported;
+  final int loopsPrevented;
+  final int forwardsRejected;
+  final String? lastError;
+
+  RustGatewayStats({
+    required this.isRunning,
+    this.endpointId,
+    required this.activeConnections,
+    required this.forwardsImported,
+    required this.forwardsExported,
+    required this.loopsPrevented,
+    required this.forwardsRejected,
+    this.lastError,
+  });
+
+  factory RustGatewayStats.fromJson(Map<String, dynamic> json) {
+    return RustGatewayStats(
+      isRunning: json['is_running'] as bool? ?? false,
+      endpointId: json['endpoint_id'] as String?,
+      activeConnections: json['active_connections'] as int? ?? 0,
+      forwardsImported: json['messages_imported'] as int? ?? 0,
+      forwardsExported: json['messages_exported'] as int? ?? 0,
+      loopsPrevented: json['loops_prevented'] as int? ?? 0,
+      forwardsRejected: json['messages_rejected'] as int? ?? 0,
+      lastError: json['last_error'] as String?,
+    );
+  }
+}
+
 class CoreFfi {
   static final CoreFfi instance = CoreFfi._();
   CoreFfi._();
@@ -58,6 +93,13 @@ class CoreFfi {
   late final BitchatPollInboundDart _pollInbound;
   late final BitchatFreeStringDart _freeString;
   late final BitchatFreeBytesDart _freeBytes;
+  late final BitchatGatewayStartDart _gatewayStart;
+  late final BitchatGatewayStopDart _gatewayStop;
+  late final BitchatStringDart _gatewayExportContact;
+  late final BitchatGatewayImportDart _gatewayImportAndApproveContact;
+  late final BitchatGatewayConnectDart _gatewayConnectToContact;
+  late final BitchatGatewaySetRouteDart _gatewaySetRoute;
+  late final BitchatStringDart _gatewayGetStats;
 
   bool loadLibrary() {
     if (_initialized) return true;
@@ -80,6 +122,13 @@ class CoreFfi {
       _pollInbound = _lib!.lookupFunction<BitchatPollInboundC, BitchatPollInboundDart>('bitchat_poll_inbound');
       _freeString = _lib!.lookupFunction<BitchatFreeStringC, BitchatFreeStringDart>('bitchat_free_string');
       _freeBytes = _lib!.lookupFunction<BitchatFreeBytesC, BitchatFreeBytesDart>('bitchat_free_bytes');
+      _gatewayStart = _lib!.lookupFunction<BitchatGatewayStartC, BitchatGatewayStartDart>('bitchat_gateway_start');
+      _gatewayStop = _lib!.lookupFunction<BitchatGatewayStopC, BitchatGatewayStopDart>('bitchat_gateway_stop');
+      _gatewayExportContact = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_gateway_export_contact');
+      _gatewayImportAndApproveContact = _lib!.lookupFunction<BitchatGatewayImportC, BitchatGatewayImportDart>('bitchat_gateway_import_and_approve_contact');
+      _gatewayConnectToContact = _lib!.lookupFunction<BitchatGatewayConnectC, BitchatGatewayConnectDart>('bitchat_gateway_connect_to_contact');
+      _gatewaySetRoute = _lib!.lookupFunction<BitchatGatewaySetRouteC, BitchatGatewaySetRouteDart>('bitchat_gateway_set_route');
+      _gatewayGetStats = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_gateway_get_stats');
 
       _initialized = true;
       return true;
@@ -233,6 +282,84 @@ class CoreFfi {
       calloc.free(outJson);
     }
   }
+
+  String? gatewayStart([String? relayMode]) {
+    if (!_initialized) return null;
+    final modePtr = relayMode != null ? relayMode.toNativeUtf8() : nullptr;
+    try {
+      final ptr = _gatewayStart(modePtr);
+      if (ptr == nullptr) return null;
+      final epId = ptr.toDartString();
+      _freeString(ptr);
+      return epId;
+    } finally {
+      if (modePtr != nullptr) calloc.free(modePtr);
+    }
+  }
+
+  bool gatewayStop() {
+    if (!_initialized) return false;
+    return _gatewayStop() == 0;
+  }
+
+  String? gatewayExportContact() {
+    if (!_initialized) return null;
+    final ptr = _gatewayExportContact();
+    if (ptr == nullptr) return null;
+    final uri = ptr.toDartString();
+    _freeString(ptr);
+    return uri;
+  }
+
+  String? gatewayImportAndApproveContact(String contactStr) {
+    if (!_initialized) return null;
+    final contactPtr = contactStr.toNativeUtf8();
+    try {
+      final ptr = _gatewayImportAndApproveContact(contactPtr);
+      if (ptr == nullptr) return null;
+      final pk = ptr.toDartString();
+      _freeString(ptr);
+      return pk;
+    } finally {
+      calloc.free(contactPtr);
+    }
+  }
+
+  bool gatewayConnectToContact(String contactStr) {
+    if (!_initialized) return false;
+    final contactPtr = contactStr.toNativeUtf8();
+    try {
+      return _gatewayConnectToContact(contactPtr) == 0;
+    } finally {
+      calloc.free(contactPtr);
+    }
+  }
+
+  bool gatewaySetRoute(String recipientShortId, String targetEndpointIdHex) {
+    if (!_initialized) return false;
+    final recipPtr = recipientShortId.toNativeUtf8();
+    final targetPtr = targetEndpointIdHex.toNativeUtf8();
+    try {
+      return _gatewaySetRoute(recipPtr, targetPtr) == 0;
+    } finally {
+      calloc.free(recipPtr);
+      calloc.free(targetPtr);
+    }
+  }
+
+  RustGatewayStats? gatewayGetStats() {
+    if (!_initialized) return null;
+    final ptr = _gatewayGetStats();
+    if (ptr == nullptr) return null;
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      final Map<String, dynamic> parsed = jsonDecode(jsonStr);
+      return RustGatewayStats.fromJson(parsed);
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 // FFI native signatures
@@ -265,3 +392,18 @@ typedef BitchatFreeStringDart = void Function(Pointer<Utf8> ptr);
 
 typedef BitchatFreeBytesC = Void Function(Pointer<Uint8> ptr, IntPtr len);
 typedef BitchatFreeBytesDart = void Function(Pointer<Uint8> ptr, int len);
+
+typedef BitchatGatewayStartC = Pointer<Utf8> Function(Pointer<Utf8> relayMode);
+typedef BitchatGatewayStartDart = Pointer<Utf8> Function(Pointer<Utf8> relayMode);
+
+typedef BitchatGatewayStopC = Int32 Function();
+typedef BitchatGatewayStopDart = int Function();
+
+typedef BitchatGatewayImportC = Pointer<Utf8> Function(Pointer<Utf8> contactStr);
+typedef BitchatGatewayImportDart = Pointer<Utf8> Function(Pointer<Utf8> contactStr);
+
+typedef BitchatGatewayConnectC = Int32 Function(Pointer<Utf8> contactStr);
+typedef BitchatGatewayConnectDart = int Function(Pointer<Utf8> contactStr);
+
+typedef BitchatGatewaySetRouteC = Int32 Function(Pointer<Utf8> recipient, Pointer<Utf8> target);
+typedef BitchatGatewaySetRouteDart = int Function(Pointer<Utf8> recipient, Pointer<Utf8> target);
