@@ -5,20 +5,26 @@ import 'core_ffi.dart';
 /// Data model representing a verified mesh chat message.
 class ChatMessage {
   final String msgId;
+  final String? logicalId;
   final String sender;
   final String? recipient;
   final String text;
   final int hopCount;
   final bool isBroadcast;
+  String deliveryState; // 'Queued', 'InFlight', 'Delivered', 'Failed', 'Expired'
+  final bool isPrivacy;
   final DateTime timestamp;
 
   ChatMessage({
     required this.msgId,
+    this.logicalId,
     required this.sender,
     this.recipient,
     required this.text,
     required this.hopCount,
     required this.isBroadcast,
+    this.deliveryState = 'Delivered',
+    this.isPrivacy = false,
     DateTime? timestamp,
   }) : timestamp = timestamp ?? DateTime.now();
 }
@@ -29,6 +35,7 @@ class MeshBridge {
 
   final _messageController = StreamController<ChatMessage>.broadcast();
   final _peersController = StreamController<List<String>>.broadcast();
+  final _deliveryEventController = StreamController<RustDeliveryEvent>.broadcast();
 
   final Set<String> _connectedPeers = {};
   final Set<String> _seenMsgIds = {};
@@ -38,6 +45,7 @@ class MeshBridge {
 
   Stream<ChatMessage> get messages => _messageController.stream;
   Stream<List<String>> get peers => _peersController.stream;
+  Stream<RustDeliveryEvent> get deliveryEvents => _deliveryEventController.stream;
   List<String> get currentPeers => _connectedPeers.toList();
 
   int transmissions = 0;
@@ -46,6 +54,7 @@ class MeshBridge {
   int relaysSuppressed = 0;
 
   Timer? _pumpTimer;
+  bool _isPumping = false;
   bool _isDisposed = false;
 
   MeshBridge() {
@@ -84,6 +93,10 @@ class MeshBridge {
     return CoreFfi.instance.gatewayGetRoutes();
   }
 
+  RustDiagnostics? getDiagnostics() {
+    return CoreFfi.instance.getDiagnostics();
+  }
+
   Future<void> shareText(String text, {String title = "Share via"}) async {
     try {
       await _channel.invokeMethod('shareText', {'text': text, 'title': title});
@@ -91,7 +104,7 @@ class MeshBridge {
   }
 
   Future<void> startMesh() async {
-    // 1. Initialize Rust bitchat2_core with Android storage path
+    // 1. Obtain Android storage path
     String storagePath = ".";
     try {
       final appPath = await _channel.invokeMethod<String>('getAppStoragePath');
@@ -100,24 +113,47 @@ class MeshBridge {
       }
     } catch (_) {}
 
-    final shortId = CoreFfi.instance.initCore(storagePath);
+    // 2. Obtain hardware-backed DEK from AndroidKeystoreProvider
+    Uint8List? dek;
+    try {
+      dek = await _channel.invokeMethod<Uint8List>('getPlatformDek');
+    } catch (_) {}
+
+    // 3. Initialize Rust bitchat2_core with encrypted SQLite outbox
+    String? shortId;
+    if (dek != null && dek.length == 32) {
+      shortId = CoreFfi.instance.initWithKey(storagePath, dek);
+    }
+    if (shortId == null || shortId.isEmpty) {
+      // Fallback to legacy init if Keystore unavailable
+      shortId = CoreFfi.instance.initCore(storagePath);
+    }
+
     if (shortId != null && shortId.isNotEmpty) {
       myShortId = shortId;
       myPeerId = CoreFfi.instance.getMyPeerId() ?? "Unknown";
     }
 
-    // 2. Start native BLE Mesh Service with verified ShortId
+    // 4. Start native BLE Mesh Service with verified ShortId
     try {
       await _channel.invokeMethod('startBle', {'shortId': myShortId});
     } catch (e) {
       // Running on emulator or test environment without BLE
     }
 
-    // 3. Start high-frequency discrete event pump for Rust outbound frames & inbound messages
+    // 5. Start discrete event pump for Rust outbound frames, inbound messages, and outbox pump
     _pumpTimer?.cancel();
     _pumpTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      _drainOutbound();
-      _drainInbound();
+      if (_isPumping || _isDisposed) return;
+      _isPumping = true;
+      try {
+        _drainOutbound();
+        _drainInbound();
+        _drainDeliveryEvents();
+        CoreFfi.instance.pumpOutbox();
+      } finally {
+        _isPumping = false;
+      }
     });
   }
 
@@ -161,27 +197,45 @@ class MeshBridge {
     return CoreFfi.instance.isSessionReady(recipientShortId);
   }
 
-  Future<void> sendDirect(String recipientShortId, String text) async {
-    final msgId = CoreFfi.instance.sendTo(recipientShortId, text);
-    _drainOutbound();
-    if (msgId == null) {
-      throw Exception("Securing E2E channel with peer... Handshake started. Tap send again in a moment.");
+  Future<String?> sendMessage(String recipientShortId, String text, {bool isPrivacy = false}) async {
+    final mode = isPrivacy ? 1 : 0;
+    final logicalId = CoreFfi.instance.sendMessage(recipientShortId, text, mode);
+    if (logicalId == null) {
+      // If session not ready, initiate handshake
+      final isReady = CoreFfi.instance.isSessionReady(recipientShortId);
+      if (!isReady) {
+        CoreFfi.instance.initiateHandshake(recipientShortId);
+        _drainOutbound();
+        throw Exception("Securing E2E channel with peer... Handshake started. Tap send again in a moment.");
+      }
+      throw Exception("Failed to queue message in outbox");
     }
 
     transmissions++;
-    _seenMsgIds.add(msgId);
+    _seenMsgIds.add(logicalId);
     _drainOutbound();
+    CoreFfi.instance.pumpOutbox();
+    _drainDeliveryEvents();
 
     if (!_isDisposed && !_messageController.isClosed) {
       _messageController.add(ChatMessage(
-        msgId: msgId,
+        msgId: logicalId,
+        logicalId: logicalId,
         sender: myShortId,
         recipient: recipientShortId,
         text: text,
         hopCount: 0,
         isBroadcast: false,
+        deliveryState: 'Queued',
+        isPrivacy: isPrivacy,
       ));
     }
+
+    return logicalId;
+  }
+
+  Future<void> sendDirect(String recipientShortId, String text, {bool isPrivacy = false}) async {
+    await sendMessage(recipientShortId, text, isPrivacy: isPrivacy);
   }
 
   void _drainOutbound() {
@@ -213,12 +267,24 @@ class MeshBridge {
       if (!_isDisposed && !_messageController.isClosed) {
         _messageController.add(ChatMessage(
           msgId: m.msgId,
+          logicalId: null,
           sender: m.sender,
           recipient: m.recipient,
           text: m.text,
           hopCount: m.hopCount,
           isBroadcast: m.isBroadcast,
+          deliveryState: 'Delivered',
         ));
+      }
+    }
+  }
+
+  void _drainDeliveryEvents() {
+    if (_isDisposed) return;
+    final events = CoreFfi.instance.pollDeliveryEvents();
+    for (final ev in events) {
+      if (!_isDisposed && !_deliveryEventController.isClosed) {
+        _deliveryEventController.add(ev);
       }
     }
   }
@@ -252,6 +318,7 @@ class MeshBridge {
         CoreFfi.instance.onFrameReceived(sender, data);
         _drainInbound();
         _drainOutbound();
+        _drainDeliveryEvents();
         break;
     }
   }
@@ -262,5 +329,6 @@ class MeshBridge {
     _channel.setMethodCallHandler(null);
     _messageController.close();
     _peersController.close();
+    _deliveryEventController.close();
   }
 }

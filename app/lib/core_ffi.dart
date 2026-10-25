@@ -74,6 +74,67 @@ class RustGatewayStats {
   }
 }
 
+class RustDeliveryEvent {
+  final String logicalId;
+  final String state;
+  final String recipient;
+  final int timestamp;
+
+  RustDeliveryEvent({
+    required this.logicalId,
+    required this.state,
+    required this.recipient,
+    required this.timestamp,
+  });
+
+  factory RustDeliveryEvent.fromJson(Map<String, dynamic> json) {
+    return RustDeliveryEvent(
+      logicalId: json['logical_id'] as String? ?? '',
+      state: json['state'] as String? ?? '',
+      recipient: json['recipient'] as String? ?? '',
+      timestamp: json['timestamp'] as int? ?? 0,
+    );
+  }
+}
+
+class RustDiagnostics {
+  final String myShortId;
+  final String myPeerId;
+  final int connectedPeersCount;
+  final int outboxQueuedCount;
+  final int outboxInflightCount;
+  final int deliveriesCount;
+  final bool gatewayActive;
+  final bool gatewayRelayDisabled;
+  final String? lastRouteCandidate;
+
+  RustDiagnostics({
+    required this.myShortId,
+    required this.myPeerId,
+    required this.connectedPeersCount,
+    required this.outboxQueuedCount,
+    required this.outboxInflightCount,
+    required this.deliveriesCount,
+    required this.gatewayActive,
+    required this.gatewayRelayDisabled,
+    this.lastRouteCandidate,
+  });
+
+  factory RustDiagnostics.fromJson(Map<String, dynamic> json) {
+    return RustDiagnostics(
+      myShortId: json['my_short_id'] as String? ?? '',
+      myPeerId: json['my_peer_id'] as String? ?? '',
+      connectedPeersCount: json['connected_peers_count'] as int? ?? 0,
+      outboxQueuedCount: json['outbox_queued_count'] as int? ?? 0,
+      outboxInflightCount: json['outbox_inflight_count'] as int? ?? 0,
+      deliveriesCount: json['deliveries_count'] as int? ?? 0,
+      gatewayActive: json['gateway_active'] as bool? ?? false,
+      gatewayRelayDisabled: json['gateway_relay_disabled'] as bool? ?? true,
+      lastRouteCandidate: json['last_route_candidate'] as String?,
+    );
+  }
+}
+
 class CoreFfi {
   static final CoreFfi instance = CoreFfi._();
   CoreFfi._();
@@ -82,10 +143,16 @@ class CoreFfi {
   bool _initialized = false;
 
   late final BitchatInitDart _init;
+  late final BitchatInitWithKeyDart _initWithKey;
   late final BitchatStringDart _myShortId;
   late final BitchatStringDart _myPeerId;
   late final BitchatSendBroadcastDart _sendBroadcast;
   late final BitchatSendToDart _sendTo;
+  late final BitchatSendMessageDart _sendMessage;
+  late final BitchatGetDeliveryStateDart _getDeliveryState;
+  late final BitchatStringDart _pollDeliveryEvents;
+  late final BitchatStringDart _getDiagnostics;
+  late final BitchatPumpOutboxDart _pumpOutbox;
   late final BitchatPeerDart _initiateHandshake;
   late final BitchatPeerDart _isSessionReady;
   late final BitchatPeerDart _onPeerConnected;
@@ -114,10 +181,16 @@ class CoreFfi {
       }
 
       _init = _lib!.lookupFunction<BitchatInitC, BitchatInitDart>('bitchat_init');
+      _initWithKey = _lib!.lookupFunction<BitchatInitWithKeyC, BitchatInitWithKeyDart>('bitchat_init_with_key');
       _myShortId = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_my_short_id');
       _myPeerId = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_my_peer_id');
       _sendBroadcast = _lib!.lookupFunction<BitchatSendBroadcastC, BitchatSendBroadcastDart>('bitchat_send_broadcast');
       _sendTo = _lib!.lookupFunction<BitchatSendToC, BitchatSendToDart>('bitchat_send_to');
+      _sendMessage = _lib!.lookupFunction<BitchatSendMessageC, BitchatSendMessageDart>('bitchat_send_message');
+      _getDeliveryState = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_delivery_state');
+      _pollDeliveryEvents = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_poll_delivery_events');
+      _getDiagnostics = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_get_diagnostics');
+      _pumpOutbox = _lib!.lookupFunction<BitchatPumpOutboxC, BitchatPumpOutboxDart>('bitchat_pump_outbox');
       _initiateHandshake = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_initiate_handshake');
       _isSessionReady = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_is_session_ready');
       _onPeerConnected = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_on_peer_connected');
@@ -396,11 +469,107 @@ class CoreFfi {
     if (raw.isEmpty) return [];
     return raw.split(',').where((s) => s.isNotEmpty).toList();
   }
+
+  String? initWithKey(String storagePath, Uint8List? dek, [int version = 1]) {
+    if (!_initialized && !loadLibrary()) return null;
+    final pathPtr = storagePath.toNativeUtf8();
+    Pointer<Uint8> keyPtr = nullptr;
+    if (dek != null && dek.length == 32) {
+      keyPtr = calloc<Uint8>(32);
+      final keyList = keyPtr.asTypedList(32);
+      keyList.setAll(0, dek);
+    }
+    try {
+      final resPtr = _initWithKey(pathPtr, keyPtr, version);
+      if (resPtr == nullptr) return null;
+      final shortId = resPtr.toDartString();
+      _freeString(resPtr);
+      return shortId;
+    } finally {
+      calloc.free(pathPtr);
+      if (keyPtr != nullptr) calloc.free(keyPtr);
+    }
+  }
+
+  String? sendMessage(String recipient, String text, int mode) {
+    if (!_initialized) return null;
+    final recipPtr = recipient.toNativeUtf8();
+    final textPtr = text.toNativeUtf8();
+    try {
+      final ptr = _sendMessage(recipPtr, textPtr, mode);
+      if (ptr == nullptr) return null;
+      final logicalId = ptr.toDartString();
+      _freeString(ptr);
+      return logicalId;
+    } finally {
+      calloc.free(recipPtr);
+      calloc.free(textPtr);
+    }
+  }
+
+  String? getDeliveryState(String logicalId) {
+    if (!_initialized) return null;
+    final idPtr = logicalId.toNativeUtf8();
+    try {
+      final ptr = _getDeliveryState(idPtr);
+      if (ptr == nullptr) return null;
+      final state = ptr.toDartString();
+      _freeString(ptr);
+      return state;
+    } finally {
+      calloc.free(idPtr);
+    }
+  }
+
+  List<RustDeliveryEvent> pollDeliveryEvents() {
+    if (!_initialized) return [];
+    final ptr = _pollDeliveryEvents();
+    if (ptr == nullptr) return [];
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      final List<dynamic> list = jsonDecode(jsonStr);
+      return list.map((e) => RustDeliveryEvent.fromJson(e as Map<String, dynamic>)).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  RustDiagnostics? getDiagnostics() {
+    if (!_initialized) return null;
+    final ptr = _getDiagnostics();
+    if (ptr == nullptr) return null;
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      final Map<String, dynamic> map = jsonDecode(jsonStr);
+      return RustDiagnostics.fromJson(map);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  int pumpOutbox() {
+    if (!_initialized) return -1;
+    return _pumpOutbox();
+  }
 }
 
 // FFI native signatures
 typedef BitchatInitC = Pointer<Utf8> Function(Pointer<Utf8> storagePath);
 typedef BitchatInitDart = Pointer<Utf8> Function(Pointer<Utf8> storagePath);
+
+typedef BitchatInitWithKeyC = Pointer<Utf8> Function(Pointer<Utf8> storagePath, Pointer<Uint8> keyPtr, Uint32 version);
+typedef BitchatInitWithKeyDart = Pointer<Utf8> Function(Pointer<Utf8> storagePath, Pointer<Uint8> keyPtr, int version);
+
+typedef BitchatSendMessageC = Pointer<Utf8> Function(Pointer<Utf8> recipient, Pointer<Utf8> text, Uint8 mode);
+typedef BitchatSendMessageDart = Pointer<Utf8> Function(Pointer<Utf8> recipient, Pointer<Utf8> text, int mode);
+
+typedef BitchatGetDeliveryStateC = Pointer<Utf8> Function(Pointer<Utf8> logicalId);
+typedef BitchatGetDeliveryStateDart = Pointer<Utf8> Function(Pointer<Utf8> logicalId);
+
+typedef BitchatPumpOutboxC = Int32 Function();
+typedef BitchatPumpOutboxDart = int Function();
 
 typedef BitchatStringC = Pointer<Utf8> Function();
 typedef BitchatStringDart = Pointer<Utf8> Function();

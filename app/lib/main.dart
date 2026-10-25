@@ -46,6 +46,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   final List<ChatMessage> _messages = [];
   List<String> _peers = [];
   String? _selectedRecipient; // null = Broadcast
+  bool _isPrivacyMode = false;
   bool _lastSessionReady = false;
   Timer? _pollTimer;
 
@@ -70,6 +71,16 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       });
     });
 
+    _bridge.deliveryEvents.listen((event) {
+      setState(() {
+        for (final m in _messages) {
+          if (m.logicalId == event.logicalId) {
+            m.deliveryState = event.state;
+          }
+        }
+      });
+    });
+
     _pollTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
       if (mounted && _selectedRecipient != null) {
         final ready = _bridge.isSessionReady(_selectedRecipient!);
@@ -90,7 +101,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       if (_selectedRecipient == null) {
         await _bridge.sendBroadcast(text);
       } else {
-        await _bridge.sendDirect(_selectedRecipient!, text);
+        await _bridge.sendMessage(_selectedRecipient!, text, isPrivacy: _isPrivacyMode);
       }
       _inputController.clear();
     } catch (e) {
@@ -427,11 +438,13 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                                     decoration: BoxDecoration(
-                                      color: msg.isBroadcast ? Colors.amber.shade900 : Colors.purple.shade900,
+                                      color: msg.isBroadcast
+                                          ? Colors.amber.shade900
+                                          : (msg.isPrivacy ? Colors.teal.shade800 : Colors.purple.shade900),
                                       borderRadius: BorderRadius.circular(4),
                                     ),
                                     child: Text(
-                                      msg.isBroadcast ? 'PUB' : 'DIRECT',
+                                      msg.isBroadcast ? 'PUB' : (msg.isPrivacy ? 'PRIVACY' : 'DIRECT'),
                                       style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold),
                                     ),
                                   ),
@@ -447,6 +460,29 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                 msg.text,
                                 style: const TextStyle(fontSize: 14),
                               ),
+                              if (isMe && !msg.isBroadcast) ...[
+                                const SizedBox(height: 4),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  mainAxisAlignment: MainAxisAlignment.end,
+                                  children: [
+                                    if (msg.isPrivacy) ...[
+                                      const Icon(Icons.shield, size: 11, color: Colors.tealAccent),
+                                      const SizedBox(width: 4),
+                                    ],
+                                    _buildDeliveryStatusIcon(msg.deliveryState),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      msg.deliveryState,
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: _deliveryStatusColor(msg.deliveryState),
+                                        fontFamily: 'monospace',
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -484,6 +520,22 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       }
                     },
                   ),
+                  if (_selectedRecipient != null) ...[
+                    const SizedBox(width: 4),
+                    IconButton(
+                      icon: Icon(
+                        _isPrivacyMode ? Icons.security : Icons.security_outlined,
+                        color: _isPrivacyMode ? Colors.tealAccent : Colors.grey,
+                        size: 20,
+                      ),
+                      tooltip: _isPrivacyMode ? 'Privacy Mode (Direct transport only)' : 'Standard Mode',
+                      onPressed: () {
+                        setState(() {
+                          _isPrivacyMode = !_isPrivacyMode;
+                        });
+                      },
+                    ),
+                  ],
                   const SizedBox(width: 8),
                   Expanded(
                     child: TextField(
@@ -515,58 +567,114 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
     );
   }
 
+  Widget _buildDeliveryStatusIcon(String state) {
+    switch (state) {
+      case 'Queued':
+        return const Icon(Icons.schedule, size: 12, color: Colors.amberAccent);
+      case 'InFlight':
+        return const Icon(Icons.check, size: 12, color: Colors.white70);
+      case 'Delivered':
+        return const Icon(Icons.done_all, size: 13, color: Colors.greenAccent);
+      case 'Failed':
+      case 'Expired':
+        return const Icon(Icons.error_outline, size: 12, color: Colors.redAccent);
+      default:
+        return const Icon(Icons.done, size: 12, color: Colors.white54);
+    }
+  }
+
+  Color _deliveryStatusColor(String state) {
+    switch (state) {
+      case 'Queued':
+        return Colors.amberAccent;
+      case 'InFlight':
+        return Colors.white70;
+      case 'Delivered':
+        return Colors.greenAccent;
+      case 'Failed':
+      case 'Expired':
+        return Colors.redAccent;
+      default:
+        return Colors.white54;
+    }
+  }
+
   void _showNodeDetails() {
+    final diag = _bridge.getDiagnostics();
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF1E1E1E),
       builder: (context) {
         return Padding(
           padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Text(
-                    'Bitchat 2.0 Node Details',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF2E7D32),
-                      borderRadius: BorderRadius.circular(4),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Text(
+                      'Bitchat 2.0 Node & Outbox Diagnostics',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                     ),
-                    child: const Text(
-                      'v2.0.4',
-                      style: TextStyle(
-                        fontSize: 10,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                        fontFamily: 'monospace',
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2E7D32),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text(
+                        'v2.0.4',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          fontFamily: 'monospace',
+                        ),
                       ),
                     ),
-                  ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text('ShortId: ${_bridge.myShortId}', style: const TextStyle(fontFamily: 'monospace')),
+                const SizedBox(height: 6),
+                const Text('Full Ed25519 PeerId:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                Text(_bridge.myPeerId, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
+                const Divider(height: 24),
+                const Text('Outbox & Relay Engine Status', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.greenAccent)),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _statItem('Queued', diag?.outboxQueuedCount ?? 0),
+                    _statItem('In Flight', diag?.outboxInflightCount ?? 0),
+                    _statItem('Delivered', diag?.deliveriesCount ?? _bridge.deliveries),
+                    _statItem('Tx Total', _bridge.transmissions),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _statItem('Suppressed', _bridge.relaysSuppressed),
+                    _statItem('Duplicates', _bridge.duplicatesDropped),
+                    _statItem('Peers', diag?.connectedPeersCount ?? _peers.length),
+                  ],
+                ),
+                const Divider(height: 24),
+                const Text('Transport & Privacy Layer', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
+                const SizedBox(height: 6),
+                Text('Gateway Active: ${diag?.gatewayActive ?? false ? "YES" : "NO"}', style: const TextStyle(fontSize: 12)),
+                Text('Privacy Direct-Only Enforced: ${diag?.gatewayRelayDisabled ?? true ? "YES (Relay Blocked)" : "NO (Relay Allowed)"}', style: const TextStyle(fontSize: 12)),
+                if (diag?.lastRouteCandidate != null) ...[
+                  const SizedBox(height: 4),
+                  Text('Last Route Candidate: ${diag!.lastRouteCandidate}', style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
                 ],
-              ),
-              const SizedBox(height: 12),
-              Text('ShortId: ${_bridge.myShortId}', style: const TextStyle(fontFamily: 'monospace')),
-              const SizedBox(height: 6),
-              const Text('Full Ed25519 PeerId:', style: TextStyle(fontSize: 12, color: Colors.grey)),
-              Text(_bridge.myPeerId, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
-              const Divider(height: 24),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _statItem('Tx', _bridge.transmissions),
-                  _statItem('Delivered', _bridge.deliveries),
-                  _statItem('Suppressed', _bridge.relaysSuppressed),
-                  _statItem('Duplicates', _bridge.duplicatesDropped),
-                ],
-              ),
-            ],
+              ],
+            ),
           ),
         );
       },
