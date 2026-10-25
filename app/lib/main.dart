@@ -615,9 +615,12 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
               children: [
                 Row(
                   children: [
-                    const Text(
-                      'Bitchat 2.0 Node & Outbox Diagnostics',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    const Expanded(
+                      child: Text(
+                        'Node & Outbox Diagnostics',
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
                     const SizedBox(width: 8),
                     Container(
@@ -682,11 +685,13 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   }
 
   Widget _statItem(String label, int val) {
-    return Column(
-      children: [
-        Text(val.toString(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4CAF50))),
-        Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
-      ],
+    return Expanded(
+      child: Column(
+        children: [
+          Text(val.toString(), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF4CAF50))),
+          Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey), textAlign: TextAlign.center, maxLines: 1, overflow: TextOverflow.ellipsis),
+        ],
+      ),
     );
   }
 
