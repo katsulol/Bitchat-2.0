@@ -290,7 +290,8 @@ class BitchatBleService : Service() {
             .build()
 
         val pUuid = ParcelUuid(SERVICE_UUID)
-        val shortBytes = hexStringToByteArray(localShortIdHex.ifEmpty { "0000000000000000" })
+        val rawBytes = hexStringToByteArray(localShortIdHex)
+        val shortBytes = if (rawBytes.size == 8) rawBytes else ByteArray(8)
 
         // Primary packet: Service UUID only (<21 bytes)
         val data = AdvertiseData.Builder()
@@ -1029,11 +1030,16 @@ class BitchatBleService : Service() {
     }
 
     private fun hexStringToByteArray(s: String): ByteArray {
-        val len = s.length
+        val clean = s.trim().filter { it in "0123456789abcdefABCDEF" }
+        val len = clean.length - (clean.length % 2)
+        if (len == 0) return ByteArray(8)
         val data = ByteArray(len / 2)
         var i = 0
         while (i < len) {
-            data[i / 2] = ((Character.digit(s[i], 16) shl 4) + Character.digit(s[i + 1], 16)).toByte()
+            val high = Character.digit(clean[i], 16)
+            val low = Character.digit(clean[i + 1], 16)
+            if (high == -1 || low == -1) break
+            data[i / 2] = ((high shl 4) + low).toByte()
             i += 2
         }
         return data
