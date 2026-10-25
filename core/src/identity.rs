@@ -27,6 +27,14 @@ impl PeerId {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Derive the 8-byte ShortId from blake3(peer_id).
+    pub fn short_id(&self) -> ShortId {
+        let hash = blake3::hash(&self.0);
+        let mut short = [0u8; 8];
+        short.copy_from_slice(&hash.as_bytes()[0..8]);
+        ShortId(short)
+    }
 }
 
 impl fmt::Debug for PeerId {
@@ -120,10 +128,7 @@ impl Identity {
 
     /// 8-byte compact identifier derived from blake3(public_key).
     pub fn short_id(&self) -> ShortId {
-        let hash = blake3::hash(&self.verifying_key.to_bytes());
-        let mut short = [0u8; 8];
-        short.copy_from_slice(&hash.as_bytes()[0..8]);
-        ShortId(short)
+        self.peer_id().short_id()
     }
 
     /// Sign an arbitrary message buffer with the Ed25519 identity key.

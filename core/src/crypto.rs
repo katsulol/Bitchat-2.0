@@ -35,6 +35,84 @@ pub const MAX_HANDSHAKE_BUF: usize = 512;
 pub const REPLAY_WINDOW_SIZE: u64 = 128;
 pub const NONCE_LEN: usize = 8;
 pub const TAG_LEN: usize = 16;
+pub const HANDSHAKE_FRAME_VERSION: u8 = 1;
+pub const HANDSHAKE_HEADER_LEN: usize = 18;
+
+/// Fixed 18-byte handshake wrapper header:
+/// [0] version: u8 (1)
+/// [1] step: u8 (1, 2, or 3)
+/// [2..10] attempt_id: u64 (unique monotonic attempt / session generation ID)
+/// [10..18] session_context: [u8; 8] (domain-separated session context)
+/// [18..] noise_payload: [u8]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeFrame {
+    pub version: u8,
+    pub step: u8,
+    pub attempt_id: u64,
+    pub session_context: [u8; 8],
+    pub noise_payload: Vec<u8>,
+}
+
+impl HandshakeFrame {
+    pub fn new(
+        step: u8,
+        attempt_id: u64,
+        session_context: [u8; 8],
+        noise_payload: Vec<u8>,
+    ) -> Self {
+        Self {
+            version: HANDSHAKE_FRAME_VERSION,
+            step,
+            attempt_id,
+            session_context,
+            noise_payload,
+        }
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(HANDSHAKE_HEADER_LEN + self.noise_payload.len());
+        buf.push(self.version);
+        buf.push(self.step);
+        buf.extend_from_slice(&self.attempt_id.to_be_bytes());
+        buf.extend_from_slice(&self.session_context);
+        buf.extend_from_slice(&self.noise_payload);
+        buf
+    }
+
+    pub fn decode(buf: &[u8]) -> Result<Self> {
+        if buf.len() < HANDSHAKE_HEADER_LEN {
+            return Err(Error::Crypto(format!(
+                "Handshake frame too short: {} < {}",
+                buf.len(),
+                HANDSHAKE_HEADER_LEN
+            )));
+        }
+        let version = buf[0];
+        if version != HANDSHAKE_FRAME_VERSION {
+            return Err(Error::Crypto(format!(
+                "Unsupported handshake frame version: {version}"
+            )));
+        }
+        let step = buf[1];
+        if !(1..=3).contains(&step) {
+            return Err(Error::Crypto(format!("Invalid handshake step: {step}")));
+        }
+        let mut attempt_bytes = [0u8; 8];
+        attempt_bytes.copy_from_slice(&buf[2..10]);
+        let attempt_id = u64::from_be_bytes(attempt_bytes);
+        let mut session_context = [0u8; 8];
+        session_context.copy_from_slice(&buf[10..18]);
+        let noise_payload = buf[18..].to_vec();
+
+        Ok(Self {
+            version,
+            step,
+            attempt_id,
+            session_context,
+            noise_payload,
+        })
+    }
+}
 
 /// Produce canonical domain-separated message for Noise static key signing.
 pub fn noise_static_binding_message(noise_static_pubkey: &[u8]) -> Vec<u8> {
@@ -191,6 +269,26 @@ impl Session {
             SessionState::Handshaking { remote_peer_id, .. } => *remote_peer_id,
             SessionState::Transport { remote_peer_id, .. } => Some(*remote_peer_id),
             SessionState::Failed => None,
+        }
+    }
+
+    /// Whether this session is an initiator in handshaking mode.
+    pub fn is_initiator(&self) -> Option<bool> {
+        match &self.state {
+            SessionState::Handshaking { is_initiator, .. } => Some(*is_initiator),
+            _ => None,
+        }
+    }
+
+    /// Return (write_count, read_count) during handshaking.
+    pub fn handshake_counts(&self) -> Option<(usize, usize)> {
+        match &self.state {
+            SessionState::Handshaking {
+                write_count,
+                read_count,
+                ..
+            } => Some((*write_count, *read_count)),
+            _ => None,
         }
     }
 
@@ -640,5 +738,86 @@ mod tests {
         assert!(debug_str.contains("[REDACTED]"));
         assert!(!debug_str.contains("private"));
         assert!(!debug_str.contains("secret"));
+    }
+
+    #[test]
+    fn test_replay_window_updates_only_after_successful_tag_verification() {
+        let alice_id = Identity::generate();
+        let bob_id = Identity::generate();
+
+        let mut alice = Session::initiator(&alice_id).unwrap();
+        let mut bob = Session::responder(&bob_id).unwrap();
+        establish_handshake(&mut alice, &mut bob).unwrap();
+
+        // 1. Deliver valid nonce 0
+        let p0 = alice.encrypt(b"valid 0").unwrap();
+        assert_eq!(bob.decrypt(&p0).unwrap(), b"valid 0");
+
+        // 2. Craft forged packet with massive nonce (e.g. 50000) and bogus ciphertext
+        let mut forged = vec![0u8; NONCE_LEN + 32];
+        forged[0..NONCE_LEN].copy_from_slice(&50000u64.to_be_bytes());
+        forged[NONCE_LEN..].fill(0xAA);
+
+        let err = bob.decrypt(&forged);
+        assert!(err.is_err(), "Bogus tag must fail MAC verification");
+
+        // 3. Deliver legitimate nonce 1. If forged packet updated replay window, nonce 1 would be rejected as too old!
+        let p1 = alice.encrypt(b"valid 1").unwrap();
+        let dec1 = bob.decrypt(&p1);
+        assert!(
+            dec1.is_ok(),
+            "Legitimate nonce 1 must succeed because failed MAC must NOT advance replay window"
+        );
+        assert_eq!(dec1.unwrap(), b"valid 1");
+    }
+
+    #[test]
+    fn test_separate_directional_keys() {
+        let alice_id = Identity::generate();
+        let bob_id = Identity::generate();
+
+        let mut alice = Session::initiator(&alice_id).unwrap();
+        let mut bob = Session::responder(&bob_id).unwrap();
+        establish_handshake(&mut alice, &mut bob).unwrap();
+
+        // Alice encrypts for Bob
+        let ct_alice = alice.encrypt(b"alice outgoing").unwrap();
+
+        // Alice cannot decrypt her own outgoing ciphertext with her receive key
+        let err = alice.decrypt(&ct_alice);
+        assert!(err.is_err(), "Directional keys must be distinct");
+
+        // Bob can decrypt Alice's outgoing ciphertext with his receive key
+        let ok = bob.decrypt(&ct_alice);
+        assert_eq!(ok.unwrap(), b"alice outgoing");
+    }
+
+    #[test]
+    fn test_handshake_frame_encoding_and_validation() {
+        let frame = HandshakeFrame::new(1, 0x1122334455667788, [9u8; 8], vec![1, 2, 3, 4]);
+        let encoded = frame.encode();
+
+        assert_eq!(encoded.len(), HANDSHAKE_HEADER_LEN + 4);
+        let decoded = HandshakeFrame::decode(&encoded).unwrap();
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.step, 1);
+        assert_eq!(decoded.attempt_id, 0x1122334455667788);
+        assert_eq!(decoded.session_context, [9u8; 8]);
+        assert_eq!(decoded.noise_payload, vec![1, 2, 3, 4]);
+
+        // Malformed step rejected
+        let mut bad_step = encoded.clone();
+        bad_step[1] = 0; // step 0 invalid
+        assert!(HandshakeFrame::decode(&bad_step).is_err());
+        bad_step[1] = 4; // step 4 invalid
+        assert!(HandshakeFrame::decode(&bad_step).is_err());
+
+        // Malformed version rejected
+        let mut bad_version = encoded.clone();
+        bad_version[0] = 99;
+        assert!(HandshakeFrame::decode(&bad_version).is_err());
+
+        // Truncated buffer rejected
+        assert!(HandshakeFrame::decode(&encoded[..10]).is_err());
     }
 }
