@@ -64,6 +64,16 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
                     "getAppStoragePath" -> {
                         result.success(applicationContext.filesDir.absolutePath)
                     }
+                    "getPlatformDek" -> {
+                        try {
+                            val dek = AndroidKeystoreProvider.getOrCreateDek(applicationContext)
+                            result.success(dek)
+                        } catch (e: KeystoreLockedException) {
+                            result.error("KEYSTORE_LOCKED", e.message, null)
+                        } catch (e: Exception) {
+                            result.error("KEYSTORE_ERROR", e.message, null)
+                        }
+                    }
                     "writeFrame" -> {
                         val target = call.argument<String>("target")
                         val data = call.argument<ByteArray>("data")

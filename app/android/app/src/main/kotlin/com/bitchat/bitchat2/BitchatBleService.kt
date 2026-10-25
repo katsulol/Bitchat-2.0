@@ -207,6 +207,14 @@ class BitchatBleService : Service() {
         startServiceInForeground()
         localShortIdHex = shortIdHex
 
+        // Service-owned hardware Keystore verification: ensure DEK is accessible from background service
+        try {
+            val dek = AndroidKeystoreProvider.getOrCreateDek(this)
+            Log.i(TAG, "Hardware Keystore DEK verified for background service runtime (length=${dek.size})")
+        } catch (e: Exception) {
+            Log.e(TAG, "Hardware Keystore DEK verification failed: ${e.message}", e)
+        }
+
         val adapter = bluetoothAdapter ?: return
         if (!adapter.isEnabled) {
             Log.w(TAG, "Bluetooth adapter is disabled")
