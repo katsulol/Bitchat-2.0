@@ -434,6 +434,15 @@ impl DeliveryCoordinator {
         false
     }
 
+    /// Wake up any non-terminal messages queued for this peer so they attempt immediately.
+    pub fn reset_backoff_for_peer(&mut self, recipient: &ShortId, now: Instant) {
+        for record in self.records.values_mut() {
+            if record.recipient_short_id == *recipient && !record.state.is_terminal() {
+                record.next_attempt_at = now;
+            }
+        }
+    }
+
     /// Check timers, advancing expired or exhausted messages to terminal states.
     pub fn check_timeouts(&mut self, now: Instant) -> Vec<DeliveryAction> {
         let mut actions = Vec::new();

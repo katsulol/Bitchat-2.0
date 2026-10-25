@@ -292,7 +292,7 @@ pub async fn send_message(
             recipient_short_id: target,
             body: text.as_bytes().to_vec(),
             ttl: mode.default_ttl(),
-            max_attempts: 5,
+            max_attempts: 12,
             is_privacy_mode: mode == MessageMode::Privacy,
         },
         std::time::Instant::now(),
@@ -425,9 +425,10 @@ pub async fn pump_outbox() -> Result<usize, String> {
                                 .peer_mgr
                                 .send_encrypted(&mut svc.node, target, &padded)
                                 .await;
+                            let delay_ms = (1000u64 * (1u64 << record.attempts.min(4))).min(15000);
                             let _ = svc.delivery_coord.mark_in_flight(
                                 &logical_id,
-                                std::time::Duration::from_millis(1000),
+                                std::time::Duration::from_millis(delay_ms),
                                 now_instant,
                             );
                             let _ = svc.outbox_mgr.mark_in_flight(&logical_id, now_secs);
@@ -435,6 +436,12 @@ pub async fn pump_outbox() -> Result<usize, String> {
                         }
                     } else {
                         let _ = svc.peer_mgr.initiate_handshake(&mut svc.node, target).await;
+                        let delay_ms = (1000u64 * (1u64 << record.attempts.min(4))).min(10000);
+                        let _ = svc.delivery_coord.mark_in_flight(
+                            &logical_id,
+                            std::time::Duration::from_millis(delay_ms),
+                            now_instant,
+                        );
                     }
                 }
             }
@@ -506,6 +513,10 @@ pub async fn on_peer_connected(short_id: String) -> Result<(), String> {
     let mut lock = get_service().write().await;
     let svc = lock.as_mut().ok_or("Service not initialized")?;
     svc.handle.on_peer_connected(peer);
+
+    // Reset backoff for any queued messages waiting for this peer
+    svc.delivery_coord
+        .reset_backoff_for_peer(&peer, std::time::Instant::now());
 
     // Auto-initiate handshake with peer if lower ShortId and session not ready
     let my_short = svc.node.identity().short_id();
