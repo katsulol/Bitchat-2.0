@@ -2,7 +2,7 @@ topology,policy,seed,transmissions,delivery_ratio,mean_latency_ms,p95_latency_ms
 "Line (10 nodes)","NaiveFlood",1000,8,0.8889,10.00,10.00,6,0
 "Line (10 nodes)","NaiveFlood",1001,8,0.8889,10.00,10.00,6,0
 "Line (10 nodes)","NaiveFlood",1002,8,0.8889,10.00,10.00,6,0
-"Line (10 nodes)","NaiveFlood",1003,6,0.5556,10.00,10.00,4,0
+"Line (10 nodes)","NaiveFlood",1003,2,0.1111,10.00,10.00,0,0
 "Line (10 nodes)","NaiveFlood",1004,8,0.8889,10.00,10.00,6,0
 "Line (10 nodes)","NaiveFlood",1005,8,0.8889,10.00,10.00,5,0
 "Line (10 nodes)","NaiveFlood",1006,7,0.6667,10.00,10.00,5,0
@@ -12,290 +12,290 @@ topology,policy,seed,transmissions,delivery_ratio,mean_latency_ms,p95_latency_ms
 "Line (10 nodes)","NaiveFlood",1010,8,0.8889,10.00,10.00,6,0
 "Line (10 nodes)","NaiveFlood",1011,8,0.8889,10.00,10.00,6,0
 "Line (10 nodes)","NaiveFlood",1012,8,0.8889,10.00,10.00,6,0
-"Line (10 nodes)","NaiveFlood",1013,2,0.1111,10.00,10.00,0,0
+"Line (10 nodes)","NaiveFlood",1013,8,0.8889,10.00,10.00,6,0
 "Line (10 nodes)","NaiveFlood",1014,8,0.8889,10.00,10.00,5,0
 "Line (10 nodes)","NaiveFlood",1015,8,0.8889,10.00,10.00,6,0
 "Line (10 nodes)","NaiveFlood",1016,1,0.0000,0.00,0.00,0,0
-"Line (10 nodes)","NaiveFlood",1017,8,0.8889,10.00,10.00,5,0
+"Line (10 nodes)","NaiveFlood",1017,3,0.2222,10.00,10.00,1,0
 "Line (10 nodes)","NaiveFlood",1018,8,0.8889,10.00,10.00,6,0
-"Line (10 nodes)","NaiveFlood",1019,5,0.4444,10.00,10.00,3,0
-"Line (10 nodes)","AdaptiveFlood",1000,8,0.8889,80.00,150.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1001,8,0.8889,117.50,230.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1002,8,0.8889,117.50,230.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1003,2,0.1111,10.00,10.00,0,0
-"Line (10 nodes)","AdaptiveFlood",1004,8,0.8889,162.50,300.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1005,5,0.4444,52.50,100.00,3,0
-"Line (10 nodes)","AdaptiveFlood",1006,8,0.7778,125.71,260.00,5,0
-"Line (10 nodes)","AdaptiveFlood",1007,8,0.8889,101.25,200.00,6,0
+"Line (10 nodes)","NaiveFlood",1019,8,0.8889,10.00,10.00,5,0
+"Line (10 nodes)","AdaptiveFlood",1000,8,0.8889,125.00,230.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1001,8,0.8889,115.00,220.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1002,8,0.8889,113.75,210.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1003,6,0.5556,102.00,190.00,4,0
+"Line (10 nodes)","AdaptiveFlood",1004,8,0.8889,101.25,200.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1005,5,0.4444,45.00,90.00,3,0
+"Line (10 nodes)","AdaptiveFlood",1006,7,0.6667,75.00,150.00,5,0
+"Line (10 nodes)","AdaptiveFlood",1007,8,0.8889,116.25,210.00,6,0
 "Line (10 nodes)","AdaptiveFlood",1008,1,0.0000,0.00,0.00,0,0
-"Line (10 nodes)","AdaptiveFlood",1009,8,0.8889,145.00,290.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1010,8,0.8889,108.75,210.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1011,8,0.8889,130.00,220.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1012,8,0.8889,143.75,290.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1013,2,0.1111,10.00,10.00,0,0
-"Line (10 nodes)","AdaptiveFlood",1014,7,0.6667,103.33,190.00,5,0
-"Line (10 nodes)","AdaptiveFlood",1015,8,0.8889,85.00,180.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1009,8,0.8889,135.00,240.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1010,8,0.8889,111.25,220.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1011,8,0.8889,108.75,190.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1012,8,0.8889,130.00,260.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1013,8,0.8889,87.50,160.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1014,7,0.6667,100.00,160.00,5,0
+"Line (10 nodes)","AdaptiveFlood",1015,8,0.8889,125.00,240.00,6,0
 "Line (10 nodes)","AdaptiveFlood",1016,1,0.0000,0.00,0.00,0,0
-"Line (10 nodes)","AdaptiveFlood",1017,3,0.2222,25.00,40.00,1,0
-"Line (10 nodes)","AdaptiveFlood",1018,8,0.8889,87.50,170.00,6,0
-"Line (10 nodes)","AdaptiveFlood",1019,5,0.4444,37.50,70.00,3,0
-"Line (10 nodes)","CoverageAware",1000,8,0.8889,128.75,250.00,6,0
-"Line (10 nodes)","CoverageAware",1001,8,0.8889,136.25,240.00,6,0
-"Line (10 nodes)","CoverageAware",1002,8,0.8889,153.75,280.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1017,3,0.2222,35.00,60.00,1,0
+"Line (10 nodes)","AdaptiveFlood",1018,8,0.8889,86.25,160.00,6,0
+"Line (10 nodes)","AdaptiveFlood",1019,5,0.4444,62.50,110.00,3,0
+"Line (10 nodes)","CoverageAware",1000,8,0.8889,82.50,190.00,6,0
+"Line (10 nodes)","CoverageAware",1001,8,0.8889,112.50,200.00,6,0
+"Line (10 nodes)","CoverageAware",1002,8,0.8889,107.50,210.00,6,0
 "Line (10 nodes)","CoverageAware",1003,2,0.1111,10.00,10.00,0,0
-"Line (10 nodes)","CoverageAware",1004,8,0.8889,91.25,160.00,6,0
-"Line (10 nodes)","CoverageAware",1005,8,0.8889,111.25,230.00,5,0
-"Line (10 nodes)","CoverageAware",1006,8,0.7778,97.14,180.00,5,0
-"Line (10 nodes)","CoverageAware",1007,8,0.8889,112.50,220.00,6,0
+"Line (10 nodes)","CoverageAware",1004,8,0.8889,72.50,140.00,6,0
+"Line (10 nodes)","CoverageAware",1005,5,0.4444,37.50,60.00,3,0
+"Line (10 nodes)","CoverageAware",1006,7,0.6667,88.33,170.00,5,0
+"Line (10 nodes)","CoverageAware",1007,8,0.8889,116.25,210.00,6,0
 "Line (10 nodes)","CoverageAware",1008,1,0.0000,0.00,0.00,0,0
-"Line (10 nodes)","CoverageAware",1009,8,0.8889,112.50,210.00,6,0
-"Line (10 nodes)","CoverageAware",1010,8,0.8889,161.25,290.00,6,0
-"Line (10 nodes)","CoverageAware",1011,8,0.8889,98.75,220.00,6,0
-"Line (10 nodes)","CoverageAware",1012,8,0.8889,130.00,230.00,6,0
-"Line (10 nodes)","CoverageAware",1013,8,0.8889,143.75,270.00,6,0
-"Line (10 nodes)","CoverageAware",1014,7,0.6667,73.33,130.00,5,0
-"Line (10 nodes)","CoverageAware",1015,8,0.8889,140.00,270.00,6,0
+"Line (10 nodes)","CoverageAware",1009,8,0.8889,120.00,220.00,6,0
+"Line (10 nodes)","CoverageAware",1010,8,0.8889,160.00,310.00,6,0
+"Line (10 nodes)","CoverageAware",1011,8,0.8889,106.25,210.00,6,0
+"Line (10 nodes)","CoverageAware",1012,8,0.8889,98.75,200.00,6,0
+"Line (10 nodes)","CoverageAware",1013,2,0.1111,10.00,10.00,0,0
+"Line (10 nodes)","CoverageAware",1014,7,0.6667,55.00,120.00,5,0
+"Line (10 nodes)","CoverageAware",1015,8,0.8889,122.50,230.00,6,0
 "Line (10 nodes)","CoverageAware",1016,1,0.0000,0.00,0.00,0,0
-"Line (10 nodes)","CoverageAware",1017,8,0.8889,116.25,220.00,5,0
-"Line (10 nodes)","CoverageAware",1018,8,0.8889,91.25,200.00,6,0
-"Line (10 nodes)","CoverageAware",1019,5,0.4444,55.00,100.00,3,0
+"Line (10 nodes)","CoverageAware",1017,3,0.2222,30.00,50.00,1,0
+"Line (10 nodes)","CoverageAware",1018,8,0.8889,118.75,210.00,6,0
+"Line (10 nodes)","CoverageAware",1019,8,0.8889,146.25,310.00,5,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1000,34,0.7917,10.00,10.00,73,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1001,33,0.7917,10.00,10.00,72,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1002,33,0.7917,10.00,10.00,65,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1003,34,0.7917,10.00,10.00,72,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1004,33,0.7917,10.00,10.00,69,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1001,34,0.7917,10.00,10.00,73,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1002,34,0.7917,10.00,10.00,69,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1003,28,0.7292,10.00,10.00,57,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1004,34,0.7917,10.00,10.00,71,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1005,34,0.7917,10.00,10.00,76,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1006,27,0.7083,10.00,10.00,56,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1006,33,0.7917,10.00,10.00,71,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1007,34,0.7917,10.00,10.00,75,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1008,32,0.7708,10.00,10.00,64,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1008,33,0.7917,10.00,10.00,66,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1009,34,0.7917,10.00,10.00,73,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1010,34,0.7917,10.00,10.00,75,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1011,33,0.7708,10.00,10.00,68,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1012,34,0.7917,10.00,10.00,75,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1013,34,0.7917,10.00,10.00,73,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1013,34,0.7917,10.00,10.00,72,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1014,34,0.7917,10.00,10.00,73,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1015,34,0.7917,10.00,10.00,67,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1016,32,0.7708,10.00,10.00,67,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1017,34,0.7708,10.00,10.00,74,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1015,33,0.7917,10.00,10.00,66,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1016,30,0.7292,10.00,10.00,61,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1017,32,0.7917,10.00,10.00,68,0
 "Grid (7x7, 49 nodes)","NaiveFlood",1018,33,0.7917,10.00,10.00,72,0
-"Grid (7x7, 49 nodes)","NaiveFlood",1019,33,0.7917,10.00,10.00,68,0
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1000,31,0.7708,115.41,210.00,65,1
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1001,31,0.7917,133.68,220.00,62,3
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1002,31,0.7917,153.68,280.00,57,3
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1003,32,0.7917,106.58,210.00,64,1
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1004,31,0.7917,137.63,250.00,62,2
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1005,31,0.7917,135.26,220.00,66,2
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1006,30,0.7917,147.37,260.00,57,4
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1007,31,0.7917,128.42,200.00,64,3
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1008,32,0.7917,102.63,200.00,61,1
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1009,32,0.7917,152.11,250.00,65,2
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1010,31,0.7917,117.11,250.00,63,3
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1011,30,0.7917,122.37,240.00,55,3
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1012,31,0.7917,151.58,270.00,66,2
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1013,30,0.7917,170.79,320.00,58,2
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1014,30,0.7917,122.63,220.00,61,2
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1015,30,0.7917,146.05,270.00,54,4
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1016,27,0.7083,98.53,220.00,52,1
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1017,31,0.7917,154.74,290.00,63,1
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1018,31,0.7917,148.16,240.00,62,3
-"Grid (7x7, 49 nodes)","AdaptiveFlood",1019,31,0.7708,159.46,280.00,60,2
-"Grid (7x7, 49 nodes)","CoverageAware",1000,33,0.7917,124.47,280.00,70,0
-"Grid (7x7, 49 nodes)","CoverageAware",1001,33,0.7917,152.11,230.00,70,1
-"Grid (7x7, 49 nodes)","CoverageAware",1002,30,0.7917,144.74,310.00,55,2
-"Grid (7x7, 49 nodes)","CoverageAware",1003,30,0.7708,196.49,320.00,61,0
-"Grid (7x7, 49 nodes)","CoverageAware",1004,30,0.7292,139.71,280.00,63,0
-"Grid (7x7, 49 nodes)","CoverageAware",1005,34,0.7917,144.47,270.00,76,0
-"Grid (7x7, 49 nodes)","CoverageAware",1006,33,0.7917,177.11,320.00,70,0
-"Grid (7x7, 49 nodes)","CoverageAware",1007,31,0.7708,119.73,230.00,67,0
-"Grid (7x7, 49 nodes)","CoverageAware",1008,31,0.7708,235.14,430.00,60,0
-"Grid (7x7, 49 nodes)","CoverageAware",1009,32,0.7708,121.08,240.00,69,0
-"Grid (7x7, 49 nodes)","CoverageAware",1010,33,0.7917,131.05,220.00,73,0
-"Grid (7x7, 49 nodes)","CoverageAware",1011,32,0.7917,114.21,220.00,63,2
-"Grid (7x7, 49 nodes)","CoverageAware",1012,34,0.7917,177.37,300.00,75,0
-"Grid (7x7, 49 nodes)","CoverageAware",1013,32,0.7917,139.74,270.00,64,1
-"Grid (7x7, 49 nodes)","CoverageAware",1014,33,0.7917,162.89,300.00,71,0
-"Grid (7x7, 49 nodes)","CoverageAware",1015,32,0.7500,168.89,290.00,65,0
-"Grid (7x7, 49 nodes)","CoverageAware",1016,28,0.7292,141.14,250.00,56,0
-"Grid (7x7, 49 nodes)","CoverageAware",1017,32,0.7708,153.51,270.00,69,0
-"Grid (7x7, 49 nodes)","CoverageAware",1018,33,0.7917,136.05,220.00,72,0
-"Grid (7x7, 49 nodes)","CoverageAware",1019,33,0.7917,142.37,240.00,68,0
-"Dense Cluster (30 nodes)","NaiveFlood",1000,30,1.0000,10.00,10.00,769,0
+"Grid (7x7, 49 nodes)","NaiveFlood",1019,31,0.7708,10.00,10.00,62,0
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1000,30,0.7917,146.05,280.00,62,2
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1001,34,0.7917,138.42,250.00,73,0
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1002,29,0.7500,156.39,270.00,54,2
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1003,32,0.7917,169.47,290.00,63,2
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1004,30,0.7917,116.32,270.00,59,3
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1005,32,0.7917,140.00,230.00,69,2
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1006,33,0.7917,155.26,280.00,68,1
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1007,30,0.7917,108.95,230.00,60,4
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1008,32,0.7917,207.63,300.00,61,1
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1009,31,0.7917,193.16,290.00,61,2
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1010,31,0.7917,122.37,250.00,65,2
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1011,31,0.7917,139.47,230.00,59,3
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1012,29,0.7917,115.53,200.00,56,4
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1013,29,0.7708,117.57,200.00,54,3
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1014,33,0.7917,146.32,260.00,69,1
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1015,34,0.7917,154.74,290.00,67,0
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1016,31,0.7708,134.05,240.00,63,0
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1017,32,0.7917,126.05,240.00,66,0
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1018,31,0.7917,148.68,280.00,62,2
+"Grid (7x7, 49 nodes)","AdaptiveFlood",1019,32,0.7917,163.42,270.00,65,1
+"Grid (7x7, 49 nodes)","CoverageAware",1000,32,0.7917,128.95,230.00,70,0
+"Grid (7x7, 49 nodes)","CoverageAware",1001,33,0.7917,161.58,280.00,70,1
+"Grid (7x7, 49 nodes)","CoverageAware",1002,34,0.7917,113.95,250.00,69,0
+"Grid (7x7, 49 nodes)","CoverageAware",1003,27,0.6875,199.09,340.00,56,0
+"Grid (7x7, 49 nodes)","CoverageAware",1004,33,0.7917,130.53,260.00,69,0
+"Grid (7x7, 49 nodes)","CoverageAware",1005,33,0.7917,133.95,230.00,72,1
+"Grid (7x7, 49 nodes)","CoverageAware",1006,34,0.7917,152.63,230.00,72,0
+"Grid (7x7, 49 nodes)","CoverageAware",1007,32,0.7917,130.53,200.00,69,1
+"Grid (7x7, 49 nodes)","CoverageAware",1008,32,0.7917,182.11,310.00,61,0
+"Grid (7x7, 49 nodes)","CoverageAware",1009,34,0.7917,143.16,260.00,73,0
+"Grid (7x7, 49 nodes)","CoverageAware",1010,30,0.7708,157.30,260.00,61,2
+"Grid (7x7, 49 nodes)","CoverageAware",1011,34,0.7917,162.63,280.00,70,0
+"Grid (7x7, 49 nodes)","CoverageAware",1012,32,0.7917,111.05,230.00,68,1
+"Grid (7x7, 49 nodes)","CoverageAware",1013,33,0.7917,156.84,300.00,71,0
+"Grid (7x7, 49 nodes)","CoverageAware",1014,33,0.7917,115.26,210.00,69,0
+"Grid (7x7, 49 nodes)","CoverageAware",1015,33,0.7500,121.94,250.00,67,0
+"Grid (7x7, 49 nodes)","CoverageAware",1016,31,0.7917,168.42,300.00,64,1
+"Grid (7x7, 49 nodes)","CoverageAware",1017,33,0.7917,144.21,240.00,70,0
+"Grid (7x7, 49 nodes)","CoverageAware",1018,34,0.7917,178.42,290.00,74,0
+"Grid (7x7, 49 nodes)","CoverageAware",1019,34,0.7917,136.32,270.00,71,0
+"Dense Cluster (30 nodes)","NaiveFlood",1000,30,1.0000,10.00,10.00,767,0
 "Dense Cluster (30 nodes)","NaiveFlood",1001,30,1.0000,10.00,10.00,765,0
-"Dense Cluster (30 nodes)","NaiveFlood",1002,30,1.0000,10.00,10.00,772,0
-"Dense Cluster (30 nodes)","NaiveFlood",1003,30,1.0000,10.00,10.00,768,0
-"Dense Cluster (30 nodes)","NaiveFlood",1004,30,1.0000,10.00,10.00,768,0
+"Dense Cluster (30 nodes)","NaiveFlood",1002,30,1.0000,10.00,10.00,770,0
+"Dense Cluster (30 nodes)","NaiveFlood",1003,30,1.0000,10.00,10.00,769,0
+"Dense Cluster (30 nodes)","NaiveFlood",1004,30,1.0000,10.00,10.00,770,0
 "Dense Cluster (30 nodes)","NaiveFlood",1005,30,1.0000,10.00,10.00,764,0
-"Dense Cluster (30 nodes)","NaiveFlood",1006,30,1.0000,10.00,10.00,777,0
-"Dense Cluster (30 nodes)","NaiveFlood",1007,30,1.0000,10.00,10.00,774,0
+"Dense Cluster (30 nodes)","NaiveFlood",1006,30,1.0000,10.00,10.00,776,0
+"Dense Cluster (30 nodes)","NaiveFlood",1007,30,1.0000,10.00,10.00,777,0
 "Dense Cluster (30 nodes)","NaiveFlood",1008,30,1.0000,10.00,10.00,769,0
 "Dense Cluster (30 nodes)","NaiveFlood",1009,30,1.0000,10.00,10.00,770,0
-"Dense Cluster (30 nodes)","NaiveFlood",1010,30,1.0000,10.00,10.00,765,0
-"Dense Cluster (30 nodes)","NaiveFlood",1011,30,1.0000,10.00,10.00,758,0
-"Dense Cluster (30 nodes)","NaiveFlood",1012,30,1.0000,10.00,10.00,773,0
-"Dense Cluster (30 nodes)","NaiveFlood",1013,30,1.0000,10.00,10.00,776,0
-"Dense Cluster (30 nodes)","NaiveFlood",1014,30,1.0000,10.00,10.00,773,0
+"Dense Cluster (30 nodes)","NaiveFlood",1010,30,1.0000,10.00,10.00,761,0
+"Dense Cluster (30 nodes)","NaiveFlood",1011,30,1.0000,10.00,10.00,760,0
+"Dense Cluster (30 nodes)","NaiveFlood",1012,30,1.0000,10.00,10.00,775,0
+"Dense Cluster (30 nodes)","NaiveFlood",1013,30,1.0000,10.00,10.00,777,0
+"Dense Cluster (30 nodes)","NaiveFlood",1014,30,1.0000,10.00,10.00,774,0
 "Dense Cluster (30 nodes)","NaiveFlood",1015,30,1.0000,10.00,10.00,759,0
-"Dense Cluster (30 nodes)","NaiveFlood",1016,30,1.0000,10.00,10.00,769,0
-"Dense Cluster (30 nodes)","NaiveFlood",1017,30,1.0000,10.00,10.00,770,0
-"Dense Cluster (30 nodes)","NaiveFlood",1018,30,1.0000,10.00,10.00,763,0
-"Dense Cluster (30 nodes)","NaiveFlood",1019,30,1.0000,10.00,10.00,764,0
-"Dense Cluster (30 nodes)","AdaptiveFlood",1000,4,1.0000,10.00,10.00,79,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1001,4,1.0000,10.00,10.00,80,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1002,4,1.0000,10.00,10.00,76,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1003,5,1.0000,11.03,20.00,101,25
-"Dense Cluster (30 nodes)","AdaptiveFlood",1004,4,1.0000,11.72,10.00,77,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1005,4,1.0000,10.69,10.00,82,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1006,4,1.0000,12.76,50.00,78,26
+"Dense Cluster (30 nodes)","NaiveFlood",1016,30,1.0000,10.00,10.00,770,0
+"Dense Cluster (30 nodes)","NaiveFlood",1017,30,1.0000,10.00,10.00,771,0
+"Dense Cluster (30 nodes)","NaiveFlood",1018,30,1.0000,10.00,10.00,764,0
+"Dense Cluster (30 nodes)","NaiveFlood",1019,30,1.0000,10.00,10.00,765,0
+"Dense Cluster (30 nodes)","AdaptiveFlood",1000,5,1.0000,10.00,10.00,106,25
+"Dense Cluster (30 nodes)","AdaptiveFlood",1001,4,1.0000,10.00,10.00,81,26
+"Dense Cluster (30 nodes)","AdaptiveFlood",1002,4,1.0000,10.00,10.00,75,26
+"Dense Cluster (30 nodes)","AdaptiveFlood",1003,5,1.0000,11.38,20.00,101,25
+"Dense Cluster (30 nodes)","AdaptiveFlood",1004,4,1.0000,10.34,10.00,77,26
+"Dense Cluster (30 nodes)","AdaptiveFlood",1005,4,1.0000,11.38,10.00,82,26
+"Dense Cluster (30 nodes)","AdaptiveFlood",1006,6,1.0000,10.00,10.00,131,24
 "Dense Cluster (30 nodes)","AdaptiveFlood",1007,4,1.0000,10.00,10.00,81,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1008,6,1.0000,11.38,20.00,125,24
+"Dense Cluster (30 nodes)","AdaptiveFlood",1008,4,1.0000,11.38,20.00,74,26
 "Dense Cluster (30 nodes)","AdaptiveFlood",1009,4,1.0000,10.00,10.00,79,26
 "Dense Cluster (30 nodes)","AdaptiveFlood",1010,5,1.0000,10.00,10.00,108,25
-"Dense Cluster (30 nodes)","AdaptiveFlood",1011,5,1.0000,10.00,10.00,103,25
+"Dense Cluster (30 nodes)","AdaptiveFlood",1011,4,1.0000,10.00,10.00,76,26
 "Dense Cluster (30 nodes)","AdaptiveFlood",1012,4,1.0000,10.00,10.00,82,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1013,5,1.0000,10.34,10.00,104,25
-"Dense Cluster (30 nodes)","AdaptiveFlood",1014,4,1.0000,10.00,10.00,79,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1015,5,1.0000,11.03,10.00,100,25
-"Dense Cluster (30 nodes)","AdaptiveFlood",1016,4,1.0000,10.69,20.00,78,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1017,4,1.0000,10.34,10.00,78,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1018,4,1.0000,10.00,10.00,80,26
-"Dense Cluster (30 nodes)","AdaptiveFlood",1019,5,1.0000,12.76,50.00,104,25
-"Dense Cluster (30 nodes)","CoverageAware",1000,4,1.0000,10.00,10.00,80,26
+"Dense Cluster (30 nodes)","AdaptiveFlood",1013,5,1.0000,10.69,10.00,104,25
+"Dense Cluster (30 nodes)","AdaptiveFlood",1014,5,1.0000,10.69,20.00,106,25
+"Dense Cluster (30 nodes)","AdaptiveFlood",1015,4,1.0000,11.03,10.00,74,26
+"Dense Cluster (30 nodes)","AdaptiveFlood",1016,5,1.0000,10.69,20.00,103,25
+"Dense Cluster (30 nodes)","AdaptiveFlood",1017,4,1.0000,10.69,10.00,78,26
+"Dense Cluster (30 nodes)","AdaptiveFlood",1018,4,1.0000,10.69,20.00,80,26
+"Dense Cluster (30 nodes)","AdaptiveFlood",1019,5,1.0000,13.45,60.00,104,25
+"Dense Cluster (30 nodes)","CoverageAware",1000,5,1.0000,10.00,10.00,106,25
 "Dense Cluster (30 nodes)","CoverageAware",1001,4,1.0000,10.00,10.00,80,26
-"Dense Cluster (30 nodes)","CoverageAware",1002,5,1.0000,10.00,10.00,104,25
-"Dense Cluster (30 nodes)","CoverageAware",1003,4,1.0000,13.10,40.00,77,26
+"Dense Cluster (30 nodes)","CoverageAware",1002,5,1.0000,10.00,10.00,103,25
+"Dense Cluster (30 nodes)","CoverageAware",1003,4,1.0000,12.07,30.00,77,26
 "Dense Cluster (30 nodes)","CoverageAware",1004,5,1.0000,10.34,10.00,104,25
-"Dense Cluster (30 nodes)","CoverageAware",1005,4,1.0000,10.34,10.00,82,26
-"Dense Cluster (30 nodes)","CoverageAware",1006,5,1.0000,10.69,10.00,104,25
+"Dense Cluster (30 nodes)","CoverageAware",1005,4,1.0000,10.69,10.00,82,26
+"Dense Cluster (30 nodes)","CoverageAware",1006,4,1.0000,11.38,30.00,78,26
 "Dense Cluster (30 nodes)","CoverageAware",1007,4,1.0000,10.00,10.00,81,26
-"Dense Cluster (30 nodes)","CoverageAware",1008,5,1.0000,12.76,30.00,99,25
-"Dense Cluster (30 nodes)","CoverageAware",1009,4,1.0000,10.00,10.00,79,26
+"Dense Cluster (30 nodes)","CoverageAware",1008,5,1.0000,10.00,10.00,99,25
+"Dense Cluster (30 nodes)","CoverageAware",1009,5,1.0000,10.00,10.00,106,25
 "Dense Cluster (30 nodes)","CoverageAware",1010,4,1.0000,10.00,10.00,81,26
-"Dense Cluster (30 nodes)","CoverageAware",1011,5,1.0000,10.00,10.00,103,25
+"Dense Cluster (30 nodes)","CoverageAware",1011,4,1.0000,10.00,10.00,76,26
 "Dense Cluster (30 nodes)","CoverageAware",1012,4,1.0000,10.00,10.00,82,26
-"Dense Cluster (30 nodes)","CoverageAware",1013,4,1.0000,10.34,10.00,79,26
-"Dense Cluster (30 nodes)","CoverageAware",1014,4,1.0000,10.69,20.00,79,26
-"Dense Cluster (30 nodes)","CoverageAware",1015,4,1.0000,10.34,10.00,75,26
-"Dense Cluster (30 nodes)","CoverageAware",1016,4,1.0000,10.69,20.00,77,26
-"Dense Cluster (30 nodes)","CoverageAware",1017,4,1.0000,10.00,10.00,78,26
-"Dense Cluster (30 nodes)","CoverageAware",1018,4,1.0000,10.69,20.00,80,26
-"Dense Cluster (30 nodes)","CoverageAware",1019,5,1.0000,10.69,20.00,104,25
-"Random Geometric (50 nodes)","NaiveFlood",1000,50,1.0000,10.00,10.00,344,0
-"Random Geometric (50 nodes)","NaiveFlood",1001,50,1.0000,10.00,10.00,324,0
+"Dense Cluster (30 nodes)","CoverageAware",1013,5,1.0000,11.72,10.00,104,25
+"Dense Cluster (30 nodes)","CoverageAware",1014,5,1.0000,10.69,20.00,106,25
+"Dense Cluster (30 nodes)","CoverageAware",1015,4,1.0000,11.03,10.00,74,26
+"Dense Cluster (30 nodes)","CoverageAware",1016,4,1.0000,12.76,50.00,77,26
+"Dense Cluster (30 nodes)","CoverageAware",1017,4,1.0000,10.34,10.00,79,26
+"Dense Cluster (30 nodes)","CoverageAware",1018,5,1.0000,11.38,30.00,105,25
+"Dense Cluster (30 nodes)","CoverageAware",1019,4,1.0000,10.69,20.00,76,26
+"Random Geometric (50 nodes)","NaiveFlood",1000,50,1.0000,10.00,10.00,343,0
+"Random Geometric (50 nodes)","NaiveFlood",1001,50,1.0000,10.00,10.00,325,0
 "Random Geometric (50 nodes)","NaiveFlood",1002,50,1.0000,10.00,10.00,328,0
-"Random Geometric (50 nodes)","NaiveFlood",1003,50,1.0000,10.00,10.00,356,0
+"Random Geometric (50 nodes)","NaiveFlood",1003,49,1.0000,10.00,10.00,349,0
 "Random Geometric (50 nodes)","NaiveFlood",1004,48,0.9592,10.00,10.00,458,0
 "Random Geometric (50 nodes)","NaiveFlood",1005,48,1.0000,10.00,10.00,354,0
 "Random Geometric (50 nodes)","NaiveFlood",1006,50,1.0000,10.00,10.00,361,0
 "Random Geometric (50 nodes)","NaiveFlood",1007,50,1.0000,10.00,10.00,427,0
-"Random Geometric (50 nodes)","NaiveFlood",1008,37,0.8980,10.00,10.00,259,0
+"Random Geometric (50 nodes)","NaiveFlood",1008,12,0.2449,10.00,10.00,33,0
 "Random Geometric (50 nodes)","NaiveFlood",1009,50,1.0000,10.00,10.00,345,0
 "Random Geometric (50 nodes)","NaiveFlood",1010,50,1.0000,10.00,10.00,335,0
 "Random Geometric (50 nodes)","NaiveFlood",1011,50,1.0000,10.00,10.00,375,0
 "Random Geometric (50 nodes)","NaiveFlood",1012,50,1.0000,10.00,10.00,422,0
-"Random Geometric (50 nodes)","NaiveFlood",1013,50,1.0000,10.00,10.00,320,0
-"Random Geometric (50 nodes)","NaiveFlood",1014,50,1.0000,10.00,10.00,357,0
-"Random Geometric (50 nodes)","NaiveFlood",1015,50,1.0000,10.00,10.00,436,0
+"Random Geometric (50 nodes)","NaiveFlood",1013,50,1.0000,10.00,10.00,321,0
+"Random Geometric (50 nodes)","NaiveFlood",1014,50,1.0000,10.00,10.00,358,0
+"Random Geometric (50 nodes)","NaiveFlood",1015,49,1.0000,10.00,10.00,425,0
 "Random Geometric (50 nodes)","NaiveFlood",1016,50,1.0000,10.00,10.00,366,0
 "Random Geometric (50 nodes)","NaiveFlood",1017,46,1.0000,10.00,10.00,401,0
-"Random Geometric (50 nodes)","NaiveFlood",1018,50,1.0000,10.00,10.00,375,0
+"Random Geometric (50 nodes)","NaiveFlood",1018,50,1.0000,10.00,10.00,374,0
 "Random Geometric (50 nodes)","NaiveFlood",1019,50,1.0000,10.00,10.00,325,0
-"Random Geometric (50 nodes)","AdaptiveFlood",1000,25,1.0000,146.53,240.00,128,24
-"Random Geometric (50 nodes)","AdaptiveFlood",1001,22,0.8163,109.00,270.00,118,18
-"Random Geometric (50 nodes)","AdaptiveFlood",1002,26,0.9796,137.29,250.00,127,18
-"Random Geometric (50 nodes)","AdaptiveFlood",1003,27,1.0000,177.35,270.00,148,23
-"Random Geometric (50 nodes)","AdaptiveFlood",1004,17,0.8571,153.57,390.00,113,18
-"Random Geometric (50 nodes)","AdaptiveFlood",1005,24,1.0000,156.53,440.00,137,24
-"Random Geometric (50 nodes)","AdaptiveFlood",1006,29,1.0000,172.45,300.00,162,21
-"Random Geometric (50 nodes)","AdaptiveFlood",1007,26,1.0000,112.24,270.00,166,24
-"Random Geometric (50 nodes)","AdaptiveFlood",1008,26,1.0000,174.08,300.00,136,22
-"Random Geometric (50 nodes)","AdaptiveFlood",1009,24,0.8776,101.63,250.00,129,20
-"Random Geometric (50 nodes)","AdaptiveFlood",1010,26,1.0000,126.94,230.00,134,24
-"Random Geometric (50 nodes)","AdaptiveFlood",1011,24,1.0000,115.51,270.00,129,26
-"Random Geometric (50 nodes)","AdaptiveFlood",1012,23,1.0000,50.20,110.00,136,27
-"Random Geometric (50 nodes)","AdaptiveFlood",1013,29,1.0000,169.18,300.00,143,21
-"Random Geometric (50 nodes)","AdaptiveFlood",1014,23,1.0000,47.96,130.00,129,27
-"Random Geometric (50 nodes)","AdaptiveFlood",1015,25,1.0000,158.16,250.00,142,25
-"Random Geometric (50 nodes)","AdaptiveFlood",1016,26,1.0000,69.80,160.00,135,24
-"Random Geometric (50 nodes)","AdaptiveFlood",1017,20,0.9592,155.11,290.00,136,21
-"Random Geometric (50 nodes)","AdaptiveFlood",1018,27,0.9592,79.36,150.00,148,21
-"Random Geometric (50 nodes)","AdaptiveFlood",1019,26,1.0000,173.27,300.00,121,22
-"Random Geometric (50 nodes)","CoverageAware",1000,28,1.0000,121.84,210.00,156,22
-"Random Geometric (50 nodes)","CoverageAware",1001,31,1.0000,132.45,280.00,165,19
-"Random Geometric (50 nodes)","CoverageAware",1002,32,1.0000,87.96,200.00,174,18
-"Random Geometric (50 nodes)","CoverageAware",1003,29,1.0000,131.22,200.00,171,20
-"Random Geometric (50 nodes)","CoverageAware",1004,22,0.9592,130.43,240.00,165,26
-"Random Geometric (50 nodes)","CoverageAware",1005,26,0.9592,130.85,380.00,171,19
-"Random Geometric (50 nodes)","CoverageAware",1006,26,1.0000,154.69,290.00,153,23
-"Random Geometric (50 nodes)","CoverageAware",1007,28,1.0000,68.98,120.00,202,22
-"Random Geometric (50 nodes)","CoverageAware",1008,25,0.9796,346.67,520.00,126,15
-"Random Geometric (50 nodes)","CoverageAware",1009,32,1.0000,91.22,220.00,193,18
-"Random Geometric (50 nodes)","CoverageAware",1010,31,1.0000,100.82,170.00,173,19
-"Random Geometric (50 nodes)","CoverageAware",1011,29,1.0000,120.41,300.00,175,21
-"Random Geometric (50 nodes)","CoverageAware",1012,27,1.0000,65.92,160.00,172,23
-"Random Geometric (50 nodes)","CoverageAware",1013,30,1.0000,105.51,200.00,161,20
-"Random Geometric (50 nodes)","CoverageAware",1014,28,1.0000,89.59,250.00,171,22
-"Random Geometric (50 nodes)","CoverageAware",1015,27,1.0000,151.84,290.00,182,23
-"Random Geometric (50 nodes)","CoverageAware",1016,29,1.0000,64.08,140.00,173,21
-"Random Geometric (50 nodes)","CoverageAware",1017,28,1.0000,206.73,340.00,193,19
-"Random Geometric (50 nodes)","CoverageAware",1018,28,1.0000,84.08,170.00,157,22
-"Random Geometric (50 nodes)","CoverageAware",1019,33,1.0000,119.18,210.00,186,17
+"Random Geometric (50 nodes)","AdaptiveFlood",1000,24,1.0000,160.20,290.00,118,24
+"Random Geometric (50 nodes)","AdaptiveFlood",1001,23,0.8776,167.21,390.00,112,18
+"Random Geometric (50 nodes)","AdaptiveFlood",1002,24,0.9592,171.28,330.00,126,24
+"Random Geometric (50 nodes)","AdaptiveFlood",1003,25,1.0000,135.92,220.00,136,25
+"Random Geometric (50 nodes)","AdaptiveFlood",1004,19,0.9592,132.34,290.00,126,29
+"Random Geometric (50 nodes)","AdaptiveFlood",1005,22,0.8980,152.05,270.00,130,22
+"Random Geometric (50 nodes)","AdaptiveFlood",1006,23,0.9388,210.87,470.00,124,20
+"Random Geometric (50 nodes)","AdaptiveFlood",1007,22,1.0000,77.76,160.00,126,28
+"Random Geometric (50 nodes)","AdaptiveFlood",1008,24,0.9592,271.06,460.00,105,17
+"Random Geometric (50 nodes)","AdaptiveFlood",1009,25,1.0000,113.67,240.00,127,25
+"Random Geometric (50 nodes)","AdaptiveFlood",1010,26,1.0000,111.02,230.00,132,24
+"Random Geometric (50 nodes)","AdaptiveFlood",1011,27,1.0000,104.29,220.00,153,23
+"Random Geometric (50 nodes)","AdaptiveFlood",1012,23,1.0000,81.63,170.00,129,27
+"Random Geometric (50 nodes)","AdaptiveFlood",1013,28,1.0000,107.96,180.00,137,22
+"Random Geometric (50 nodes)","AdaptiveFlood",1014,19,0.8980,88.18,310.00,113,23
+"Random Geometric (50 nodes)","AdaptiveFlood",1015,25,1.0000,176.94,330.00,154,25
+"Random Geometric (50 nodes)","AdaptiveFlood",1016,23,0.9796,55.21,140.00,123,26
+"Random Geometric (50 nodes)","AdaptiveFlood",1017,22,0.9796,136.46,310.00,149,24
+"Random Geometric (50 nodes)","AdaptiveFlood",1018,28,1.0000,83.27,160.00,143,22
+"Random Geometric (50 nodes)","AdaptiveFlood",1019,23,0.8980,101.82,180.00,104,17
+"Random Geometric (50 nodes)","CoverageAware",1000,28,1.0000,78.37,170.00,151,22
+"Random Geometric (50 nodes)","CoverageAware",1001,31,1.0000,109.59,260.00,164,19
+"Random Geometric (50 nodes)","CoverageAware",1002,30,1.0000,92.86,210.00,151,20
+"Random Geometric (50 nodes)","CoverageAware",1003,29,1.0000,121.84,210.00,169,21
+"Random Geometric (50 nodes)","CoverageAware",1004,23,0.9592,131.91,200.00,176,25
+"Random Geometric (50 nodes)","CoverageAware",1005,22,0.9592,68.94,240.00,127,23
+"Random Geometric (50 nodes)","CoverageAware",1006,30,1.0000,217.35,350.00,170,20
+"Random Geometric (50 nodes)","CoverageAware",1007,30,1.0000,67.35,180.00,218,20
+"Random Geometric (50 nodes)","CoverageAware",1008,28,1.0000,270.82,460.00,145,14
+"Random Geometric (50 nodes)","CoverageAware",1009,27,1.0000,123.67,280.00,160,19
+"Random Geometric (50 nodes)","CoverageAware",1010,32,1.0000,90.41,180.00,176,18
+"Random Geometric (50 nodes)","CoverageAware",1011,30,1.0000,139.59,320.00,189,20
+"Random Geometric (50 nodes)","CoverageAware",1012,27,1.0000,66.94,190.00,173,23
+"Random Geometric (50 nodes)","CoverageAware",1013,28,0.9796,92.08,180.00,152,18
+"Random Geometric (50 nodes)","CoverageAware",1014,28,1.0000,60.82,130.00,169,22
+"Random Geometric (50 nodes)","CoverageAware",1015,27,1.0000,135.92,220.00,170,23
+"Random Geometric (50 nodes)","CoverageAware",1016,30,1.0000,71.43,270.00,189,20
+"Random Geometric (50 nodes)","CoverageAware",1017,27,1.0000,167.76,260.00,180,21
+"Random Geometric (50 nodes)","CoverageAware",1018,28,1.0000,105.92,370.00,168,22
+"Random Geometric (50 nodes)","CoverageAware",1019,30,1.0000,136.33,270.00,163,20
 "Partitioned Bridge (31 nodes)","NaiveFlood",1000,31,1.0000,10.00,10.00,361,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1001,16,0.5000,10.00,10.00,173,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1001,31,1.0000,10.00,10.00,355,0
 "Partitioned Bridge (31 nodes)","NaiveFlood",1002,31,1.0000,10.00,10.00,359,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1003,31,1.0000,10.00,10.00,354,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1004,31,1.0000,10.00,10.00,362,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1005,31,1.0000,10.00,10.00,363,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1006,15,0.4667,10.00,10.00,172,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1007,31,1.0000,10.00,10.00,364,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1008,31,1.0000,10.00,10.00,358,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1009,31,1.0000,10.00,10.00,362,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1003,31,1.0000,10.00,10.00,352,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1004,31,1.0000,10.00,10.00,361,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1005,16,0.5000,10.00,10.00,179,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1006,31,1.0000,10.00,10.00,363,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1007,31,1.0000,10.00,10.00,365,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1008,31,1.0000,10.00,10.00,357,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1009,31,1.0000,10.00,10.00,363,0
 "Partitioned Bridge (31 nodes)","NaiveFlood",1010,31,1.0000,10.00,10.00,358,0
 "Partitioned Bridge (31 nodes)","NaiveFlood",1011,31,1.0000,10.00,10.00,353,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1012,15,0.4667,10.00,10.00,174,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1013,31,1.0000,10.00,10.00,361,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1012,31,1.0000,10.00,10.00,361,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1013,31,1.0000,10.00,10.00,362,0
 "Partitioned Bridge (31 nodes)","NaiveFlood",1014,31,1.0000,10.00,10.00,356,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1015,31,1.0000,10.00,10.00,355,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1016,31,1.0000,10.00,10.00,361,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1017,31,1.0000,10.00,10.00,364,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1015,31,1.0000,10.00,10.00,356,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1016,31,1.0000,10.00,10.00,360,0
+"Partitioned Bridge (31 nodes)","NaiveFlood",1017,31,1.0000,10.00,10.00,363,0
 "Partitioned Bridge (31 nodes)","NaiveFlood",1018,31,1.0000,10.00,10.00,357,0
-"Partitioned Bridge (31 nodes)","NaiveFlood",1019,16,0.5000,10.00,10.00,170,0
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1000,4,0.4667,10.00,10.00,38,11
+"Partitioned Bridge (31 nodes)","NaiveFlood",1019,31,1.0000,10.00,10.00,355,0
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1000,4,0.4667,10.00,10.00,37,11
 "Partitioned Bridge (31 nodes)","AdaptiveFlood",1001,4,0.4667,10.00,10.00,38,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1002,4,0.4667,10.00,10.00,35,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1003,4,0.4667,14.29,30.00,35,11
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1002,5,0.4667,10.00,10.00,47,10
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1003,9,1.0000,210.33,470.00,76,22
 "Partitioned Bridge (31 nodes)","AdaptiveFlood",1004,4,0.4667,10.00,10.00,38,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1005,10,1.0000,55.33,100.00,95,21
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1006,6,0.5000,13.33,40.00,49,10
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1005,4,0.4667,10.00,10.00,38,11
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1006,4,0.4667,10.71,20.00,37,11
 "Partitioned Bridge (31 nodes)","AdaptiveFlood",1007,3,0.4667,10.00,10.00,26,12
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1008,5,0.4667,12.86,30.00,46,10
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1008,5,0.4667,13.57,50.00,46,10
 "Partitioned Bridge (31 nodes)","AdaptiveFlood",1009,4,0.4667,10.00,10.00,38,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1010,4,0.4667,10.00,10.00,38,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1011,4,0.4667,10.00,10.00,38,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1012,4,0.4667,10.00,10.00,38,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1013,4,0.4667,11.43,30.00,36,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1014,9,1.0000,217.00,430.00,77,22
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1015,8,1.0000,45.67,80.00,63,23
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1016,9,1.0000,161.67,320.00,78,22
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1017,9,1.0000,137.00,250.00,77,22
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1010,10,1.0000,91.67,180.00,93,21
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1011,9,1.0000,76.00,140.00,76,22
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1012,9,1.0000,150.33,290.00,81,22
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1013,4,0.4667,10.71,20.00,37,11
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1014,5,0.4667,11.43,30.00,47,10
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1015,4,0.4667,10.00,10.00,38,11
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1016,5,0.4667,12.86,50.00,47,10
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1017,4,0.4667,10.71,20.00,36,11
 "Partitioned Bridge (31 nodes)","AdaptiveFlood",1018,4,0.4667,10.00,10.00,37,11
-"Partitioned Bridge (31 nodes)","AdaptiveFlood",1019,4,0.4667,12.14,40.00,34,11
-"Partitioned Bridge (31 nodes)","CoverageAware",1000,11,1.0000,156.00,290.00,103,20
-"Partitioned Bridge (31 nodes)","CoverageAware",1001,9,1.0000,152.33,280.00,79,22
-"Partitioned Bridge (31 nodes)","CoverageAware",1002,10,1.0000,172.33,320.00,87,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1003,10,1.0000,206.67,400.00,88,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1004,5,0.4667,10.00,10.00,51,10
-"Partitioned Bridge (31 nodes)","CoverageAware",1005,11,1.0000,118.00,230.00,106,20
-"Partitioned Bridge (31 nodes)","CoverageAware",1006,10,1.0000,105.33,210.00,91,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1007,9,1.0000,100.00,190.00,80,22
-"Partitioned Bridge (31 nodes)","CoverageAware",1008,11,1.0000,203.33,380.00,97,20
-"Partitioned Bridge (31 nodes)","CoverageAware",1009,4,0.5000,10.00,10.00,27,12
-"Partitioned Bridge (31 nodes)","CoverageAware",1010,10,1.0000,176.67,350.00,92,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1011,10,1.0000,146.33,280.00,89,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1012,10,1.0000,77.67,150.00,93,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1013,10,1.0000,178.33,330.00,89,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1014,10,1.0000,99.33,180.00,91,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1015,11,1.0000,129.00,240.00,98,20
-"Partitioned Bridge (31 nodes)","CoverageAware",1016,9,1.0000,176.67,370.00,76,22
-"Partitioned Bridge (31 nodes)","CoverageAware",1017,10,1.0000,164.00,320.00,89,21
-"Partitioned Bridge (31 nodes)","CoverageAware",1018,9,1.0000,71.00,130.00,79,22
-"Partitioned Bridge (31 nodes)","CoverageAware",1019,10,1.0000,156.33,290.00,88,21
+"Partitioned Bridge (31 nodes)","AdaptiveFlood",1019,9,1.0000,104.33,200.00,75,22
+"Partitioned Bridge (31 nodes)","CoverageAware",1000,10,1.0000,210.33,400.00,91,21
+"Partitioned Bridge (31 nodes)","CoverageAware",1001,9,1.0000,140.67,270.00,79,22
+"Partitioned Bridge (31 nodes)","CoverageAware",1002,9,1.0000,72.67,140.00,74,22
+"Partitioned Bridge (31 nodes)","CoverageAware",1003,9,1.0000,161.00,310.00,76,22
+"Partitioned Bridge (31 nodes)","CoverageAware",1004,10,1.0000,230.00,480.00,89,21
+"Partitioned Bridge (31 nodes)","CoverageAware",1005,10,1.0000,87.00,160.00,94,21
+"Partitioned Bridge (31 nodes)","CoverageAware",1006,10,1.0000,132.00,250.00,90,21
+"Partitioned Bridge (31 nodes)","CoverageAware",1007,9,1.0000,162.67,300.00,80,22
+"Partitioned Bridge (31 nodes)","CoverageAware",1008,12,1.0000,163.33,340.00,110,19
+"Partitioned Bridge (31 nodes)","CoverageAware",1009,10,1.0000,133.00,260.00,92,21
+"Partitioned Bridge (31 nodes)","CoverageAware",1010,10,1.0000,182.00,350.00,92,21
+"Partitioned Bridge (31 nodes)","CoverageAware",1011,8,1.0000,87.00,170.00,63,23
+"Partitioned Bridge (31 nodes)","CoverageAware",1012,10,1.0000,136.33,260.00,93,21
+"Partitioned Bridge (31 nodes)","CoverageAware",1013,5,0.4667,10.71,20.00,48,10
+"Partitioned Bridge (31 nodes)","CoverageAware",1014,9,1.0000,133.67,260.00,79,22
+"Partitioned Bridge (31 nodes)","CoverageAware",1015,10,1.0000,126.00,260.00,86,21
+"Partitioned Bridge (31 nodes)","CoverageAware",1016,11,1.0000,224.00,430.00,100,20
+"Partitioned Bridge (31 nodes)","CoverageAware",1017,9,1.0000,76.67,200.00,78,22
+"Partitioned Bridge (31 nodes)","CoverageAware",1018,8,1.0000,169.00,340.00,65,23
+"Partitioned Bridge (31 nodes)","CoverageAware",1019,10,1.0000,187.33,370.00,88,21
