@@ -81,10 +81,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       });
     });
 
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 300), (_) {
-      if (mounted && _selectedRecipient != null) {
-        final ready = _bridge.isSessionReady(_selectedRecipient!);
-        if (ready != _lastSessionReady) {
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 400), (_) {
+      if (mounted) {
+        final ready = _selectedRecipient != null ? _bridge.isSessionReady(_selectedRecipient!) : false;
+        final gwPeersCount = _bridge.getGatewayRoutes().length;
+        if (ready != _lastSessionReady || gwPeersCount > 0) {
           setState(() {
             _lastSessionReady = ready;
           });
@@ -696,6 +697,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   }
 
   void _showGatewayDialog() {
+    Timer? dialogTimer;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -703,6 +705,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setModalState) {
+            dialogTimer ??= Timer.periodic(const Duration(milliseconds: 500), (_) {
+              if (context.mounted) {
+                setModalState(() {});
+              }
+            });
             final stats = _bridge.getGatewayStats();
             final isRunning = stats?.isRunning ?? false;
             final contactUri = isRunning ? _bridge.exportGatewayContact() : null;
@@ -918,7 +925,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
           },
         );
       },
-    );
+    ).whenComplete(() => dialogTimer?.cancel());
   }
 
   void _promptConnectContact(void Function(void Function()) setModalState) {

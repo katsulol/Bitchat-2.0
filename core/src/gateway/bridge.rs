@@ -167,11 +167,11 @@ impl GatewayBridge {
     ) -> Result<()> {
         let remote_id = conn.remote_id();
 
-        // Check approval whitelist
-        if !self.config.read().await.is_approved(&remote_id) {
+        // For outgoing dials, destination must be approved in advance
+        if contact_hint.is_some() && !self.config.read().await.is_approved(&remote_id) {
             self.stats.inc_rejected();
             return Err(Error::Transport(format!(
-                "Incoming gateway {remote_id} is not in approval whitelist"
+                "Outgoing gateway {remote_id} is not in approval whitelist"
             )));
         }
 
@@ -221,6 +221,7 @@ impl GatewayBridge {
                         hello.binding.verify(&remote_id).map_err(|e| {
                             Error::Transport(format!("Binding verification failed: {e}"))
                         })?;
+                        self.config.write().await.approve_gateway(remote_id);
                         hello.binding.bitchat_pubkey().map_err(|e| {
                             Error::Transport(format!("Invalid Bitchat public key: {e}"))
                         })?
