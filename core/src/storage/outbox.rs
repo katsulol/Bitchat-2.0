@@ -10,7 +10,7 @@ use std::time::Duration;
 pub enum MessageMode {
     /// Durable encrypted storage in SQLite; default TTL 24h; up to 10 retry attempts.
     Normal = 0,
-    /// Volatile heap storage only (zero-disk guarantee); strict TTL 15m; up to 5 retry attempts.
+    /// Volatile heap storage only (application-managed zero-disk guarantee); strict TTL 15m; up to 5 retry attempts.
     Privacy = 1,
 }
 

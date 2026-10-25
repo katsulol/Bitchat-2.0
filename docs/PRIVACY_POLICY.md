@@ -11,7 +11,7 @@ Bitchat 2.0 defines two discrete per-message and session policy profiles: **Norm
 
 | Characteristic | Normal Mode | Privacy Mode |
 | :--- | :--- | :--- |
-| **Outbox Storage** | Encrypted SQLite (AEAD encrypted records) | In-Memory Only (Zero-disk writes for message body) |
+| **Outbox Storage** | Encrypted SQLite (AEAD encrypted records) | In-Memory Only (Application-scoped non-persistence for message body) |
 | **Inbox Storage** | Persistent encrypted history & dedup | Volatile in-memory only (Lost on process termination) |
 | **Delivery Expiry (TTL)** | Default: 24 hours (configurable up to 7 days) | Strict: 15 minutes (configurable up to 1 hour) |
 | **Plaintext Padding** | Optional (default unpadded or bucketed) | **Mandatory** (authenticated inner bucket padding) |
@@ -46,10 +46,10 @@ Encrypted chat messages without uniform padding leak message length and conversa
 
 ## 3. Persistence & Disk Safety Guarantees
 
-### Zero-Disk Scope for Privacy Mode
+### Application-Scoped Non-Persistence for Privacy Mode
 1. **Application Invariant**: The Rust core guarantees zero intentional writes of Privacy message bodies, outbox entries, or decrypted receipts to persistent storage (SQLite, log files, or temp files).
 2. **Volatile Retention**: Privacy mode messages reside solely in heap allocations wrapped in zeroizing containers (`zeroize::ZeroizeOnDrop`).
-3. **OS Boundary Disclaimer**: The Rust core controls application-managed storage. It cannot control OS-level memory paging (swap file), OEM crash reporting dumps, or unprivileged RAM snapshotting if the device is compromised.
+3. **OS Boundary Disclaimer**: The Rust core controls application-managed storage. It explicitly cannot prevent OS-level virtual memory paging (swap file), OEM crash reporting dumps, unprivileged RAM forensic snapshotting, or flash controller wear-leveling artifacts if the physical device or operating system is compromised.
 4. **Mode Switching**: Toggling the default mode from Normal to Privacy alters the policy for *future* messages. It does NOT retroactively purge previously committed Normal messages from SQLite, nor does it write active Privacy messages to disk.
 
 ---

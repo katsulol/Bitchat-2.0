@@ -213,7 +213,7 @@ impl SqliteOutboxStore {
 
 impl OutboxStore for SqliteOutboxStore {
     fn enqueue(&mut self, record: OutboxRecord) -> Result<(), SendRejection> {
-        // Enforce zero-disk guarantee for Privacy Mode
+        // Enforce application-scoped zero-disk policy for Privacy Mode
         if record.mode == MessageMode::Privacy {
             return Err(SendRejection::StorageError(
                 "Privacy mode messages must never be written to SQLite disk storage".into(),

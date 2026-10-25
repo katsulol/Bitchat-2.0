@@ -109,7 +109,7 @@ impl OutboxManager {
                 }
             }
             MessageMode::Privacy => {
-                // Volatile heap storage only (zero-disk guarantee)
+                // Volatile heap storage only: application-scoped guarantee of zero intentional disk writes
                 if let Err(e) = self.memory_store.enqueue(record) {
                     return SendResult::Rejected(e);
                 }

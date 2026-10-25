@@ -139,6 +139,28 @@ pub fn pad_to_smallest_bucket(payload: &[u8]) -> Result<Vec<u8>> {
     )))
 }
 
+/// Inner authenticated padding helper.
+///
+/// If `bucketed` is true:
+/// - Fits into standard buckets [64, 128, 256, 512] if total needed <= 512.
+/// - If payload > 510 bytes (needed > 512), prefixes with 2-byte length without trailing bucket padding.
+///
+/// If `bucketed` is false:
+/// - Prefixes with 2-byte length prefix for reversible unpacking via `unpad_bucket`.
+pub fn pad_inner_payload(payload: &[u8], bucketed: bool) -> Result<Vec<u8>> {
+    if payload.len() > u16::MAX as usize {
+        return Err(Error::Envelope("Payload exceeds maximum u16 length".into()));
+    }
+    if bucketed && (2 + payload.len() <= 512) {
+        pad_to_smallest_bucket(payload)
+    } else {
+        let mut out = Vec::with_capacity(2 + payload.len());
+        out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        out.extend_from_slice(payload);
+        Ok(out)
+    }
+}
+
 /// Reverse bucket padding, recovering the original payload buffer.
 pub fn unpad_bucket(padded: &[u8]) -> Result<Vec<u8>> {
     if padded.len() < 2 {
@@ -503,5 +525,25 @@ mod tests {
 
         let oversized = vec![0x45; 511]; // 511 + 2 = 513 -> exceeds 512
         assert!(pad_to_smallest_bucket(&oversized).is_err());
+    }
+
+    #[test]
+    fn test_pad_inner_payload_behavior_above_512() {
+        // Below 512 with bucketed=true -> padded to standard bucket
+        let msg = b"Short message";
+        let padded = pad_inner_payload(msg, true).unwrap();
+        assert_eq!(padded.len(), 64);
+        assert_eq!(unpad_bucket(&padded).unwrap(), msg);
+
+        // Above 512 (600 bytes) with bucketed=true -> prefixed with length without padding
+        let big_msg = vec![0x99; 600];
+        let framed = pad_inner_payload(&big_msg, true).unwrap();
+        assert_eq!(framed.len(), 602);
+        assert_eq!(unpad_bucket(&framed).unwrap(), big_msg);
+
+        // Unpadded mode (bucketed=false) -> 2-byte prefix, exact length
+        let unpadded_mode = pad_inner_payload(msg, false).unwrap();
+        assert_eq!(unpadded_mode.len(), 2 + msg.len());
+        assert_eq!(unpad_bucket(&unpadded_mode).unwrap(), msg);
     }
 }

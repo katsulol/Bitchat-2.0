@@ -49,7 +49,7 @@
 ## ADR-0010: Bounded Outbox Architecture with Injected Key Provider
 - **Context**: Reliable delivery requires an outbox that survives temporary link disconnections, session renegotiations, and platform sleep cycles, while strictly observing Normal vs Privacy mode constraints.
 - **Decision**: Define a bounded `OutboxStore` trait implemented for both ephemeral In-Memory storage (mandatory for Privacy Mode) and encrypted SQLite storage (for Normal Mode). Record payloads are encrypted using AEAD (ChaCha20-Poly1305) with versioned data encryption keys. In Part A, an injected key provider allows deterministic unit testing; Part B integrates the platform Android Keystore.
-- **Consequences**: Privacy mode achieves a zero-disk guarantee for message bodies. Normal mode achieves encrypted persistence without plaintext leakage in SQLite WAL or index files.
+- **Consequences**: Privacy mode achieves an application-managed zero-disk guarantee for message bodies (no intentional persistence to SQLite, temp files, or logs; excludes OS-level swap, OEM crash dumps, and hardware forensics). Normal mode achieves encrypted persistence without plaintext leakage in SQLite WAL or index files.
 
 ## ADR-0011: Pure Router Decision Function with Typed Reason Codes
 - **Context**: Message routing across heterogeneous links (direct BLE, multi-hop BLE mesh, Iroh P2P, Iroh gateway relay) involves multiple constraints (session availability, link readiness, mode policies, rate limits). Imperative routing logic scattered across async tasks leads to race conditions and test fragility.
