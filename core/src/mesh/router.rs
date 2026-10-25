@@ -84,6 +84,10 @@ pub struct RouteContext {
     pub gateway_opted_in: bool,
     pub iroh_path: IrohPathObservation,
     pub privacy_block_relay: bool,
+    /// Whether the underlying Iroh endpoint is configured with `RelayMode::Disabled`.
+    /// Router path observation alone cannot guarantee that an active connection won't
+    /// migrate to relay mid-session or leak metadata during discovery/hole-punching.
+    pub iroh_endpoint_relay_disabled: bool,
     pub attempt_count: u32,
     pub max_attempts: u32,
     pub ble_radio_ready: bool,
@@ -133,11 +137,16 @@ impl Router {
                 // Gateway disabled by user policy -> skip to mesh flood
             } else if ctx.mode == MessageMode::Privacy
                 && ctx.privacy_block_relay
-                && (ctx.iroh_path == IrohPathObservation::Relay
-                    || ctx.iroh_path == IrohPathObservation::Mixed)
+                && (!ctx.iroh_endpoint_relay_disabled
+                    || ctx.iroh_path == IrohPathObservation::Relay
+                    || ctx.iroh_path == IrohPathObservation::Mixed
+                    || ctx.iroh_path == IrohPathObservation::Unknown)
             {
-                // In Privacy Mode, relay-exposed paths are strictly blocked if requested
-                // Candidate falls through with reason noted
+                // In Privacy Mode with strict relay restriction:
+                // Transport must enforce RelayMode::Disabled at the endpoint layer.
+                // A one-time path observation of Direct on an endpoint with relays enabled
+                // cannot prevent mid-stream path migration or discovery relay leakage.
+                // Therefore, block candidate and fall back to BLE mesh.
             } else {
                 if !ctx.has_authenticated_session {
                     return RouteDecision {
@@ -213,6 +222,7 @@ mod tests {
             gateway_opted_in: true,
             iroh_path: IrohPathObservation::Direct,
             privacy_block_relay: false,
+            iroh_endpoint_relay_disabled: false,
             attempt_count: 0,
             max_attempts: 10,
             ble_radio_ready: true,
@@ -240,6 +250,7 @@ mod tests {
             gateway_opted_in: false,
             iroh_path: IrohPathObservation::Unknown,
             privacy_block_relay: false,
+            iroh_endpoint_relay_disabled: false,
             attempt_count: 0,
             max_attempts: 10,
             ble_radio_ready: true,
@@ -268,6 +279,7 @@ mod tests {
             gateway_opted_in: true,
             iroh_path: IrohPathObservation::Direct,
             privacy_block_relay: false,
+            iroh_endpoint_relay_disabled: false,
             attempt_count: 0,
             max_attempts: 10,
             ble_radio_ready: true,
@@ -299,6 +311,7 @@ mod tests {
             gateway_opted_in: true,
             iroh_path: IrohPathObservation::Relay, // Relay observed
             privacy_block_relay: true,             // Privacy relay block active
+            iroh_endpoint_relay_disabled: true,
             attempt_count: 0,
             max_attempts: 5,
             ble_radio_ready: true,
@@ -308,6 +321,66 @@ mod tests {
         // Gateway candidate is blocked due to relay; router falls back to BLE mesh flood
         assert_eq!(decision.reason, RouteReason::MeshFloodCandidate);
         assert_eq!(decision.candidate, RouteCandidate::MeshFlood { max_ttl: 7 });
+    }
+
+    #[test]
+    fn test_router_privacy_mode_blocks_iroh_when_endpoint_relay_enabled_even_if_direct() {
+        let peer = sample_peer_id(3);
+        let gw = sample_peer_id(50);
+        // Direct path observed, BUT transport capability has Relay enabled (not RelayMode::Disabled).
+        // Transient observation of Direct cannot prevent mid-session migration or discovery leakage.
+        let ctx = RouteContext {
+            target_peer_id: peer,
+            target_short_id: peer.short_id(),
+            mode: MessageMode::Privacy,
+            is_direct_ble_neighbor: false,
+            has_authenticated_session: true,
+            gateway_route_available: Some(gw),
+            gateway_opted_in: true,
+            iroh_path: IrohPathObservation::Direct,
+            privacy_block_relay: true,
+            iroh_endpoint_relay_disabled: false, // Relay enabled on endpoint
+            attempt_count: 0,
+            max_attempts: 5,
+            ble_radio_ready: true,
+        };
+
+        let decision = Router::decide(&ctx);
+        // Must be blocked because transport cannot enforce relay disability
+        assert_eq!(decision.reason, RouteReason::MeshFloodCandidate);
+        assert_eq!(decision.candidate, RouteCandidate::MeshFlood { max_ttl: 7 });
+    }
+
+    #[test]
+    fn test_router_privacy_mode_allows_iroh_when_endpoint_relay_disabled_and_direct() {
+        let peer = sample_peer_id(3);
+        let gw = sample_peer_id(50);
+        // Both transport capability disabled and path verified Direct
+        let ctx = RouteContext {
+            target_peer_id: peer,
+            target_short_id: peer.short_id(),
+            mode: MessageMode::Privacy,
+            is_direct_ble_neighbor: false,
+            has_authenticated_session: true,
+            gateway_route_available: Some(gw),
+            gateway_opted_in: true,
+            iroh_path: IrohPathObservation::Direct,
+            privacy_block_relay: true,
+            iroh_endpoint_relay_disabled: true, // Capability strictly disabled
+            attempt_count: 0,
+            max_attempts: 5,
+            ble_radio_ready: true,
+        };
+
+        let decision = Router::decide(&ctx);
+        assert_eq!(decision.reason, RouteReason::IrohGatewayAvailable);
+        assert_eq!(
+            decision.candidate,
+            RouteCandidate::IrohGateway {
+                gateway_peer_id: gw,
+                via_node: None,
+            }
+        );
     }
 
     #[test]
@@ -324,6 +397,7 @@ mod tests {
             gateway_opted_in: false, // User disabled gateway forwarding
             iroh_path: IrohPathObservation::Direct,
             privacy_block_relay: false,
+            iroh_endpoint_relay_disabled: false,
             attempt_count: 0,
             max_attempts: 10,
             ble_radio_ready: true,
@@ -347,6 +421,7 @@ mod tests {
             gateway_opted_in: false,
             iroh_path: IrohPathObservation::Unknown,
             privacy_block_relay: false,
+            iroh_endpoint_relay_disabled: false,
             attempt_count: 10,
             max_attempts: 10,
             ble_radio_ready: true,

@@ -102,6 +102,7 @@ async fn test_phase4_delivery_e2e_lifecycle() {
             gateway_opted_in: false,
             iroh_path: IrohPathObservation::Unknown,
             privacy_block_relay: false,
+            iroh_endpoint_relay_disabled: false,
             attempt_count: 0,
             max_attempts: 10,
             ble_radio_ready: true,
