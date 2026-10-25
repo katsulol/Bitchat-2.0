@@ -36,6 +36,7 @@ pub struct GatewayBridge {
     routes: Arc<RwLock<GatewayRouteTable>>,
     stats: Arc<GatewayStats>,
     active_sessions: Arc<RwLock<HashMap<EndpointId, ActiveGatewaySession>>>,
+    last_session_epoch: AtomicU64,
     transfer_counter: AtomicU64,
     inbound_mesh_tx: mpsc::Sender<Vec<u8>>,
     inbound_mesh_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>>,
@@ -61,6 +62,7 @@ impl GatewayBridge {
             routes: Arc::new(RwLock::new(GatewayRouteTable::new())),
             stats: Arc::new(GatewayStats::new()),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
+            last_session_epoch: AtomicU64::new(0),
             transfer_counter: AtomicU64::new(1),
             inbound_mesh_tx: inbound_tx,
             inbound_mesh_rx: Arc::new(tokio::sync::Mutex::new(inbound_rx)),
@@ -234,10 +236,18 @@ impl GatewayBridge {
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<GatewayMessage>(64);
 
-        let session_epoch = std::time::SystemTime::now()
+        let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let session_epoch = self
+            .last_session_epoch
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |prev| Some(now_secs.max(prev + 1)),
+            )
+            .unwrap_or(now_secs);
 
         let session = ActiveGatewaySession {
             remote_endpoint_id: remote_id,

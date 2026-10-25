@@ -84,6 +84,9 @@ impl GatewayRouteTable {
         lease: Duration,
         now: Instant,
     ) -> Result<bool, &'static str> {
+        if sequence == u64::MAX {
+            return Err("Sequence number overflow: session must restart");
+        }
         if let Some(&(last_epoch, last_seq)) = self.gateway_state.get(&gateway) {
             if epoch < last_epoch {
                 return Err("Stale epoch rejected");
@@ -144,11 +147,13 @@ impl GatewayRouteTable {
     }
 
     /// Remove all routes associated with a disconnected gateway endpoint.
+    ///
+    /// Preserves gateway_state (last epoch and sequence) to prevent replay attacks
+    /// of prior-session RouteSnapshots upon reconnect.
     pub fn remove_routes_for_endpoint(&mut self, gateway: &EndpointId) {
         for entries in self.routes.values_mut() {
             entries.retain(|e| e.gateway != *gateway);
         }
-        self.gateway_state.remove(gateway);
         self.cleanup_empty();
     }
 
@@ -280,5 +285,47 @@ mod tests {
             .unwrap();
         assert!(table.lookup_at(&t1, now).is_none());
         assert!(table.lookup_at(&t2, now).is_none());
+    }
+
+    #[test]
+    fn test_snapshot_reconnect_old_epoch_replay_rejected() {
+        let mut table = GatewayRouteTable::new();
+        let gw = SecretKey::generate().public();
+        let t1 = ShortId([1; 8]);
+        let now = Instant::now();
+
+        // 1. Initial connection: Epoch 10, Seq 1 -> accepted
+        let res = table.apply_snapshot(gw, 10, 1, vec![t1], Duration::from_secs(60), now);
+        assert!(res.is_ok());
+        assert_eq!(table.lookup_at(&t1, now), Some(&gw));
+
+        // 2. Gateway disconnects: routes removed
+        table.remove_routes_for_endpoint(&gw);
+        assert!(table.lookup_at(&t1, now).is_none());
+
+        // 3. Attacker captures and replays snapshot from previous connection (Epoch 10, Seq 1)
+        let replay_res = table.apply_snapshot(gw, 10, 1, vec![t1], Duration::from_secs(60), now);
+        assert_eq!(replay_res, Err("Stale or duplicate sequence rejected"));
+
+        // 4. Attacker attempts to replay an older snapshot from Epoch 9
+        let old_epoch_res = table.apply_snapshot(gw, 9, 50, vec![t1], Duration::from_secs(60), now);
+        assert_eq!(old_epoch_res, Err("Stale epoch rejected"));
+
+        // 5. Legitimate reconnect with strictly newer epoch (Epoch 11, Seq 1)
+        let fresh_res = table.apply_snapshot(gw, 11, 1, vec![t1], Duration::from_secs(60), now);
+        assert!(fresh_res.is_ok());
+        assert_eq!(table.lookup_at(&t1, now), Some(&gw));
+    }
+
+    #[test]
+    fn test_snapshot_sequence_overflow_rejected() {
+        let mut table = GatewayRouteTable::new();
+        let gw = SecretKey::generate().public();
+        let t1 = ShortId([1; 8]);
+        let now = Instant::now();
+
+        // Sequence u64::MAX must be rejected to force session restart
+        let res = table.apply_snapshot(gw, 1, u64::MAX, vec![t1], Duration::from_secs(60), now);
+        assert_eq!(res, Err("Sequence number overflow: session must restart"));
     }
 }
