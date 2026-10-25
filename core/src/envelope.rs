@@ -125,6 +125,20 @@ pub fn pad_to_bucket(payload: &[u8], bucket: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Automatically select the smallest fitting standard bucket [64, 128, 256, 512] and pad.
+pub fn pad_to_smallest_bucket(payload: &[u8]) -> Result<Vec<u8>> {
+    let needed = 2 + payload.len();
+    for &bucket in &PADDING_BUCKETS {
+        if needed <= bucket {
+            return pad_to_bucket(payload, bucket);
+        }
+    }
+    Err(Error::Envelope(format!(
+        "Payload length {} exceeds largest bucket (512)",
+        payload.len()
+    )))
+}
+
 /// Reverse bucket padding, recovering the original payload buffer.
 pub fn unpad_bucket(padded: &[u8]) -> Result<Vec<u8>> {
     if padded.len() < 2 {
@@ -463,5 +477,31 @@ mod tests {
             let unpadded = unpad_bucket(&padded).unwrap();
             assert_eq!(unpadded, original);
         }
+    }
+
+    #[test]
+    fn test_pad_to_smallest_bucket() {
+        let small = b"Hello"; // 5 bytes + 2 = 7 -> bucket 64
+        let p64 = pad_to_smallest_bucket(small).unwrap();
+        assert_eq!(p64.len(), 64);
+        assert_eq!(unpad_bucket(&p64).unwrap(), small);
+
+        let medium = vec![0x42; 100]; // 100 bytes + 2 = 102 -> bucket 128
+        let p128 = pad_to_smallest_bucket(&medium).unwrap();
+        assert_eq!(p128.len(), 128);
+        assert_eq!(unpad_bucket(&p128).unwrap(), medium);
+
+        let large = vec![0x43; 200]; // 200 + 2 = 202 -> bucket 256
+        let p256 = pad_to_smallest_bucket(&large).unwrap();
+        assert_eq!(p256.len(), 256);
+        assert_eq!(unpad_bucket(&p256).unwrap(), large);
+
+        let xl = vec![0x44; 400]; // 400 + 2 = 402 -> bucket 512
+        let p512 = pad_to_smallest_bucket(&xl).unwrap();
+        assert_eq!(p512.len(), 512);
+        assert_eq!(unpad_bucket(&p512).unwrap(), xl);
+
+        let oversized = vec![0x45; 511]; // 511 + 2 = 513 -> exceeds 512
+        assert!(pad_to_smallest_bucket(&oversized).is_err());
     }
 }

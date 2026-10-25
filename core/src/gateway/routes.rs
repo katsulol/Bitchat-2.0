@@ -49,6 +49,12 @@ impl GatewayRouteTable {
             .and_then(|v| v.into_iter().next().map(|e| e.gateway))
     }
 
+    /// Clear all active routes and gateway session records (atomic route withdrawal).
+    pub fn clear(&mut self) {
+        self.routes.clear();
+        self.gateway_state.clear();
+    }
+
     /// Lookup remote gateway endpoint for a recipient ShortId using current time.
     pub fn lookup(&self, recipient: &ShortId) -> Option<&EndpointId> {
         self.lookup_at(recipient, Instant::now())

@@ -112,8 +112,26 @@ impl GatewayBridge {
             .endpoint_id()
             .map_err(|e| Error::Transport(format!("Invalid endpoint id: {e}")))?;
 
-        self.config.write().await.approve_gateway(id);
+        let mut cfg = self.config.write().await;
+        cfg.approve_gateway(id);
+        cfg.enabled = true;
+        drop(cfg);
         Ok(contact)
+    }
+
+    /// Enable or disable gateway bridging.
+    ///
+    /// When disabled, route table is immediately cleared/withdrawn.
+    pub async fn set_enabled(&self, enabled: bool) {
+        self.config.write().await.enabled = enabled;
+        if !enabled {
+            self.routes.write().await.clear();
+        }
+    }
+
+    /// Check if gateway bridging is currently enabled.
+    pub async fn is_enabled(&self) -> bool {
+        self.config.read().await.enabled
     }
 
     /// Dial and establish an authenticated Iroh gateway connection to a remote approved contact.

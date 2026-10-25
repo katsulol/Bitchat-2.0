@@ -18,7 +18,7 @@ pub struct GatewayConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false, // Gateways are OFF by default
             max_connections: DEFAULT_MAX_GATEWAY_CONNECTIONS,
             max_queue_len: DEFAULT_MAX_FORWARD_QUEUE_LEN,
             max_queue_bytes: DEFAULT_MAX_FORWARD_QUEUE_BYTES,
