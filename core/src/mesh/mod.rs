@@ -3,6 +3,7 @@ pub mod fragment;
 pub mod peer;
 pub mod policy;
 pub mod relay;
+pub mod router;
 pub mod seen;
 pub mod stats;
 
@@ -16,6 +17,9 @@ pub use policy::{
     NeighborStatus, NeighborTable, RelayContext, RelayPolicy,
 };
 pub use relay::{InboundMessage, MeshNode};
+pub use router::{
+    IrohPathObservation, RouteCandidate, RouteContext, RouteDecision, RouteReason, Router,
+};
 pub use stats::{MeshStats, MeshStatsSnapshot};
 
 pub type MsgId = [u8; 8];
