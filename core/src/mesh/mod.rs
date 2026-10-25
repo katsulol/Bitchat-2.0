@@ -6,7 +6,10 @@ pub mod seen;
 pub mod stats;
 
 pub use peer::{DecryptedMessage, PeerSessionManager};
-pub use policy::{AdaptiveFlood, AdaptiveFloodConfig, NaiveFlood, RelayContext, RelayPolicy};
+pub use policy::{
+    AdaptiveFlood, AdaptiveFloodConfig, CoverageAwareFlood, CoverageAwareFloodConfig, NaiveFlood,
+    NeighborStatus, NeighborTable, RelayContext, RelayPolicy,
+};
 pub use relay::{InboundMessage, MeshNode};
 pub use stats::{MeshStats, MeshStatsSnapshot};
 

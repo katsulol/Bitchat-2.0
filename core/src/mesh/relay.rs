@@ -34,8 +34,9 @@ pub struct InboundMessage {
 struct PendingRelay {
     envelope: Envelope,
     fire_at: Instant,
-    suppress_after: u8,
     duplicates_heard: u32,
+    duplicate_sources: Vec<ShortId>,
+    from_peer: Option<ShortId>,
 }
 
 /// Decentralized mesh node coordinating identity, transport, deduplication, and forwarding.
@@ -284,7 +285,19 @@ impl<T: Transport> MeshNode<T> {
 
         for id in matured {
             if let Some(pending) = self.pending_relays.remove(&id) {
-                if pending.duplicates_heard >= pending.suppress_after as u32 {
+                let ctx = RelayContext {
+                    neighbor_count: self.transport.neighbors().len(),
+                    hop_count: pending.envelope.hop_count,
+                    priority: pending.envelope.flags.priority,
+                    duplicates_heard: pending.duplicates_heard,
+                    from_peer: pending.from_peer,
+                    local_neighbors: self.transport.neighbors(),
+                    duplicate_peers: pending.duplicate_sources.clone(),
+                };
+                if self
+                    .policy
+                    .should_suppress(&ctx, &pending.duplicate_sources, pending.from_peer)
+                {
                     self.stats.inc_relays_suppressed();
                 } else {
                     self.do_relay(pending.envelope).await?;
@@ -327,7 +340,22 @@ impl<T: Transport> MeshNode<T> {
             self.stats.inc_duplicates_dropped();
             if let Some(pending) = self.pending_relays.get_mut(&envelope.msg_id) {
                 pending.duplicates_heard = pending.duplicates_heard.saturating_add(1);
-                if pending.duplicates_heard >= pending.suppress_after as u32 {
+                if !pending.duplicate_sources.contains(&from_peer) {
+                    pending.duplicate_sources.push(from_peer);
+                }
+                let ctx = RelayContext {
+                    neighbor_count: self.transport.neighbors().len(),
+                    hop_count: pending.envelope.hop_count,
+                    priority: pending.envelope.flags.priority,
+                    duplicates_heard: pending.duplicates_heard,
+                    from_peer: pending.from_peer,
+                    local_neighbors: self.transport.neighbors(),
+                    duplicate_peers: pending.duplicate_sources.clone(),
+                };
+                if self
+                    .policy
+                    .should_suppress(&ctx, &pending.duplicate_sources, pending.from_peer)
+                {
                     self.pending_relays.remove(&envelope.msg_id);
                     self.stats.inc_relays_suppressed();
                 }
@@ -381,6 +409,9 @@ impl<T: Transport> MeshNode<T> {
             hop_count: envelope.hop_count,
             priority: envelope.flags.priority,
             duplicates_heard: 0,
+            from_peer: Some(from_peer),
+            local_neighbors: self.transport.neighbors(),
+            duplicate_peers: Vec::new(),
         };
 
         if !self.policy.should_relay(&ctx) {
@@ -388,7 +419,6 @@ impl<T: Transport> MeshNode<T> {
         }
 
         let delay = self.policy.delay(&ctx);
-        let suppress_after = self.policy.suppress_after(&ctx);
 
         if delay.is_zero() {
             self.do_relay(envelope).await?;
@@ -399,8 +429,9 @@ impl<T: Transport> MeshNode<T> {
                 PendingRelay {
                     envelope,
                     fire_at,
-                    suppress_after,
                     duplicates_heard: 0,
+                    duplicate_sources: Vec::new(),
+                    from_peer: Some(from_peer),
                 },
             );
         }

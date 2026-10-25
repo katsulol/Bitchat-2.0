@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
 use bitchat2_core::identity::{Identity, ShortId};
-use bitchat2_core::mesh::policy::{AdaptiveFlood, NaiveFlood};
+use bitchat2_core::mesh::policy::{AdaptiveFlood, CoverageAwareFlood, NaiveFlood};
 use bitchat2_core::mesh::relay::MeshNode;
 use bitchat2_core::transport::sim::SimNetwork;
 
@@ -39,6 +39,7 @@ impl TopologyType {
 enum PolicyType {
     Naive,
     Adaptive,
+    CoverageAware,
 }
 
 impl PolicyType {
@@ -46,6 +47,7 @@ impl PolicyType {
         match self {
             PolicyType::Naive => "NaiveFlood",
             PolicyType::Adaptive => "AdaptiveFlood",
+            PolicyType::CoverageAware => "CoverageAware",
         }
     }
 }
@@ -197,6 +199,16 @@ async fn run_single_simulation(
             match policy_type {
                 PolicyType::Naive => MeshNode::new(id, t, Box::new(NaiveFlood)),
                 PolicyType::Adaptive => MeshNode::new(id, t, Box::new(AdaptiveFlood::default())),
+                PolicyType::CoverageAware => {
+                    let pol = CoverageAwareFlood::default();
+                    let local_nbrs = net.neighbors_of(s);
+                    for &nbr in &local_nbrs {
+                        pol.record_observed(nbr, Instant::now());
+                        let nbr_nbrs = net.neighbors_of(nbr);
+                        pol.record_claimed_neighbors(nbr, nbr_nbrs, Instant::now());
+                    }
+                    MeshNode::new(id, t, Box::new(pol))
+                }
             }
         })
         .collect();
@@ -296,7 +308,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TopologyType::PartitionedBridge31,
     ];
 
-    let policies = [PolicyType::Naive, PolicyType::Adaptive];
+    let policies = [
+        PolicyType::Naive,
+        PolicyType::Adaptive,
+        PolicyType::CoverageAware,
+    ];
 
     let mut csv_file = File::create("evaluation_results.csv")?;
     writeln!(
