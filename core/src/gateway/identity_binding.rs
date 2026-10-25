@@ -81,6 +81,11 @@ impl IdentityBinding {
         }
     }
 
+    /// Extract parsed 32-byte Bitchat public key from statement.
+    pub fn bitchat_pubkey(&self) -> Result<[u8; 32], BindingError> {
+        hex_decode_32(&self.bitchat_pubkey_hex).map_err(|_| BindingError::InvalidPublicKey)
+    }
+
     /// Verify signature and authenticate that the statement matches the remote endpoint.
     pub fn verify(&self, expected_remote_endpoint: &EndpointId) -> Result<(), BindingError> {
         if self.domain != BINDING_DOMAIN_LABEL {

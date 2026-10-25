@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
 use crate::envelope::Envelope;
@@ -22,6 +23,8 @@ use iroh::{Endpoint, EndpointId, RelayMode, SecretKey};
 pub struct ActiveGatewaySession {
     pub remote_endpoint_id: EndpointId,
     pub remote_bitchat_pubkey: [u8; 32],
+    pub session_epoch: u64,
+    pub next_sequence: AtomicU64,
     pub outbound_tx: mpsc::Sender<GatewayMessage>,
 }
 
@@ -152,64 +155,77 @@ impl GatewayBridge {
             )));
         }
 
-        let (mut send_stream, mut recv_stream) = match contact_hint {
-            Some(_) => {
-                // We dialed: open bi stream and send Hello
-                let (mut s, r) = conn
-                    .open_bi()
-                    .await
-                    .map_err(|e| Error::Transport(format!("Failed to open bi stream: {e}")))?;
+        let (mut send_stream, mut recv_stream, remote_bitchat_pubkey) =
+            match contact_hint {
+                Some(contact) => {
+                    // We dialed: open bi stream and send Hello
+                    let (mut s, r) = conn
+                        .open_bi()
+                        .await
+                        .map_err(|e| Error::Transport(format!("Failed to open bi stream: {e}")))?;
 
-                let binding = IdentityBinding::sign(
-                    &self.bitchat_identity,
-                    &self.endpoint.id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                );
-                let hello = GatewayMessage::Hello(GatewayHello {
-                    protocol_version: WIRE_VERSION,
-                    binding,
-                });
+                    let binding = IdentityBinding::sign(
+                        &self.bitchat_identity,
+                        &self.endpoint.id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
+                    let hello = GatewayMessage::Hello(GatewayHello {
+                        protocol_version: WIRE_VERSION,
+                        binding,
+                    });
 
-                hello
-                    .write_framed(&mut s)
-                    .await
-                    .map_err(|e| Error::Transport(format!("Failed to send Hello: {e}")))?;
+                    hello
+                        .write_framed(&mut s)
+                        .await
+                        .map_err(|e| Error::Transport(format!("Failed to send Hello: {e}")))?;
 
-                (s, r)
-            }
-            None => {
-                // Remote dialed: accept bi stream and read Hello
-                let (s, mut r) = conn
-                    .accept_bi()
-                    .await
-                    .map_err(|e| Error::Transport(format!("Failed to accept bi stream: {e}")))?;
-
-                let hello_msg = GatewayMessage::read_framed(&mut r, DEFAULT_READ_TIMEOUT)
-                    .await
-                    .map_err(|e| Error::Transport(format!("Failed to read Hello: {e}")))?;
-
-                if let GatewayMessage::Hello(hello) = hello_msg {
-                    hello.binding.verify(&remote_id).map_err(|e| {
-                        Error::Transport(format!("Binding verification failed: {e}"))
+                    let pubkey = contact.binding.bitchat_pubkey().map_err(|e| {
+                        Error::Transport(format!("Invalid Bitchat pubkey in contact: {e}"))
                     })?;
-                } else {
-                    return Err(Error::Transport(
-                        "Expected Hello as first gateway frame".into(),
-                    ));
+                    (s, r, pubkey)
                 }
+                None => {
+                    // Remote dialed: accept bi stream and read Hello
+                    let (s, mut r) = conn.accept_bi().await.map_err(|e| {
+                        Error::Transport(format!("Failed to accept bi stream: {e}"))
+                    })?;
 
-                (s, r)
-            }
-        };
+                    let hello_msg = GatewayMessage::read_framed(&mut r, DEFAULT_READ_TIMEOUT)
+                        .await
+                        .map_err(|e| Error::Transport(format!("Failed to read Hello: {e}")))?;
+
+                    let pubkey = if let GatewayMessage::Hello(hello) = hello_msg {
+                        hello.binding.verify(&remote_id).map_err(|e| {
+                            Error::Transport(format!("Binding verification failed: {e}"))
+                        })?;
+                        hello.binding.bitchat_pubkey().map_err(|e| {
+                            Error::Transport(format!("Invalid Bitchat public key: {e}"))
+                        })?
+                    } else {
+                        return Err(Error::Transport(
+                            "Expected Hello as first gateway frame".into(),
+                        ));
+                    };
+
+                    (s, r, pubkey)
+                }
+            };
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<GatewayMessage>(64);
 
+        let session_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         let session = ActiveGatewaySession {
             remote_endpoint_id: remote_id,
-            remote_bitchat_pubkey: [0u8; 32], // Bound in identity statement
+            remote_bitchat_pubkey,
+            session_epoch,
+            next_sequence: AtomicU64::new(2),
             outbound_tx: outbound_tx.clone(),
         };
 
@@ -221,19 +237,19 @@ impl GatewayBridge {
             .set_active_connections(self.active_sessions.read().await.len() as u64);
 
         // Send initial RouteSync snapshot containing our own verified Bitchat identity
-        let initial_sync = GatewayMessage::RouteSync(crate::gateway::wire::RouteSnapshot {
+        let mut initial_snapshot = crate::gateway::wire::RouteSnapshot {
             protocol_version: WIRE_VERSION,
-            session_epoch: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            session_epoch,
             sequence_number: 1,
             lease_seconds: 300,
             recipients: vec![crate::gateway::wire::RouteRecipient {
                 short_id_hex: self.bitchat_identity.short_id().to_string(),
                 public_key_hex: Some(self.bitchat_identity.peer_id().to_string()),
             }],
-        });
+            signature: Vec::new(),
+        };
+        initial_snapshot.sign(&self.bitchat_identity);
+        let initial_sync = GatewayMessage::RouteSync(initial_snapshot);
         let _ = outbound_tx.send(initial_sync).await;
 
         // Writer task
@@ -280,16 +296,53 @@ impl GatewayBridge {
                         }
                     }
                     Ok(GatewayMessage::RouteSync(snapshot)) => {
+                        // 1. Validate bounded size & lease
+                        if let Err(e) = snapshot.validate_bounds() {
+                            tracing::warn!(
+                                "Rejecting oversized/invalid route snapshot from {remote_id}: {e}"
+                            );
+                            continue;
+                        }
+
+                        // 2. Verify snapshot signature against the authenticated Bitchat identity bound to this connection
+                        let remote_bitchat_peer_id = match sessions
+                            .read()
+                            .await
+                            .get(&remote_id)
+                            .map(|s| crate::identity::PeerId(s.remote_bitchat_pubkey))
+                        {
+                            Some(pk) => pk,
+                            None => {
+                                tracing::warn!(
+                                    "Dropping snapshot: no authenticated session for {remote_id}"
+                                );
+                                continue;
+                            }
+                        };
+
+                        if let Err(e) = snapshot.verify_author(&remote_bitchat_peer_id) {
+                            tracing::warn!("Rejecting forged/unauthorized route snapshot from {remote_id}: {e}");
+                            continue;
+                        }
+
+                        // 3. Extract verified ShortIds
                         let mut valid_recipients = Vec::new();
-                        for r in snapshot.recipients {
+                        for r in &snapshot.recipients {
                             if let Some(sid) = crate::identity::ShortId::from_hex(&r.short_id_hex) {
                                 valid_recipients.push(sid);
                             }
                         }
-                        routes_reader
-                            .write()
-                            .await
-                            .replace_gateway_snapshot(remote_id, valid_recipients);
+
+                        // 4. Apply snapshot with epoch & monotonic sequence validation
+                        let lease = Duration::from_secs(snapshot.lease_seconds as u64);
+                        let _ = routes_reader.write().await.apply_snapshot(
+                            remote_id,
+                            snapshot.session_epoch,
+                            snapshot.sequence_number,
+                            valid_recipients,
+                            lease,
+                            Instant::now(),
+                        );
                     }
                     Ok(GatewayMessage::Ping { nonce }) => {
                         // Auto-reply with Pong if write queue permits
@@ -417,20 +470,20 @@ impl GatewayBridge {
                 public_key_hex: None,
             });
         }
-        let msg = GatewayMessage::RouteSync(crate::gateway::wire::RouteSnapshot {
-            protocol_version: WIRE_VERSION,
-            session_epoch: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            sequence_number: self.transfer_counter.fetch_add(1, Ordering::Relaxed),
-            lease_seconds: 300,
-            recipients,
-        });
-
         let sessions = self.active_sessions.read().await;
         for s in sessions.values() {
-            let _ = s.outbound_tx.send(msg.clone()).await;
+            let seq = s.next_sequence.fetch_add(1, Ordering::Relaxed);
+            let mut snapshot = crate::gateway::wire::RouteSnapshot {
+                protocol_version: WIRE_VERSION,
+                session_epoch: s.session_epoch,
+                sequence_number: seq,
+                lease_seconds: 300,
+                recipients: recipients.clone(),
+                signature: Vec::new(),
+            };
+            snapshot.sign(&self.bitchat_identity);
+            let msg = GatewayMessage::RouteSync(snapshot);
+            let _ = s.outbound_tx.send(msg).await;
         }
         Ok(())
     }

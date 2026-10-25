@@ -137,8 +137,8 @@ async fn test_phase3_four_node_e2e_mesh_over_real_iroh() {
         .await
         .expect("C announce D");
 
-    // Wait 50ms for QUIC stream synchronization and automated route convergence
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Wait 100ms for QUIC stream synchronization and automated route convergence
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Verify automated route convergence: B learned D, C learned A
     assert_eq!(
