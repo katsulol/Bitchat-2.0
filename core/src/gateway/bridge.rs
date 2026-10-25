@@ -210,7 +210,7 @@ impl GatewayBridge {
         let session = ActiveGatewaySession {
             remote_endpoint_id: remote_id,
             remote_bitchat_pubkey: [0u8; 32], // Bound in identity statement
-            outbound_tx,
+            outbound_tx: outbound_tx.clone(),
         };
 
         self.active_sessions
@@ -219,6 +219,22 @@ impl GatewayBridge {
             .insert(remote_id, session);
         self.stats
             .set_active_connections(self.active_sessions.read().await.len() as u64);
+
+        // Send initial RouteSync snapshot containing our own verified Bitchat identity
+        let initial_sync = GatewayMessage::RouteSync(crate::gateway::wire::RouteSnapshot {
+            protocol_version: WIRE_VERSION,
+            session_epoch: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            sequence_number: 1,
+            lease_seconds: 300,
+            recipients: vec![crate::gateway::wire::RouteRecipient {
+                short_id_hex: self.bitchat_identity.short_id().to_string(),
+                public_key_hex: Some(self.bitchat_identity.peer_id().to_string()),
+            }],
+        });
+        let _ = outbound_tx.send(initial_sync).await;
 
         // Writer task
         let stats_writer = Arc::clone(&self.stats);
@@ -236,6 +252,7 @@ impl GatewayBridge {
         let inbound_mesh_tx = self.inbound_mesh_tx.clone();
         let stats_reader = Arc::clone(&self.stats);
         let sessions = Arc::clone(&self.active_sessions);
+        let routes_reader = Arc::clone(&self.routes);
 
         tokio::spawn(async move {
             loop {
@@ -262,6 +279,18 @@ impl GatewayBridge {
                             break;
                         }
                     }
+                    Ok(GatewayMessage::RouteSync(snapshot)) => {
+                        let mut valid_recipients = Vec::new();
+                        for r in snapshot.recipients {
+                            if let Some(sid) = crate::identity::ShortId::from_hex(&r.short_id_hex) {
+                                valid_recipients.push(sid);
+                            }
+                        }
+                        routes_reader
+                            .write()
+                            .await
+                            .replace_gateway_snapshot(remote_id, valid_recipients);
+                    }
                     Ok(GatewayMessage::Ping { nonce }) => {
                         // Auto-reply with Pong if write queue permits
                         tracing::debug!("Received gateway ping: {nonce}");
@@ -286,8 +315,12 @@ impl GatewayBridge {
                 }
             }
 
-            // Cleanup session on disconnect
+            // Cleanup session & routes on disconnect
             sessions.write().await.remove(&remote_id);
+            routes_reader
+                .write()
+                .await
+                .remove_routes_for_endpoint(&remote_id);
             stats_reader.set_active_connections(sessions.read().await.len() as u64);
         });
 
@@ -367,6 +400,39 @@ impl GatewayBridge {
         } else {
             None
         }
+    }
+
+    /// Announce verified local BLE peer ShortIds to all active connected gateways.
+    pub async fn announce_local_peers(
+        &self,
+        peer_short_ids: &[crate::identity::ShortId],
+    ) -> Result<()> {
+        let mut recipients = vec![crate::gateway::wire::RouteRecipient {
+            short_id_hex: self.bitchat_identity.short_id().to_string(),
+            public_key_hex: Some(self.bitchat_identity.peer_id().to_string()),
+        }];
+        for p in peer_short_ids {
+            recipients.push(crate::gateway::wire::RouteRecipient {
+                short_id_hex: p.to_string(),
+                public_key_hex: None,
+            });
+        }
+        let msg = GatewayMessage::RouteSync(crate::gateway::wire::RouteSnapshot {
+            protocol_version: WIRE_VERSION,
+            session_epoch: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            sequence_number: self.transfer_counter.fetch_add(1, Ordering::Relaxed),
+            lease_seconds: 300,
+            recipients,
+        });
+
+        let sessions = self.active_sessions.read().await;
+        for s in sessions.values() {
+            let _ = s.outbound_tx.send(msg.clone()).await;
+        }
+        Ok(())
     }
 
     /// Close the gateway bridge and all active connections cleanly.

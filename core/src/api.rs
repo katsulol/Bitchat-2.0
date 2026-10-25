@@ -140,7 +140,7 @@ pub async fn send_to(recipient_short_id: String, text: String) -> Result<String,
     let mut lock = get_service().write().await;
     let svc = lock.as_mut().ok_or("Service not initialized")?;
 
-    // If an E2E session is established, encrypt payload
+    // If an E2E session is established and finished, encrypt payload
     if let Some(session) = svc.peer_mgr.get_session(&target) {
         if session.is_handshake_finished() {
             let msg_id = svc
@@ -149,11 +149,42 @@ pub async fn send_to(recipient_short_id: String, text: String) -> Result<String,
                 .await
                 .map_err(|e| format!("E2E encrypted send failed: {e}"))?;
             return Ok(hex::encode(msg_id));
+        } else if session.is_failed() {
+            let _ = svc.peer_mgr.initiate_handshake(&mut svc.node, target).await;
         }
+    } else {
+        // No session exists: automatically initiate Noise XX handshake!
+        let _ = svc.peer_mgr.initiate_handshake(&mut svc.node, target).await;
     }
 
     // Fail closed: Do NOT silently send plaintext
-    Err("Secure E2E session not established with peer. Initiate handshake first.".to_string())
+    Err(
+        "Securing direct E2E channel with peer... Handshake started. Please tap send again."
+            .to_string(),
+    )
+}
+
+/// Explicitly initiate a mutual Noise XX handshake with a peer across mesh or gateway.
+pub async fn initiate_handshake(recipient_short_id: String) -> Result<(), String> {
+    let target = hex_to_short_id(&recipient_short_id)?;
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    if !svc.peer_mgr.is_session_ready(&target) {
+        svc.peer_mgr
+            .initiate_handshake(&mut svc.node, target)
+            .await
+            .map_err(|e| format!("Initiate handshake failed: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Check if a completed Noise XX E2E session exists with `recipient_short_id`.
+pub async fn is_session_ready(recipient_short_id: String) -> Result<bool, String> {
+    let target = hex_to_short_id(&recipient_short_id)?;
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+    Ok(svc.peer_mgr.is_session_ready(&target))
 }
 
 /// Get current routing metrics snapshot.
@@ -172,9 +203,23 @@ pub async fn get_stats() -> Result<BridgeStats, String> {
 /// Notify Rust that a BLE peer connected.
 pub async fn on_peer_connected(short_id: String) -> Result<(), String> {
     let peer = hex_to_short_id(&short_id)?;
-    let lock = get_service().read().await;
-    let svc = lock.as_ref().ok_or("Service not initialized")?;
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
     svc.handle.on_peer_connected(peer);
+
+    // Auto-initiate handshake with peer if lower ShortId and session not ready
+    let my_short = svc.node.identity().short_id();
+    if my_short < peer && !svc.peer_mgr.is_session_ready(&peer) {
+        let _ = svc.peer_mgr.initiate_handshake(&mut svc.node, peer).await;
+    }
+
+    if let Some(ref bridge) = svc.gateway_bridge {
+        let peers = svc.handle.connected_peers();
+        let bridge = std::sync::Arc::clone(bridge);
+        tokio::spawn(async move {
+            let _ = bridge.announce_local_peers(&peers).await;
+        });
+    }
     Ok(())
 }
 
@@ -184,6 +229,13 @@ pub async fn on_peer_disconnected(short_id: String) -> Result<(), String> {
     let lock = get_service().read().await;
     let svc = lock.as_ref().ok_or("Service not initialized")?;
     svc.handle.on_peer_disconnected(peer);
+    if let Some(ref bridge) = svc.gateway_bridge {
+        let peers = svc.handle.connected_peers();
+        let bridge = std::sync::Arc::clone(bridge);
+        tokio::spawn(async move {
+            let _ = bridge.announce_local_peers(&peers).await;
+        });
+    }
     Ok(())
 }
 
@@ -437,6 +489,19 @@ pub async fn gateway_get_stats() -> Result<String, String> {
         ))
     } else {
         Ok("{\"is_running\":false,\"endpoint_id\":null,\"active_connections\":0,\"messages_imported\":0,\"messages_exported\":0,\"loops_prevented\":0,\"messages_rejected\":0,\"last_error\":null}".to_string())
+    }
+}
+
+/// Query list of remote recipient ShortIds currently reachable through active gateway bridges.
+pub async fn gateway_get_routes() -> Result<Vec<String>, String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+
+    if let Some(bridge) = svc.gateway_bridge.as_ref() {
+        let routes = bridge.routes().read().await.list_routes();
+        Ok(routes.into_iter().map(|(sid, _)| sid.to_string()).collect())
+    } else {
+        Ok(Vec::new())
     }
 }
 

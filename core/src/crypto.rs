@@ -180,6 +180,11 @@ impl Session {
         matches!(self.state, SessionState::Transport { .. })
     }
 
+    /// True if the session handshake encountered an unrecoverable error.
+    pub fn is_failed(&self) -> bool {
+        matches!(self.state, SessionState::Failed)
+    }
+
     /// Return the authenticated remote PeerId once verified in the handshake.
     pub fn peer_id(&self) -> Option<PeerId> {
         match &self.state {

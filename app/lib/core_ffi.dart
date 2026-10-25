@@ -86,6 +86,8 @@ class CoreFfi {
   late final BitchatStringDart _myPeerId;
   late final BitchatSendBroadcastDart _sendBroadcast;
   late final BitchatSendToDart _sendTo;
+  late final BitchatPeerDart _initiateHandshake;
+  late final BitchatPeerDart _isSessionReady;
   late final BitchatPeerDart _onPeerConnected;
   late final BitchatPeerDart _onPeerDisconnected;
   late final BitchatFrameRecvDart _onFrameReceived;
@@ -100,6 +102,7 @@ class CoreFfi {
   late final BitchatGatewayConnectDart _gatewayConnectToContact;
   late final BitchatGatewaySetRouteDart _gatewaySetRoute;
   late final BitchatStringDart _gatewayGetStats;
+  late final BitchatStringDart _gatewayGetRoutes;
 
   bool loadLibrary() {
     if (_initialized) return true;
@@ -115,6 +118,8 @@ class CoreFfi {
       _myPeerId = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_my_peer_id');
       _sendBroadcast = _lib!.lookupFunction<BitchatSendBroadcastC, BitchatSendBroadcastDart>('bitchat_send_broadcast');
       _sendTo = _lib!.lookupFunction<BitchatSendToC, BitchatSendToDart>('bitchat_send_to');
+      _initiateHandshake = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_initiate_handshake');
+      _isSessionReady = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_is_session_ready');
       _onPeerConnected = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_on_peer_connected');
       _onPeerDisconnected = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_on_peer_disconnected');
       _onFrameReceived = _lib!.lookupFunction<BitchatFrameRecvC, BitchatFrameRecvDart>('bitchat_on_frame_received');
@@ -129,6 +134,7 @@ class CoreFfi {
       _gatewayConnectToContact = _lib!.lookupFunction<BitchatGatewayConnectC, BitchatGatewayConnectDart>('bitchat_gateway_connect_to_contact');
       _gatewaySetRoute = _lib!.lookupFunction<BitchatGatewaySetRouteC, BitchatGatewaySetRouteDart>('bitchat_gateway_set_route');
       _gatewayGetStats = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_gateway_get_stats');
+      _gatewayGetRoutes = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_gateway_get_routes');
 
       _initialized = true;
       return true;
@@ -196,6 +202,26 @@ class CoreFfi {
     } finally {
       calloc.free(recipPtr);
       calloc.free(textPtr);
+    }
+  }
+
+  bool initiateHandshake(String recipientShortId) {
+    if (!_initialized) return false;
+    final recipPtr = recipientShortId.toNativeUtf8();
+    try {
+      return _initiateHandshake(recipPtr) == 0;
+    } finally {
+      calloc.free(recipPtr);
+    }
+  }
+
+  bool isSessionReady(String recipientShortId) {
+    if (!_initialized) return false;
+    final recipPtr = recipientShortId.toNativeUtf8();
+    try {
+      return _isSessionReady(recipPtr) == 1;
+    } finally {
+      calloc.free(recipPtr);
     }
   }
 
@@ -359,6 +385,16 @@ class CoreFfi {
     } catch (_) {
       return null;
     }
+  }
+
+  List<String> gatewayGetRoutes() {
+    if (!_initialized) return [];
+    final ptr = _gatewayGetRoutes();
+    if (ptr == nullptr) return [];
+    final raw = ptr.toDartString();
+    _freeString(ptr);
+    if (raw.isEmpty) return [];
+    return raw.split(',').where((s) => s.isNotEmpty).toList();
   }
 }
 

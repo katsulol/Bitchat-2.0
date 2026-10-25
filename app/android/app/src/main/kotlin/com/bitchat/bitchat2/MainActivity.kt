@@ -79,6 +79,17 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
                             result.error("INVALID_ARG", "Data buffer cannot be null", null)
                         }
                     }
+                    "shareText" -> {
+                        val text = call.argument<String>("text") ?: ""
+                        val title = call.argument<String>("title") ?: "Share via"
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_TEXT, text)
+                        }
+                        val chooser = Intent.createChooser(intent, title)
+                        startActivity(chooser)
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }

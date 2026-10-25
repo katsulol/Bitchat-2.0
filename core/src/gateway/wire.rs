@@ -63,10 +63,28 @@ pub struct GatewayForward {
     pub mesh_packet: Vec<u8>,
 }
 
+/// Recipient entry in a gateway reachability snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteRecipient {
+    pub short_id_hex: String,
+    pub public_key_hex: Option<String>,
+}
+
+/// Full snapshot of verified local reachability announced across an Iroh link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteSnapshot {
+    pub protocol_version: u32,
+    pub session_epoch: u64,
+    pub sequence_number: u64,
+    pub lease_seconds: u32,
+    pub recipients: Vec<RouteRecipient>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GatewayMessage {
     Hello(GatewayHello),
     Forward(GatewayForward),
+    RouteSync(RouteSnapshot),
     Accepted {
         transfer_id: u64,
     },
@@ -271,5 +289,29 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, WireError::Codec(_)));
+    }
+
+    #[tokio::test]
+    async fn test_route_sync_frame_roundtrip() {
+        let snapshot = RouteSnapshot {
+            protocol_version: WIRE_VERSION,
+            session_epoch: 123456789,
+            sequence_number: 42,
+            lease_seconds: 300,
+            recipients: vec![
+                RouteRecipient {
+                    short_id_hex: "0102030405060708".to_string(),
+                    public_key_hex: Some("00".repeat(32)),
+                },
+                RouteRecipient {
+                    short_id_hex: "A1B2C3D4E5F60718".to_string(),
+                    public_key_hex: None,
+                },
+            ],
+        };
+        let msg = GatewayMessage::RouteSync(snapshot.clone());
+        let encoded = msg.encode().unwrap();
+        let decoded = GatewayMessage::decode(&encoded).unwrap();
+        assert_eq!(decoded, GatewayMessage::RouteSync(snapshot));
     }
 }

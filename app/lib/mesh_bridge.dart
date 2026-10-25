@@ -80,6 +80,16 @@ class MeshBridge {
     return CoreFfi.instance.gatewayGetStats();
   }
 
+  List<String> getGatewayRoutes() {
+    return CoreFfi.instance.gatewayGetRoutes();
+  }
+
+  Future<void> shareText(String text, {String title = "Share via"}) async {
+    try {
+      await _channel.invokeMethod('shareText', {'text': text, 'title': title});
+    } catch (_) {}
+  }
+
   Future<void> startMesh() async {
     // 1. Initialize Rust bitchat2_core with Android storage path
     String storagePath = ".";
@@ -141,10 +151,21 @@ class MeshBridge {
     }
   }
 
+  bool initiateHandshake(String recipientShortId) {
+    final ok = CoreFfi.instance.initiateHandshake(recipientShortId);
+    _drainOutbound();
+    return ok;
+  }
+
+  bool isSessionReady(String recipientShortId) {
+    return CoreFfi.instance.isSessionReady(recipientShortId);
+  }
+
   Future<void> sendDirect(String recipientShortId, String text) async {
     final msgId = CoreFfi.instance.sendTo(recipientShortId, text);
+    _drainOutbound();
     if (msgId == null) {
-      throw Exception("E2E session not ready. Noise handshake required before direct send.");
+      throw Exception("Securing E2E channel with peer... Handshake started. Tap send again in a moment.");
     }
 
     transmissions++;

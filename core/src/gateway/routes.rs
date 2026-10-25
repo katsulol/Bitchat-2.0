@@ -31,6 +31,19 @@ impl GatewayRouteTable {
         self.routes.get(recipient)
     }
 
+    /// Atomically replace all routes for a specific gateway endpoint from a verified RouteSnapshot.
+    pub fn replace_gateway_snapshot(&mut self, gateway: EndpointId, recipients: Vec<ShortId>) {
+        self.routes.retain(|_, gw| *gw != gateway);
+        for recipient in recipients {
+            self.routes.insert(recipient, gateway);
+        }
+    }
+
+    /// Remove all routes associated with a disconnected gateway endpoint.
+    pub fn remove_routes_for_endpoint(&mut self, gateway: &EndpointId) {
+        self.routes.retain(|_, gw| gw != gateway);
+    }
+
     /// List all configured routes.
     pub fn list_routes(&self) -> Vec<(ShortId, EndpointId)> {
         self.routes.iter().map(|(k, v)| (*k, *v)).collect()
@@ -53,5 +66,22 @@ mod tests {
         assert_eq!(table.lookup(&target), Some(&gw));
         assert_eq!(table.remove_route(&target), Some(gw));
         assert!(table.lookup(&target).is_none());
+
+        // Snapshot replacement test
+        let t1 = ShortId([1, 1, 1, 1, 1, 1, 1, 1]);
+        let t2 = ShortId([2, 2, 2, 2, 2, 2, 2, 2]);
+        let t3 = ShortId([3, 3, 3, 3, 3, 3, 3, 3]);
+
+        table.replace_gateway_snapshot(gw, vec![t1, t2]);
+        assert_eq!(table.lookup(&t1), Some(&gw));
+        assert_eq!(table.lookup(&t2), Some(&gw));
+        assert!(table.lookup(&t3).is_none());
+
+        table.replace_gateway_snapshot(gw, vec![t3]);
+        assert!(table.lookup(&t1).is_none());
+        assert_eq!(table.lookup(&t3), Some(&gw));
+
+        table.remove_routes_for_endpoint(&gw);
+        assert!(table.lookup(&t3).is_none());
     }
 }

@@ -49,6 +49,7 @@ class BitchatBleService : Service() {
 
         private const val PKT_TYPE_SINGLE: Byte = 0x00
         private const val PKT_TYPE_CHUNK: Byte = 0x01
+        private const val PKT_TYPE_LINK_HELLO: Byte = 0x02
     }
 
     private val binder = LocalBinder()
@@ -86,6 +87,7 @@ class BitchatBleService : Service() {
     // Peer Identity Mapping: MAC Address <-> ShortId Hex
     private val addrToShortId = ConcurrentHashMap<String, String>()
     private val shortIdToLinks = ConcurrentHashMap<String, MutableSet<String>>()
+    private val scannedShortIds = ConcurrentHashMap<String, String>()
 
     // Local Short ID
     private var localShortIdHex: String = ""
@@ -235,6 +237,7 @@ class BitchatBleService : Service() {
         reassemblyMap.clear()
         addrToShortId.clear()
         shortIdToLinks.clear()
+        scannedShortIds.clear()
         subscribedClients.clear()
         peerMtu.clear()
         isGattServerReady = false
@@ -386,6 +389,7 @@ class BitchatBleService : Service() {
                 serverConnectedDevices.remove(dev)
                 subscribedClients.remove(addr)
                 peerMtu.remove(addr)
+                scannedShortIds.remove(addr)
                 removeLink(addr)
             }
         }
@@ -539,11 +543,11 @@ class BitchatBleService : Service() {
 
             val addr = device.address
 
-            // Associate ShortId if advertised in scan response
+            // Record discovered ShortId from advertisement as scan hint
             if (shortBytes != null && shortBytes.size == 8) {
                 val peerShortId = byteArrayToHexString(shortBytes)
-                if (peerShortId != localShortIdHex) {
-                    associateLink(addr, peerShortId)
+                if (peerShortId != localShortIdHex && peerShortId.length == 16) {
+                    scannedShortIds[addr] = peerShortId
                 }
             }
 
@@ -609,6 +613,7 @@ class BitchatBleService : Service() {
                 peerMtu.remove(addr)
                 writeQueues.remove(addr)
                 isWriting.remove(addr)
+                scannedShortIds.remove(addr)
                 try {
                     g.disconnect()
                     g.close()
@@ -649,9 +654,38 @@ class BitchatBleService : Service() {
             }
             Log.i(TAG, "Subscribed to peer notifications: $addr")
 
-            // Verified ready link
-            val shortId = addrToShortId[addr] ?: addr.replace(":", "").takeLast(16).uppercase()
-            associateLink(addr, shortId)
+            // Fallback trigger for LINK_HELLO if onDescriptorWrite is not dispatched
+            mainHandler.postDelayed({
+                if (outgoingGatts.containsKey(addr) && addrToShortId[addr] == null) {
+                    val gHandle = outgoingGatts[addr]
+                    if (gHandle != null) {
+                        Log.i(TAG, "Fallback trigger for Central LINK_HELLO to $addr")
+                        val scanned = scannedShortIds[addr]
+                        if (scanned != null && scanned.length == 16) {
+                            associateLink(addr, scanned)
+                        }
+                        sendCentralLinkHello(gHandle)
+                    }
+                }
+            }, 600)
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt?,
+            descriptor: BluetoothGattDescriptor?,
+            status: Int
+        ) {
+            val g = gatt ?: return
+            val addr = g.device.address
+            Log.i(TAG, "GattClient onDescriptorWrite: $addr, status=$status")
+            if (status == BluetoothGatt.GATT_SUCCESS && descriptor?.uuid == CCCD_UUID) {
+                val scanned = scannedShortIds[addr]
+                if (scanned != null && scanned.length == 16) {
+                    associateLink(addr, scanned)
+                }
+                sendCentralLinkHello(g)
+            }
         }
 
         override fun onCharacteristicWrite(
@@ -679,6 +713,73 @@ class BitchatBleService : Service() {
         ) {
             val addr = gatt.device.address
             handleIncomingChunk(addr, value)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun sendCentralLinkHello(gatt: BluetoothGatt) {
+        val addr = gatt.device.address
+        val localShortBytes = hexStringToByteArray(localShortIdHex.ifEmpty { return })
+        if (localShortBytes.size != 8) return
+
+        val helloPacket = ByteArray(10)
+        helloPacket[0] = PKT_TYPE_LINK_HELLO
+        helloPacket[1] = 0x01
+        System.arraycopy(localShortBytes, 0, helloPacket, 2, 8)
+
+        val queue = writeQueues.computeIfAbsent(addr) { ConcurrentLinkedQueue() }
+        queue.add(helloPacket)
+        if (isWriting[addr] != true) {
+            drainWriteQueue(addr)
+        }
+        Log.i(TAG, "Queued Central LINK_HELLO to $addr")
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun sendServerLinkHello(addr: String) {
+        val dev = serverConnectedDevices.find { it.address == addr } ?: return
+        val service = gattServer?.getService(SERVICE_UUID) ?: return
+        val notifyChar = service.getCharacteristic(CHAR_NOTIFY_UUID) ?: return
+
+        val localShortBytes = hexStringToByteArray(localShortIdHex.ifEmpty { return })
+        if (localShortBytes.size != 8) return
+
+        val helloPacket = ByteArray(10)
+        helloPacket[0] = PKT_TYPE_LINK_HELLO
+        helloPacket[1] = 0x01
+        System.arraycopy(localShortBytes, 0, helloPacket, 2, 8)
+
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gattServer?.notifyCharacteristicChanged(dev, notifyChar, false, helloPacket)
+            } else {
+                @Suppress("DEPRECATION")
+                notifyChar.value = helloPacket
+                @Suppress("DEPRECATION")
+                gattServer?.notifyCharacteristicChanged(dev, notifyChar, false)
+            }
+            Log.i(TAG, "Sent Server LINK_HELLO to $addr")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to send server LINK_HELLO: ${e.message}")
+        }
+    }
+
+    private fun handleLinkHello(addr: String, data: ByteArray, isFromCentral: Boolean) {
+        if (data.size != 10 || data[1] != 0x01.toByte()) {
+            Log.w(TAG, "Malformed LINK_HELLO from $addr (len=${data.size})")
+            return
+        }
+        val claimedShortIdBytes = data.copyOfRange(2, 10)
+        val claimedShortId = byteArrayToHexString(claimedShortIdBytes)
+        if (claimedShortId.isEmpty() || claimedShortId == localShortIdHex) {
+            Log.w(TAG, "Invalid or self ShortId in LINK_HELLO: $claimedShortId from $addr")
+            return
+        }
+        Log.i(TAG, "Received valid LINK_HELLO: $claimedShortId from link $addr (isFromCentral=$isFromCentral)")
+        associateLink(addr, claimedShortId)
+
+        if (isFromCentral) {
+            sendServerLinkHello(addr)
         }
     }
 
@@ -714,7 +815,18 @@ class BitchatBleService : Service() {
      */
     private fun handleIncomingChunk(addr: String, data: ByteArray) {
         if (data.isEmpty()) return
-        val senderShortId = addrToShortId[addr] ?: addr.replace(":", "").takeLast(16).uppercase()
+
+        if (data[0] == PKT_TYPE_LINK_HELLO) {
+            val isFromCentral = serverConnectedDevices.any { it.address == addr }
+            handleLinkHello(addr, data, isFromCentral)
+            return
+        }
+
+        val senderShortId = addrToShortId[addr]
+        if (senderShortId == null) {
+            Log.w(TAG, "Dropping frame from unverified link $addr: LINK_IDENTITY_PENDING")
+            return
+        }
 
         when (data[0]) {
             PKT_TYPE_SINGLE -> {
@@ -762,10 +874,11 @@ class BitchatBleService : Service() {
     @SuppressLint("MissingPermission")
     fun writeFrame(targetShortId: String?, data: ByteArray) {
         var sentCount = 0
+        val normTarget = targetShortId?.uppercase()
 
         // Find candidate peer links
-        val candidateAddrs = if (targetShortId != null) {
-            shortIdToLinks[targetShortId]?.toList() ?: emptyList()
+        val candidateAddrs = if (normTarget != null) {
+            shortIdToLinks[normTarget]?.toList() ?: emptyList()
         } else {
             addrToShortId.keys.toList()
         }
@@ -788,7 +901,25 @@ class BitchatBleService : Service() {
             for (dev in serverConnectedDevices) {
                 val addr = dev.address
                 if (!contactedAddrs.contains(addr) && subscribedClients.contains(addr)) {
-                    if (targetShortId == null || addrToShortId[addr] == targetShortId) {
+                    if (normTarget == null || addrToShortId[addr]?.uppercase() == normTarget) {
+                        enqueueServerNotification(dev, notifyChar, data)
+                        sentCount++
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback: If target was specified but has no direct link, flood to connected neighbors
+        if (normTarget != null && sentCount == 0 && (outgoingGatts.isNotEmpty() || serverConnectedDevices.isNotEmpty())) {
+            for ((addr, gatt) in outgoingGatts) {
+                enqueueGattWrite(addr, gatt, data)
+                contactedAddrs.add(addr)
+                sentCount++
+            }
+            if (notifyChar != null) {
+                for (dev in serverConnectedDevices) {
+                    val addr = dev.address
+                    if (!contactedAddrs.contains(addr) && subscribedClients.contains(addr)) {
                         enqueueServerNotification(dev, notifyChar, data)
                         sentCount++
                     }

@@ -106,20 +106,6 @@ async fn test_phase3_four_node_e2e_mesh_over_real_iroh() {
         .await
         .expect("C approve B");
 
-    // Configure manual bidirectional routes:
-    // Gateway B: route to Recipient D via Gateway C's EndpointId
-    // Gateway C: route to Recipient A via Gateway B's EndpointId
-    bridge_b
-        .routes()
-        .write()
-        .await
-        .set_route(short_d, bridge_c.endpoint_id());
-    bridge_c
-        .routes()
-        .write()
-        .await
-        .set_route(short_a, bridge_b.endpoint_id());
-
     // Connect Gateway B -> Gateway C over authenticated Iroh link
     let accept_bridge_c = bridge_c.endpoint().clone();
     let accept_task = tokio::spawn(async move {
@@ -140,6 +126,29 @@ async fn test_phase3_four_node_e2e_mesh_over_real_iroh() {
         .spawn_session_handler(conn_from_b, None)
         .await
         .expect("C spawn session handler");
+
+    // Automated RouteSync: Announce verified local mesh reachability across gateways
+    bridge_b
+        .announce_local_peers(&[short_a])
+        .await
+        .expect("B announce A");
+    bridge_c
+        .announce_local_peers(&[short_d])
+        .await
+        .expect("C announce D");
+
+    // Wait 50ms for QUIC stream synchronization and automated route convergence
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Verify automated route convergence: B learned D, C learned A
+    assert_eq!(
+        bridge_b.routes().read().await.lookup(&short_d),
+        Some(&bridge_c.endpoint_id())
+    );
+    assert_eq!(
+        bridge_c.routes().read().await.lookup(&short_a),
+        Some(&bridge_b.endpoint_id())
+    );
 
     // Attach bridges to gateway mesh nodes
     let bridge_b = Arc::new(bridge_b);

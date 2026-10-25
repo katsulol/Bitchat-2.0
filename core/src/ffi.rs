@@ -145,6 +145,54 @@ pub unsafe extern "C" fn bitchat_send_to(
     }
 }
 
+/// Explicitly initiate a Noise XX handshake with a peer across mesh or gateway.
+///
+/// # Safety
+///
+/// `recipient` must be a valid null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_initiate_handshake(recipient: *const c_char) -> i32 {
+    let target = match c_str_to_string(recipient) {
+        Some(t) => t,
+        None => return -1,
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::initiate_handshake(target)) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Check if an authenticated Noise XX E2E session is established with `recipient`.
+///
+/// Returns 1 if session is ready for transport, 0 otherwise.
+///
+/// # Safety
+///
+/// `recipient` must be a valid null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_is_session_ready(recipient: *const c_char) -> i32 {
+    let target = match c_str_to_string(recipient) {
+        Some(t) => t,
+        None => return 0,
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return 0,
+    };
+
+    match rt.block_on(api::is_session_ready(target)) {
+        Ok(true) => 1,
+        _ => 0,
+    }
+}
+
 /// Notify mesh of peer connection.
 ///
 /// # Safety
@@ -458,6 +506,24 @@ pub unsafe extern "C" fn bitchat_gateway_get_stats() -> *mut c_char {
 
     match rt.block_on(api::gateway_get_stats()) {
         Ok(json) => string_to_c_char(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Query comma-separated list of remote recipient ShortIds currently reachable through gateways.
+///
+/// # Safety
+///
+/// Returned comma-separated string must be freed using [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_get_routes() -> *mut c_char {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::gateway_get_routes()) {
+        Ok(routes) => string_to_c_char(routes.join(",")),
         Err(_) => std::ptr::null_mut(),
     }
 }

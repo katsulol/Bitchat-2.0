@@ -53,6 +53,18 @@ impl ShortId {
     pub fn is_broadcast(&self) -> bool {
         self.0 == [0u8; 8]
     }
+
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let clean = s.trim().trim_start_matches("0x");
+        if clean.len() != 16 || !clean.is_ascii() {
+            return None;
+        }
+        let mut bytes = [0u8; 8];
+        for i in 0..8 {
+            bytes[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        Some(Self(bytes))
+    }
 }
 
 impl fmt::Debug for ShortId {

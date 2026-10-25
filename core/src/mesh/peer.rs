@@ -56,6 +56,17 @@ impl PeerSessionManager {
         self.sessions.get_mut(peer)
     }
 
+    pub fn has_session(&self, peer: &ShortId) -> bool {
+        self.sessions.contains_key(peer)
+    }
+
+    pub fn is_session_ready(&self, peer: &ShortId) -> bool {
+        self.sessions
+            .get(peer)
+            .map(|s| s.is_handshake_finished())
+            .unwrap_or(false)
+    }
+
     /// Initiate a Noise XX handshake with a remote peer across the mesh.
     pub async fn initiate_handshake<T: Transport>(
         &mut self,
@@ -83,6 +94,23 @@ impl PeerSessionManager {
 
         let peer = msg.origin_sender;
 
+        if let Some(session) = self.sessions.get(&peer) {
+            // Reset failed session if a fresh Msg 1 is received
+            if session.is_failed() && msg.payload.len() <= 64 {
+                self.sessions.remove(&peer);
+            } else if !session.is_handshake_finished() && msg.payload.len() <= 64 {
+                // Tie-break simultaneous handshake collision:
+                if peer < node.identity().short_id() {
+                    // Remote has lower ShortId: local node yields to remote peer as initiator
+                    self.sessions.remove(&peer);
+                } else {
+                    // Local node has lower ShortId: local node is winning initiator.
+                    // Ignore colliding Msg 1 from remote peer; wait for remote to yield and reply with Msg 2.
+                    return Ok(true);
+                }
+            }
+        }
+
         if !self.sessions.contains_key(&peer) {
             // New incoming handshake from peer: act as responder
             let mut session = Session::responder(node.identity())?;
@@ -103,7 +131,11 @@ impl PeerSessionManager {
                 None => return Ok(false),
             };
 
-            session.read_handshake(&msg.payload)?;
+            if let Err(e) = session.read_handshake(&msg.payload) {
+                tracing::warn!("Handshake read failed from {peer}: {e}; resetting session");
+                self.sessions.remove(&peer);
+                return Err(e);
+            }
 
             if !session.is_handshake_finished() {
                 Some(session.write_handshake_vec()?)
@@ -276,6 +308,63 @@ mod tests {
         assert!(
             decrypt_err.is_err(),
             "Tampered payload must fail Poly1305 MAC verification"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_simultaneous_handshake_collision() {
+        tokio::time::pause();
+
+        let net = SimNetwork::new(808);
+        let id_a = Identity::generate();
+        let id_b = Identity::generate();
+
+        let s_a = id_a.short_id();
+        let s_b = id_b.short_id();
+
+        // Direct bidirectional link: A <-> B
+        net.set_bidirectional_link(s_a, s_b, Duration::from_millis(5), 0.0);
+
+        let t_a = net.create_node(s_a);
+        let t_b = net.create_node(s_b);
+
+        let mut node_a = MeshNode::new(id_a, t_a, Box::new(NaiveFlood));
+        let mut node_b = MeshNode::new(id_b, t_b, Box::new(NaiveFlood));
+
+        let mut mgr_a = PeerSessionManager::new();
+        let mut mgr_b = PeerSessionManager::new();
+
+        // Both nodes simultaneously initiate handshake
+        mgr_a.initiate_handshake(&mut node_a, s_b).await.unwrap();
+        mgr_b.initiate_handshake(&mut node_b, s_a).await.unwrap();
+
+        // Step simulation forward until all handshake packets are exchanged
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_millis(10)).await;
+            let now = Instant::now();
+            while let Ok(true) = node_a.poll_step(now).await {}
+            while let Ok(true) = node_b.poll_step(now).await {}
+
+            while let Some(msg) = node_a.recv_inbound() {
+                if msg.msg_type == MsgType::Handshake {
+                    let _ = mgr_a.handle_handshake(&mut node_a, &msg).await;
+                }
+            }
+            while let Some(msg) = node_b.recv_inbound() {
+                if msg.msg_type == MsgType::Handshake {
+                    let _ = mgr_b.handle_handshake(&mut node_b, &msg).await;
+                }
+            }
+        }
+
+        // Both nodes must have completed the handshake into transport mode
+        assert!(
+            mgr_a.is_session_ready(&s_b),
+            "Node A must reach ready session"
+        );
+        assert!(
+            mgr_b.is_session_ready(&s_a),
+            "Node B must reach ready session"
         );
     }
 }
