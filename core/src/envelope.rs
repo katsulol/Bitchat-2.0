@@ -546,4 +546,56 @@ mod tests {
         assert_eq!(unpadded_mode.len(), 2 + msg.len());
         assert_eq!(unpad_bucket(&unpadded_mode).unwrap(), msg);
     }
+
+    #[test]
+    fn test_pad_inner_payload_all_framing_boundaries() {
+        // Boundaries: 0, 1, 62, 63, 510, 511, 65535, 65536+
+
+        // 0 bytes: 0 + 2 = 2 <= 64 -> bucket 64
+        let b0 = vec![];
+        let p0 = pad_inner_payload(&b0, true).unwrap();
+        assert_eq!(p0.len(), 64);
+        assert_eq!(unpad_bucket(&p0).unwrap(), b0);
+
+        // 1 byte: 1 + 2 = 3 <= 64 -> bucket 64
+        let b1 = vec![0x11; 1];
+        let p1 = pad_inner_payload(&b1, true).unwrap();
+        assert_eq!(p1.len(), 64);
+        assert_eq!(unpad_bucket(&p1).unwrap(), b1);
+
+        // 62 bytes: 62 + 2 = 64 <= 64 -> exactly bucket 64
+        let b62 = vec![0x22; 62];
+        let p62 = pad_inner_payload(&b62, true).unwrap();
+        assert_eq!(p62.len(), 64);
+        assert_eq!(unpad_bucket(&p62).unwrap(), b62);
+
+        // 63 bytes: 63 + 2 = 65 -> bucket 128
+        let b63 = vec![0x33; 63];
+        let p63 = pad_inner_payload(&b63, true).unwrap();
+        assert_eq!(p63.len(), 128);
+        assert_eq!(unpad_bucket(&p63).unwrap(), b63);
+
+        // 510 bytes: 510 + 2 = 512 <= 512 -> exactly bucket 512
+        let b510 = vec![0x44; 510];
+        let p510 = pad_inner_payload(&b510, true).unwrap();
+        assert_eq!(p510.len(), 512);
+        assert_eq!(unpad_bucket(&p510).unwrap(), b510);
+
+        // 511 bytes: 511 + 2 = 513 > 512 -> unpadded prefixed length (513 bytes total)
+        let b511 = vec![0x55; 511];
+        let p511 = pad_inner_payload(&b511, true).unwrap();
+        assert_eq!(p511.len(), 513);
+        assert_eq!(unpad_bucket(&p511).unwrap(), b511);
+
+        // 65535 bytes: u16::MAX -> unpadded prefixed length (65537 bytes total)
+        let b65535 = vec![0x66; 65535];
+        let p65535 = pad_inner_payload(&b65535, true).unwrap();
+        assert_eq!(p65535.len(), 65537);
+        assert_eq!(unpad_bucket(&p65535).unwrap(), b65535);
+
+        // 65536 bytes: exceeds u16::MAX -> rejected
+        let b65536 = vec![0x77; 65536];
+        let err = pad_inner_payload(&b65536, true);
+        assert!(err.is_err());
+    }
 }
