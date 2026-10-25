@@ -298,6 +298,7 @@ impl GatewayBridge {
         let stats_reader = Arc::clone(&self.stats);
         let sessions = Arc::clone(&self.active_sessions);
         let routes_reader = Arc::clone(&self.routes);
+        let my_short = self.bitchat_identity.short_id();
 
         tokio::spawn(async move {
             loop {
@@ -354,11 +355,13 @@ impl GatewayBridge {
                             continue;
                         }
 
-                        // 3. Extract verified ShortIds
+                        // 3. Extract verified ShortIds (filter out local identity)
                         let mut valid_recipients = Vec::new();
                         for r in &snapshot.recipients {
                             if let Some(sid) = crate::identity::ShortId::from_hex(&r.short_id_hex) {
-                                valid_recipients.push(sid);
+                                if sid != my_short {
+                                    valid_recipients.push(sid);
+                                }
                             }
                         }
 
@@ -494,20 +497,29 @@ impl GatewayBridge {
             public_key_hex: Some(self.bitchat_identity.peer_id().to_string()),
         }];
         for p in peer_short_ids {
-            recipients.push(crate::gateway::wire::RouteRecipient {
-                short_id_hex: p.to_string(),
-                public_key_hex: None,
-            });
+            if *p != self.bitchat_identity.short_id() {
+                recipients.push(crate::gateway::wire::RouteRecipient {
+                    short_id_hex: p.to_string(),
+                    public_key_hex: None,
+                });
+            }
         }
         let sessions = self.active_sessions.read().await;
         for s in sessions.values() {
+            let remote_sid = crate::identity::PeerId(s.remote_bitchat_pubkey).short_id();
+            let session_recipients: Vec<_> = recipients
+                .iter()
+                .filter(|r| r.short_id_hex != remote_sid.to_string())
+                .cloned()
+                .collect();
+
             let seq = s.next_sequence.fetch_add(1, Ordering::Relaxed);
             let mut snapshot = crate::gateway::wire::RouteSnapshot {
                 protocol_version: WIRE_VERSION,
                 session_epoch: s.session_epoch,
                 sequence_number: seq,
                 lease_seconds: 300,
-                recipients: recipients.clone(),
+                recipients: session_recipients,
                 signature: Vec::new(),
             };
             snapshot.sign(&self.bitchat_identity);

@@ -872,8 +872,14 @@ pub async fn gateway_get_routes() -> Result<Vec<String>, String> {
     let svc = lock.as_ref().ok_or("Service not initialized")?;
 
     if let Some(bridge) = svc.gateway_bridge.as_ref() {
+        let my_short = svc.node.identity().short_id();
         let routes = bridge.routes().read().await.list_routes();
-        Ok(routes.into_iter().map(|(sid, _)| sid.to_string()).collect())
+        Ok(routes
+            .into_iter()
+            .map(|(sid, _)| sid)
+            .filter(|sid| *sid != my_short)
+            .map(|sid| sid.to_string())
+            .collect())
     } else {
         Ok(Vec::new())
     }
