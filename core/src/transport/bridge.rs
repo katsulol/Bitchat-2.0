@@ -160,6 +160,14 @@ impl Transport for BridgeTransport {
         rx.recv().await
     }
 
+    fn try_recv(&mut self) -> Option<(ShortId, Vec<u8>)> {
+        if let Ok(mut rx) = self.inbound_rx.try_lock() {
+            rx.try_recv().ok()
+        } else {
+            None
+        }
+    }
+
     fn neighbors(&self) -> Vec<ShortId> {
         self.shared
             .neighbors

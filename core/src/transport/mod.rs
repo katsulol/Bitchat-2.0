@@ -21,6 +21,9 @@ pub trait Transport: Send + Sync {
     /// Receive the next incoming frame: returns (sender_short_id, frame_bytes).
     async fn recv(&mut self) -> Option<(ShortId, Vec<u8>)>;
 
+    /// Non-blocking receive for discrete event simulation.
+    fn try_recv(&mut self) -> Option<(ShortId, Vec<u8>)>;
+
     /// Return list of currently reachable direct neighbors.
     fn neighbors(&self) -> Vec<ShortId>;
 }

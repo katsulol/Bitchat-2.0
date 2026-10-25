@@ -17,6 +17,9 @@ pub enum Error {
     #[error("Fragmentation error: {0}")]
     Fragmentation(String),
 
+    #[error("Storage error: {0}")]
+    Storage(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

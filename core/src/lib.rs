@@ -13,4 +13,5 @@ pub mod ffi;
 pub mod gateway;
 pub mod identity;
 pub mod mesh;
+pub mod storage;
 pub mod transport;

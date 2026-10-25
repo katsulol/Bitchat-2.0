@@ -28,6 +28,10 @@ impl PeerId {
         &self.0
     }
 
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Derive the 8-byte ShortId from blake3(peer_id).
     pub fn short_id(&self) -> ShortId {
         let hash = blake3::hash(&self.0);

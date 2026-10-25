@@ -229,12 +229,7 @@ impl<T: Transport> MeshNode<T> {
 
     /// Execute a single discrete event step (receive inbound frame or trigger matured relay timer).
     pub async fn step(&mut self) -> Result<bool> {
-        self.step_at(Instant::now()).await
-    }
-
-    /// Execute a single step with an explicitly supplied clock reference for deterministic testing.
-    pub async fn step_at(&mut self, now: Instant) -> Result<bool> {
-        // Fire any matured pending relays first
+        let now = Instant::now();
         if self.fire_matured_relays(now).await? {
             return Ok(true);
         }
@@ -269,6 +264,23 @@ impl<T: Transport> MeshNode<T> {
                 None => Ok(false),
             }
         }
+    }
+
+    /// Execute a single step with an explicitly supplied clock reference for deterministic testing.
+    /// Non-blocking: returns Ok(false) immediately when nothing is due.
+    pub async fn step_at(&mut self, now: Instant) -> Result<bool> {
+        // Fire any matured pending relays first
+        if self.fire_matured_relays(now).await? {
+            return Ok(true);
+        }
+
+        // Non-blocking try_recv from transport
+        if let Some((sender, frame)) = self.transport.try_recv() {
+            self.handle_incoming_frame(sender, frame, now).await?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     async fn fire_matured_relays(&mut self, now: Instant) -> Result<bool> {
@@ -601,58 +613,65 @@ mod tests {
 
     #[tokio::test]
     async fn test_ring_topology_terminates() {
-        tokio::time::pause();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let net = SimNetwork::new(202);
+            let ids: Vec<Identity> = (0..4).map(|_| Identity::generate()).collect();
+            let s_ids: Vec<ShortId> = ids.iter().map(|id| id.short_id()).collect();
 
-        let net = SimNetwork::new(202);
-        let ids: Vec<Identity> = (0..4).map(|_| Identity::generate()).collect();
-        let s_ids: Vec<ShortId> = ids.iter().map(|id| id.short_id()).collect();
+            let mut nodes: Vec<MeshNode<_>> = ids
+                .into_iter()
+                .map(|id| {
+                    let s_id = id.short_id();
+                    let t = net.create_node(s_id);
+                    MeshNode::new(id, t, Box::new(NaiveFlood))
+                })
+                .collect();
 
-        let mut nodes: Vec<MeshNode<_>> = ids
-            .into_iter()
-            .map(|id| {
-                let s_id = id.short_id();
-                let t = net.create_node(s_id);
-                MeshNode::new(id, t, Box::new(NaiveFlood))
-            })
-            .collect();
+            // 4-node ring: 0-1-2-3-0
+            for i in 0..4 {
+                let next = (i + 1) % 4;
+                net.set_bidirectional_link(s_ids[i], s_ids[next], Duration::ZERO, 0.0);
+            }
 
-        // 4-node ring: 0-1-2-3-0
-        for i in 0..4 {
-            let next = (i + 1) % 4;
-            net.set_bidirectional_link(s_ids[i], s_ids[next], Duration::ZERO, 0.0);
-        }
+            let mut sim_time = Instant::now();
 
-        // Node 0 broadcasts
-        let payload = b"Ring message".to_vec();
-        nodes[0].send_broadcast(payload).await.unwrap();
+            // Node 0 broadcasts
+            let payload = b"Ring message".to_vec();
+            nodes[0].send_broadcast(payload).await.unwrap();
 
-        // Step until no more frames are in-flight in any node's inbox
-        for _ in 0..20 {
-            for node in nodes.iter_mut() {
-                // Drain any pending frames
-                while let Ok(Ok(true)) =
-                    tokio::time::timeout(Duration::from_millis(1), node.step()).await
-                {
-                    // stepped
+            // Step until no more frames are in-flight in any node's inbox
+            let mut drain_steps = 0;
+            for _ in 0..20 {
+                sim_time += Duration::from_millis(5);
+                for node in nodes.iter_mut() {
+                    while let Ok(true) = node.step_at(sim_time).await {
+                        drain_steps += 1;
+                        assert!(
+                            drain_steps <= 10_000,
+                            "Ring drain loop exceeded 10,000 steps"
+                        );
+                    }
                 }
             }
-        }
 
-        // Verify: every node 1, 2, 3 received exactly 1 local delivery
-        for (i, node) in nodes.iter().enumerate().skip(1) {
-            assert_eq!(
-                node.stats().deliveries,
-                1,
-                "Node {i} should receive exactly 1 delivery"
-            );
-            assert!(
-                node.stats().duplicates_dropped > 0,
-                "Node {i} should drop duplicate ring frames"
-            );
-        }
+            // Verify: every node 1, 2, 3 received exactly 1 local delivery
+            for (i, node) in nodes.iter().enumerate().skip(1) {
+                assert_eq!(
+                    node.stats().deliveries,
+                    1,
+                    "Node {i} should receive exactly 1 delivery"
+                );
+                assert!(
+                    node.stats().duplicates_dropped > 0,
+                    "Node {i} should drop duplicate ring frames"
+                );
+            }
 
-        // Node 0 should not deliver its own broadcast
-        assert_eq!(nodes[0].stats().deliveries, 0);
+            // Node 0 should not deliver its own broadcast
+            assert_eq!(nodes[0].stats().deliveries, 0);
+        })
+        .await
+        .expect("test_ring_topology_terminates timed out after 5s");
     }
 
     #[tokio::test]
@@ -777,129 +796,141 @@ mod tests {
 
     #[tokio::test]
     async fn test_adaptive_flood_suppression_in_dense_cluster() {
-        tokio::time::pause();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let net = SimNetwork::new(505);
+            let count = 6;
+            let ids: Vec<Identity> = (0..count).map(|_| Identity::generate()).collect();
+            let s_ids: Vec<ShortId> = ids.iter().map(|id| id.short_id()).collect();
 
-        let net = SimNetwork::new(505);
-        let count = 6;
-        let ids: Vec<Identity> = (0..count).map(|_| Identity::generate()).collect();
-        let s_ids: Vec<ShortId> = ids.iter().map(|id| id.short_id()).collect();
-
-        // Create fully connected mesh (clique)
-        for i in 0..count {
-            for j in (i + 1)..count {
-                net.set_bidirectional_link(s_ids[i], s_ids[j], Duration::ZERO, 0.0);
-            }
-        }
-
-        let mut nodes: Vec<MeshNode<_>> = ids
-            .into_iter()
-            .map(|id| {
-                let s = id.short_id();
-                let t = net.create_node(s);
-                let policy = crate::mesh::policy::AdaptiveFlood::new(
-                    crate::mesh::policy::AdaptiveFloodConfig {
-                        base_delay: Duration::from_millis(10),
-                        per_neighbor_delay: Duration::from_millis(5),
-                        max_delay: Duration::from_millis(50),
-                        suppression_threshold: 2,
-                        priority_delay: Duration::ZERO,
-                    },
-                );
-                MeshNode::new(id, t, Box::new(policy))
-            })
-            .collect();
-
-        let mut sim_time = Instant::now();
-
-        // Node 0 broadcasts
-        nodes[0]
-            .send_broadcast(b"Dense cluster suppression test".to_vec())
-            .await
-            .unwrap();
-
-        // Advance simulation time in 5ms slices
-        for _ in 0..30 {
-            sim_time += Duration::from_millis(5);
-            for node in nodes.iter_mut() {
-                while let Ok(Ok(true)) =
-                    tokio::time::timeout(Duration::from_millis(1), node.step_at(sim_time)).await
-                {
-                    // drain
+            // Create fully connected mesh (clique)
+            for i in 0..count {
+                for j in (i + 1)..count {
+                    net.set_bidirectional_link(s_ids[i], s_ids[j], Duration::ZERO, 0.0);
                 }
             }
-        }
 
-        // All nodes 1..count must have delivered the message
-        for (i, node) in nodes.iter().enumerate().skip(1) {
-            assert_eq!(node.stats().deliveries, 1, "Node {i} must receive delivery");
-        }
+            let mut nodes: Vec<MeshNode<_>> = ids
+                .into_iter()
+                .map(|id| {
+                    let s = id.short_id();
+                    let t = net.create_node(s);
+                    let policy = crate::mesh::policy::AdaptiveFlood::new(
+                        crate::mesh::policy::AdaptiveFloodConfig {
+                            base_delay: Duration::from_millis(10),
+                            per_neighbor_delay: Duration::from_millis(5),
+                            max_delay: Duration::from_millis(50),
+                            suppression_threshold: 2,
+                            priority_delay: Duration::ZERO,
+                        },
+                    );
+                    MeshNode::new(id, t, Box::new(policy))
+                })
+                .collect();
 
-        // In a 6-node clique with threshold k=2, redundant rebroadcasts must be suppressed
-        let total_suppressed: u64 = nodes.iter().map(|n| n.stats().relays_suppressed).sum();
-        assert!(
-            total_suppressed > 0,
-            "Dense cluster should trigger counter-based relay suppression"
-        );
+            let mut sim_time = Instant::now();
+
+            // Node 0 broadcasts
+            nodes[0]
+                .send_broadcast(b"Dense cluster suppression test".to_vec())
+                .await
+                .unwrap();
+
+            // Advance simulation time in 5ms slices
+            let mut drain_steps = 0;
+            for _ in 0..30 {
+                sim_time += Duration::from_millis(5);
+                for node in nodes.iter_mut() {
+                    while let Ok(true) = node.step_at(sim_time).await {
+                        drain_steps += 1;
+                        assert!(
+                            drain_steps <= 10_000,
+                            "Drain loop exceeded hard iteration cap of 10,000 steps without terminating"
+                        );
+                    }
+                }
+            }
+
+            // All nodes 1..count must have delivered the message
+            for (i, node) in nodes.iter().enumerate().skip(1) {
+                assert_eq!(node.stats().deliveries, 1, "Node {i} must receive delivery");
+            }
+
+            // In a 6-node clique with threshold k=2, redundant rebroadcasts must be suppressed
+            let total_suppressed: u64 = nodes.iter().map(|n| n.stats().relays_suppressed).sum();
+            assert!(
+                total_suppressed > 0,
+                "Dense cluster should trigger counter-based relay suppression"
+            );
+        })
+        .await
+        .expect("test_adaptive_flood_suppression_in_dense_cluster timed out after 5s");
     }
 
     #[tokio::test]
     async fn test_adaptive_flood_priority_messages_never_suppressed() {
-        tokio::time::pause();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let net = SimNetwork::new(606);
+            let count = 4;
+            let ids: Vec<Identity> = (0..count).map(|_| Identity::generate()).collect();
+            let s_ids: Vec<ShortId> = ids.iter().map(|id| id.short_id()).collect();
 
-        let net = SimNetwork::new(606);
-        let count = 4;
-        let ids: Vec<Identity> = (0..count).map(|_| Identity::generate()).collect();
-        let s_ids: Vec<ShortId> = ids.iter().map(|id| id.short_id()).collect();
-
-        for i in 0..count {
-            for j in (i + 1)..count {
-                net.set_bidirectional_link(s_ids[i], s_ids[j], Duration::ZERO, 0.0);
-            }
-        }
-
-        let mut nodes: Vec<MeshNode<_>> = ids
-            .into_iter()
-            .map(|id| {
-                let s = id.short_id();
-                let t = net.create_node(s);
-                let policy = crate::mesh::policy::AdaptiveFlood::default();
-                MeshNode::new(id, t, Box::new(policy))
-            })
-            .collect();
-
-        // Node 0 broadcasts with priority flag = true
-        let priority_flags = Flags {
-            priority: true,
-            ..Default::default()
-        };
-        nodes[0]
-            .send_broadcast_with_type(
-                MsgType::Chat,
-                priority_flags,
-                b"Urgent priority alert".to_vec(),
-            )
-            .await
-            .unwrap();
-
-        for _ in 0..20 {
-            tokio::time::advance(Duration::from_millis(5)).await;
-            for node in nodes.iter_mut() {
-                while let Ok(Ok(true)) =
-                    tokio::time::timeout(Duration::from_millis(1), node.step()).await
-                {
-                    // drain
+            for i in 0..count {
+                for j in (i + 1)..count {
+                    net.set_bidirectional_link(s_ids[i], s_ids[j], Duration::ZERO, 0.0);
                 }
             }
-        }
 
-        // Check deliveries and zero suppressions
-        for (i, node) in nodes.iter().enumerate().skip(1) {
-            assert_eq!(node.stats().deliveries, 1);
-            assert_eq!(
-                node.stats().relays_suppressed,
-                0,
-                "Priority messages must never be suppressed for node {i}"
-            );
-        }
+            let mut nodes: Vec<MeshNode<_>> = ids
+                .into_iter()
+                .map(|id| {
+                    let s = id.short_id();
+                    let t = net.create_node(s);
+                    let policy = crate::mesh::policy::AdaptiveFlood::default();
+                    MeshNode::new(id, t, Box::new(policy))
+                })
+                .collect();
+
+            let mut sim_time = Instant::now();
+
+            // Node 0 broadcasts with priority flag = true
+            let priority_flags = Flags {
+                priority: true,
+                ..Default::default()
+            };
+            nodes[0]
+                .send_broadcast_with_type(
+                    MsgType::Chat,
+                    priority_flags,
+                    b"Urgent priority alert".to_vec(),
+                )
+                .await
+                .unwrap();
+
+            let mut drain_steps = 0;
+            for _ in 0..20 {
+                sim_time += Duration::from_millis(5);
+                for node in nodes.iter_mut() {
+                    while let Ok(true) = node.step_at(sim_time).await {
+                        drain_steps += 1;
+                        assert!(
+                            drain_steps <= 10_000,
+                            "Priority drain loop exceeded 10,000 steps"
+                        );
+                    }
+                }
+            }
+
+            // Check deliveries and zero suppressions
+            for (i, node) in nodes.iter().enumerate().skip(1) {
+                assert_eq!(node.stats().deliveries, 1);
+                assert_eq!(
+                    node.stats().relays_suppressed,
+                    0,
+                    "Priority messages must never be suppressed for node {i}"
+                );
+            }
+        })
+        .await
+        .expect("test_adaptive_flood_priority_messages_never_suppressed timed out after 5s");
     }
 }
