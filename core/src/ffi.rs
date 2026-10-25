@@ -56,6 +56,42 @@ pub unsafe extern "C" fn bitchat_init(storage_path: *const c_char) -> *mut c_cha
     }
 }
 
+/// Initialize Bitchat core with hardware-backed DEK key from Android Keystore.
+///
+/// # Safety
+///
+/// `storage_path` must be a valid null-terminated C string.
+/// `key_ptr` must point to a 32-byte buffer, or be null.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_init_with_key(
+    storage_path: *const c_char,
+    key_ptr: *const u8,
+    version: u32,
+) -> *mut c_char {
+    let path = match c_str_to_string(storage_path) {
+        Some(p) => p,
+        None => return std::ptr::null_mut(),
+    };
+
+    let dek = if !key_ptr.is_null() {
+        let mut k = [0u8; 32];
+        std::ptr::copy_nonoverlapping(key_ptr, k.as_mut_ptr(), 32);
+        Some(k)
+    } else {
+        None
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::init_with_key(path, dek, version)) {
+        Ok(short_id) => string_to_c_char(short_id),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Return own 8-byte hexadecimal ShortId.
 ///
 /// # Safety
@@ -525,6 +561,122 @@ pub unsafe extern "C" fn bitchat_gateway_get_routes() -> *mut c_char {
     match rt.block_on(api::gateway_get_routes()) {
         Ok(routes) => string_to_c_char(routes.join(",")),
         Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Send an end-to-end encrypted direct chat message with delivery tracking and outbox admission.
+///
+/// # Safety
+///
+/// `recipient` and `text` must be valid null-terminated C strings.
+/// Returned logical ID string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_send_message(
+    recipient: *const c_char,
+    text: *const c_char,
+    mode: u8,
+) -> *mut c_char {
+    let target = match c_str_to_string(recipient) {
+        Some(t) => t,
+        None => return std::ptr::null_mut(),
+    };
+    let body = match c_str_to_string(text) {
+        Some(b) => b,
+        None => return std::ptr::null_mut(),
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::send_message(target, body, mode)) {
+        Ok(logical_id) => string_to_c_char(logical_id),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Query delivery state of a logical message by its 32-character hex ID.
+///
+/// # Safety
+///
+/// `logical_id` must be a valid null-terminated C string.
+/// Returned state string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_get_delivery_state(logical_id: *const c_char) -> *mut c_char {
+    let id = match c_str_to_string(logical_id) {
+        Some(i) => i,
+        None => return std::ptr::null_mut(),
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::get_delivery_state(id)) {
+        Ok(state) => string_to_c_char(state),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Drain queued delivery transition events emitted by the delivery subsystem.
+///
+/// Returns JSON array of delivery events.
+///
+/// # Safety
+///
+/// Returned JSON string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_poll_delivery_events() -> *mut c_char {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::poll_delivery_events()) {
+        Ok(json) => string_to_c_char(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Retrieve comprehensive routing diagnostics and quota snapshot for mobile UI.
+///
+/// Returns JSON object of diagnostics snapshot.
+///
+/// # Safety
+///
+/// Returned JSON string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_get_diagnostics() -> *mut c_char {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::get_diagnostics()) {
+        Ok(json) => string_to_c_char(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Step the outbox pump, processing timeouts, retries, and expiration.
+///
+/// Returns number of handled delivery actions, or -1 on error.
+///
+/// # Safety
+///
+/// This function is safe to call across thread boundaries.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_pump_outbox() -> i32 {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::pump_outbox()) {
+        Ok(count) => count as i32,
+        Err(_) => -1,
     }
 }
 

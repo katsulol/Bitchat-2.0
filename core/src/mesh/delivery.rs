@@ -337,6 +337,20 @@ impl DeliveryCoordinator {
         self.records.get(logical_id)
     }
 
+    pub fn queued_count(&self) -> usize {
+        self.records
+            .values()
+            .filter(|r| r.state == DeliveryState::Queued)
+            .count()
+    }
+
+    pub fn in_flight_count(&self) -> usize {
+        self.records
+            .values()
+            .filter(|r| r.state == DeliveryState::InFlight)
+            .count()
+    }
+
     pub fn mark_in_flight(
         &mut self,
         logical_id: &LogicalMessageId,
