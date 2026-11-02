@@ -53,6 +53,12 @@ class MeshBridge {
   int duplicatesDropped = 0;
   int relaysSuppressed = 0;
 
+  bool userPausedRelaying = false;
+  int _lastBatteryPct = -1;
+  int _lastCharging = -1;
+  int _lastPowerSave = -1;
+  int _lastThermal = 0;
+
   Timer? _pumpTimer;
   bool _isPumping = false;
   bool _isDisposed = false;
@@ -91,6 +97,71 @@ class MeshBridge {
 
   List<String> getGatewayRoutes() {
     return CoreFfi.instance.gatewayGetRoutes();
+  }
+
+  List<RustPendingGatewayPeer> getPendingGatewayPeers() {
+    return CoreFfi.instance.gatewayListPending();
+  }
+
+  bool approveGatewayPeer(String endpointIdHex) {
+    return CoreFfi.instance.gatewayApprovePeer(endpointIdHex);
+  }
+
+  bool revokeOrBlockGatewayPeer(String endpointIdHex, {required bool block}) {
+    return CoreFfi.instance.gatewayRevokeOrBlockPeer(endpointIdHex, block: block);
+  }
+
+  bool setPeerTrustState(String peerIdHex, String action) {
+    return CoreFfi.instance.trustSetPeerState(peerIdHex, action);
+  }
+
+  String? issueVoucher({
+    required String subjectPeerIdHex,
+    required String audiencePeerIdHex,
+    String capability = 'direct_message',
+    int lifetimeSecs = 3600,
+  }) {
+    return CoreFfi.instance.trustIssueVoucher(
+      subjectPeerIdHex,
+      audiencePeerIdHex,
+      capability,
+      lifetimeSecs,
+    );
+  }
+
+  Map<String, dynamic>? importVoucher(String voucherUri) {
+    return CoreFfi.instance.trustImportVoucher(voucherUri);
+  }
+
+  String getPeerProximity(String shortIdHex) {
+    return CoreFfi.instance.getPeerProximity(shortIdHex);
+  }
+
+  String? setVolatileSession(String recipientShortId, int retentionSecs) {
+    final res = CoreFfi.instance.setVolatileSession(recipientShortId, retentionSecs);
+    _drainOutbound();
+    return res;
+  }
+
+  RustVolatileState getVolatileState(String recipientShortId) {
+    return CoreFfi.instance.getVolatileState(recipientShortId);
+  }
+
+  void setUserPausedRelaying(bool paused) {
+    userPausedRelaying = paused;
+    CoreFfi.instance.updateResourceState(
+      batteryPct: _lastBatteryPct,
+      charging: _lastCharging,
+      powerSave: _lastPowerSave,
+      thermal: _lastThermal,
+      userPaused: userPausedRelaying,
+    );
+  }
+
+  Future<void> setSecureScreen(bool enabled) async {
+    try {
+      await _channel.invokeMethod('setSecureScreen', {'enabled': enabled});
+    } catch (_) {}
   }
 
   RustDiagnostics? getDiagnostics() {
@@ -137,6 +208,20 @@ class MeshBridge {
     // 4. Start native BLE Mesh Service with verified ShortId
     try {
       await _channel.invokeMethod('startBle', {'shortId': myShortId});
+      final resState = await _channel.invokeMapMethod<String, int>('getDeviceResourceState');
+      if (resState != null) {
+        _lastBatteryPct = resState['batteryPct'] ?? -1;
+        _lastCharging = resState['charging'] ?? -1;
+        _lastPowerSave = resState['powerSave'] ?? -1;
+        _lastThermal = resState['thermal'] ?? 0;
+        CoreFfi.instance.updateResourceState(
+          batteryPct: _lastBatteryPct,
+          charging: _lastCharging,
+          powerSave: _lastPowerSave,
+          thermal: _lastThermal,
+          userPaused: userPausedRelaying,
+        );
+      }
     } catch (e) {
       // Running on emulator or test environment without BLE
     }
@@ -319,6 +404,28 @@ class MeshBridge {
         _drainInbound();
         _drainOutbound();
         _drainDeliveryEvents();
+        break;
+
+      case 'onPeerRssi':
+        final shortId = call.arguments['shortId'] as String?;
+        final rssi = call.arguments['rssi'] as int?;
+        if (shortId != null && rssi != null) {
+          CoreFfi.instance.recordBleRssi(shortId, rssi);
+        }
+        break;
+
+      case 'onResourceStateChanged':
+        _lastBatteryPct = (call.arguments['batteryPct'] as int?) ?? -1;
+        _lastCharging = (call.arguments['charging'] as int?) ?? -1;
+        _lastPowerSave = (call.arguments['powerSave'] as int?) ?? -1;
+        _lastThermal = (call.arguments['thermal'] as int?) ?? 0;
+        CoreFfi.instance.updateResourceState(
+          batteryPct: _lastBatteryPct,
+          charging: _lastCharging,
+          powerSave: _lastPowerSave,
+          thermal: _lastThermal,
+          userPaused: userPausedRelaying,
+        );
         break;
     }
   }

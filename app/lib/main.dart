@@ -155,6 +155,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
             },
           ),
           IconButton(
+            icon: const Icon(Icons.verified_user_outlined),
+            tooltip: 'Trust & Vouchers',
+            onPressed: _showTrustAndVouchersDialog,
+          ),
+          IconButton(
             icon: const Icon(Icons.cloud_sync_outlined),
             tooltip: 'Iroh Gateway',
             onPressed: _showGatewayDialog,
@@ -265,22 +270,28 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           child: Row(
                             children: _peers.map((peer) {
                               final isSelected = _selectedRecipient == peer;
+                              final prox = _bridge.getPeerProximity(peer);
+                              final shortLabel = peer.length > 8 ? peer.substring(0, 8) : peer;
+                              final chipText = prox == 'Unknown' ? shortLabel : '$shortLabel ($prox)';
                               return Padding(
                                 padding: const EdgeInsets.only(right: 6),
-                                child: FilterChip(
-                                  selected: isSelected,
-                                  label: Text(
-                                    peer.length > 8 ? peer.substring(0, 8) : peer,
-                                    style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                                child: Tooltip(
+                                  message: 'Signal category: $prox (coarse local BLE RSSI category, not distance in meters)',
+                                  child: FilterChip(
+                                    selected: isSelected,
+                                    label: Text(
+                                      chipText,
+                                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                                    ),
+                                    onSelected: (selected) {
+                                      setState(() {
+                                        _selectedRecipient = selected ? peer : null;
+                                      });
+                                      if (selected) {
+                                        _bridge.initiateHandshake(peer);
+                                      }
+                                    },
                                   ),
-                                  onSelected: (selected) {
-                                    setState(() {
-                                      _selectedRecipient = selected ? peer : null;
-                                    });
-                                    if (selected) {
-                                      _bridge.initiateHandshake(peer);
-                                    }
-                                  },
                                 ),
                               );
                             }).toList(),
@@ -342,7 +353,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
             },
           ),
 
-          // Message recipient indicator banner (shows direct peer / gateway route / offline status)
+          // Message recipient indicator banner (shows direct peer / gateway route / offline status + proximity + volatile state)
           if (_selectedRecipient != null)
             Builder(
               builder: (ctx) {
@@ -359,27 +370,59 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     : (isGateway ? Icons.public : Icons.cloud_off);
                 final isReady = _bridge.isSessionReady(_selectedRecipient!);
                 final secBadge = isReady ? ' (E2E Encrypted)' : ' (Securing...)';
+                final prox = isDirect ? _bridge.getPeerProximity(_selectedRecipient!) : 'Unknown';
+                final proxBadge = (isDirect && prox != 'Unknown') ? ' [$prox]' : '';
+                final volState = _bridge.getVolatileState(_selectedRecipient!);
+                final volBadge = volState.state != 'NotRequested'
+                    ? ' [Volatile: ${volState.state} (${volState.retentionSecs}s)]'
+                    : '';
                 final label = (isDirect
                     ? 'Direct to: ${_selectedRecipient!.length > 8 ? _selectedRecipient!.substring(0, 8) : _selectedRecipient}'
                     : (isGateway
                         ? 'Via Gateway: ${_selectedRecipient!.length > 8 ? _selectedRecipient!.substring(0, 8) : _selectedRecipient}'
-                        : 'Peer ${_selectedRecipient!.length > 8 ? _selectedRecipient!.substring(0, 8) : _selectedRecipient} (Offline)')) + secBadge;
+                        : 'Peer ${_selectedRecipient!.length > 8 ? _selectedRecipient!.substring(0, 8) : _selectedRecipient} (Offline)')) + secBadge + proxBadge + volBadge;
 
-                return Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                  color: bgColor,
-                  child: Row(
-                    children: [
-                      Icon(icon, size: 14, color: color),
-                      const SizedBox(width: 6),
-                      Text(label, style: TextStyle(fontSize: 12, color: color)),
-                      const Spacer(),
-                      GestureDetector(
-                        onTap: () => setState(() => _selectedRecipient = null),
-                        child: const Text('Cancel', style: TextStyle(fontSize: 12, color: Colors.white70)),
+                return Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                      color: bgColor,
+                      child: Row(
+                        children: [
+                          Icon(icon, size: 14, color: color),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              label,
+                              style: TextStyle(fontSize: 11, color: color),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          GestureDetector(
+                            onTap: () {
+                              _bridge.setSecureScreen(false);
+                              setState(() => _selectedRecipient = null);
+                            },
+                            child: const Text('Cancel', style: TextStyle(fontSize: 12, color: Colors.white70)),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+                    if (volState.state != 'NotRequested')
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                        color: Colors.deepOrange.shade900.withAlpha(110),
+                        child: Text(
+                          volState.state == 'UnsupportedByPeer'
+                              ? 'Volatile chat unsupported by peer: outgoing messages fell back to persistent E2EE.'
+                              : 'Volatile Chat (${volState.retentionSecs}s): local RAM-only retention; remote deletion depends on peer compliance and cannot prevent screenshots or modified clients.',
+                          style: const TextStyle(fontSize: 10, color: Colors.orangeAccent),
+                        ),
+                      ),
+                  ],
                 );
               },
             ),
@@ -536,6 +579,39 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                         });
                       },
                     ),
+                    PopupMenuButton<int>(
+                      tooltip: 'Volatile Chat Retention',
+                      icon: Builder(
+                        builder: (ctx) {
+                          final vs = _bridge.getVolatileState(_selectedRecipient!);
+                          final active = vs.state != 'NotRequested' && vs.state != 'UnsupportedByPeer';
+                          return Icon(
+                            active ? Icons.timer : Icons.timer_outlined,
+                            color: active ? Colors.orangeAccent : Colors.grey,
+                            size: 20,
+                          );
+                        },
+                      ),
+                      onSelected: (ttlSecs) {
+                        final state = _bridge.setVolatileSession(_selectedRecipient!, ttlSecs);
+                        _bridge.setSecureScreen(ttlSecs > 0);
+                        setState(() {});
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              ttlSecs == 0
+                                  ? 'Volatile chat disabled (Persistent E2EE)'
+                                  : 'Volatile chat requested (${ttlSecs}s): ${state ?? "Unavailable (handshake required)"}',
+                            ),
+                          ),
+                        );
+                      },
+                      itemBuilder: (ctx) => const [
+                        PopupMenuItem(value: 0, child: Text('Persistent Chat (Default)')),
+                        PopupMenuItem(value: 300, child: Text('Volatile Chat: 5 min (300s)')),
+                        PopupMenuItem(value: 900, child: Text('Volatile Chat: 15 min (900s)')),
+                      ],
+                    ),
                   ],
                   const SizedBox(width: 8),
                   Expanded(
@@ -601,85 +677,116 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   }
 
   void _showNodeDetails() {
-    final diag = _bridge.getDiagnostics();
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF1E1E1E),
       builder: (context) {
-        return Padding(
-          padding: const EdgeInsets.all(20),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            final diag = _bridge.getDiagnostics();
+            return Padding(
+              padding: const EdgeInsets.all(20),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Expanded(
-                      child: Text(
-                        'Node & Outbox Diagnostics',
-                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF2E7D32),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: const Text(
-                        'v2.0.4',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.white,
-                          fontFamily: 'monospace',
+                    Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            'Node & Outbox Diagnostics',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF2E7D32),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            diag?.buildVersion ?? 'v2.0.5-phase5',
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
+                    const SizedBox(height: 12),
+                    Text('ShortId: ${_bridge.myShortId}', style: const TextStyle(fontFamily: 'monospace')),
+                    const SizedBox(height: 6),
+                    const Text('Full Ed25519 PeerId:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    Text(_bridge.myPeerId, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
+                    const Divider(height: 24),
+                    const Text('Outbox & Relay Engine Status', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.greenAccent)),
+                    const SizedBox(height: 8),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _statItem('Queued', diag?.outboxQueuedCount ?? 0),
+                        _statItem('In Flight', diag?.outboxInflightCount ?? 0),
+                        _statItem('Delivered', diag?.deliveriesCount ?? _bridge.deliveries),
+                        _statItem('Tx Total', _bridge.transmissions),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _statItem('Suppressed', _bridge.relaysSuppressed),
+                        _statItem('Duplicates', _bridge.duplicatesDropped),
+                        _statItem('Peers', diag?.connectedPeersCount ?? _peers.length),
+                      ],
+                    ),
+                    const Divider(height: 24),
+                    const Text('Resource-Budgeted Relaying Policy', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.amberAccent)),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Active Profile: ${diag?.resourceProfile ?? "Normal"} | Battery: ${diag?.batteryBand ?? "Normal"} (${diag?.chargingState ?? "Discharging"}) | OS Power Save: ${diag?.powerSaveMode ?? "Disabled"}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(height: 6),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      dense: true,
+                      title: const Text('Pause Third-Party Relaying', style: TextStyle(fontSize: 12)),
+                      subtitle: const Text(
+                        'Suppresses opportunistic third-party relays while keeping self-authored messages & ACKs active.',
+                        style: TextStyle(fontSize: 10, color: Colors.grey),
+                      ),
+                      value: _bridge.userPausedRelaying,
+                      onChanged: (paused) {
+                        _bridge.setUserPausedRelaying(paused);
+                        setModalState(() {});
+                        setState(() {});
+                      },
+                    ),
+                    const Divider(height: 24),
+                    const Text('Transport, Trust & Privacy Layer', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
+                    const SizedBox(height: 6),
+                    Text('Gateway Active: ${diag?.gatewayActive ?? false ? "YES" : "NO"}', style: const TextStyle(fontSize: 12)),
+                    Text('Privacy Direct-Only Enforced: ${diag?.gatewayRelayDisabled ?? true ? "YES (Relay Blocked)" : "NO (Relay Allowed)"}', style: const TextStyle(fontSize: 12)),
+                    Text(
+                      'Gateway Consent: ${diag?.approvedGatewayCount ?? 0} approved, ${diag?.pendingGatewayCount ?? 0} pending | Active 1-Hop Vouchers: ${diag?.activeVouchersCount ?? 0}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    if (diag?.lastRouteCandidate != null) ...[
+                      const SizedBox(height: 4),
+                      Text('Last Route Candidate: ${diag!.lastRouteCandidate}', style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+                    ],
                   ],
                 ),
-                const SizedBox(height: 12),
-                Text('ShortId: ${_bridge.myShortId}', style: const TextStyle(fontFamily: 'monospace')),
-                const SizedBox(height: 6),
-                const Text('Full Ed25519 PeerId:', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                Text(_bridge.myPeerId, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
-                const Divider(height: 24),
-                const Text('Outbox & Relay Engine Status', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.greenAccent)),
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _statItem('Queued', diag?.outboxQueuedCount ?? 0),
-                    _statItem('In Flight', diag?.outboxInflightCount ?? 0),
-                    _statItem('Delivered', diag?.deliveriesCount ?? _bridge.deliveries),
-                    _statItem('Tx Total', _bridge.transmissions),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _statItem('Suppressed', _bridge.relaysSuppressed),
-                    _statItem('Duplicates', _bridge.duplicatesDropped),
-                    _statItem('Peers', diag?.connectedPeersCount ?? _peers.length),
-                  ],
-                ),
-                const Divider(height: 24),
-                const Text('Transport & Privacy Layer', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
-                const SizedBox(height: 6),
-                Text('Gateway Active: ${diag?.gatewayActive ?? false ? "YES" : "NO"}', style: const TextStyle(fontSize: 12)),
-                Text('Privacy Direct-Only Enforced: ${diag?.gatewayRelayDisabled ?? true ? "YES (Relay Blocked)" : "NO (Relay Allowed)"}', style: const TextStyle(fontSize: 12)),
-                if (diag?.lastRouteCandidate != null) ...[
-                  const SizedBox(height: 4),
-                  Text('Last Route Candidate: ${diag!.lastRouteCandidate}', style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
-                ],
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
     );
@@ -772,7 +879,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     ],
                     if (isRunning && contactUri != null) ...[
                       const SizedBox(height: 8),
-                      const Text('Gateway Contact URI:', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      const Text(
+                        'Gateway Contact URI (includes single-use 5-min pairing token):',
+                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                      ),
                       Row(
                         children: [
                           Expanded(
@@ -837,6 +947,78 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           _statItem('Exported', stats?.forwardsExported ?? 0),
                           _statItem('Loops Prevented', stats?.loopsPrevented ?? 0),
                         ],
+                      ),
+                      Builder(
+                        builder: (ctx) {
+                          final pending = _bridge.getPendingGatewayPeers();
+                          if (pending.isEmpty) return const SizedBox.shrink();
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const SizedBox(height: 12),
+                              Text(
+                                'Pending Gateway Consent (${pending.length}):',
+                                style: const TextStyle(fontSize: 11, color: Colors.amberAccent, fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 4),
+                              const Text(
+                                'Uninvited peers verified identity-key ownership but cannot use your gateway until approved.',
+                                style: TextStyle(fontSize: 10, color: Colors.grey),
+                              ),
+                              const SizedBox(height: 6),
+                              ...pending.map((p) {
+                                return Card(
+                                  color: const Color(0xFF282828),
+                                  margin: const EdgeInsets.only(bottom: 6),
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                'ShortId: ${p.shortId}',
+                                                style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.bold),
+                                              ),
+                                              Text(
+                                                'PeerId: ${p.peerId.length > 16 ? "${p.peerId.substring(0, 16)}..." : p.peerId}',
+                                                style: const TextStyle(fontSize: 9, fontFamily: 'monospace', color: Colors.grey),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        TextButton(
+                                          onPressed: () {
+                                            final ok = _bridge.approveGatewayPeer(p.endpointId);
+                                            setModalState(() {});
+                                            setState(() {});
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(content: Text(ok ? 'Approved gateway peer ${p.shortId}' : 'Approval failed')),
+                                            );
+                                          },
+                                          child: const Text('Approve', style: TextStyle(fontSize: 11, color: Colors.greenAccent)),
+                                        ),
+                                        TextButton(
+                                          onPressed: () {
+                                            final ok = _bridge.revokeOrBlockGatewayPeer(p.endpointId, block: true);
+                                            setModalState(() {});
+                                            setState(() {});
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(content: Text(ok ? 'Blocked gateway peer ${p.shortId}' : 'Block failed')),
+                                            );
+                                          },
+                                          child: const Text('Block', style: TextStyle(fontSize: 11, color: Colors.redAccent)),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }),
+                            ],
+                          );
+                        },
                       ),
                       Builder(
                         builder: (ctx) {
@@ -1103,6 +1285,263 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
     );
   }
 
+  void _showTrustAndVouchersDialog() {
+    final peerTrustCtrl = TextEditingController();
+    final subjectCtrl = TextEditingController();
+    final audienceCtrl = TextEditingController(text: _bridge.myPeerId);
+    final importVoucherCtrl = TextEditingController();
+    String selectedCap = 'direct_message';
+    String? issuedVoucherUri;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E1E),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+                top: 16,
+                left: 16,
+                right: 16,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Scoped Peer Trust & 1-Hop Vouchers',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Vouchers grant scoped capability authorization (1 hop only) and do NOT establish unique human identity.',
+                      style: TextStyle(fontSize: 11, color: Colors.amberAccent),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'My 64-hex PeerId: ${_bridge.myPeerId}',
+                            style: const TextStyle(fontSize: 10, fontFamily: 'monospace', color: Colors.grey),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.copy, size: 15),
+                          tooltip: 'Copy full PeerId',
+                          onPressed: () {
+                            Clipboard.setData(ClipboardData(text: _bridge.myPeerId));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Full 64-hex PeerId copied')),
+                            );
+                          },
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.qr_code, size: 16, color: Color(0xFF81C784)),
+                          tooltip: 'Show full PeerId QR',
+                          onPressed: () => _showQrDialog(_bridge.myPeerId),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 16),
+                    const Text(
+                      '1. Manage Peer Authorization State',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.tealAccent),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: peerTrustCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Target PeerId (64 hex chars)',
+                        labelStyle: TextStyle(fontSize: 11),
+                        isDense: true,
+                      ),
+                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade800),
+                          onPressed: () {
+                            final pid = peerTrustCtrl.text.trim();
+                            final ok = _bridge.setPeerTrustState(pid, 'approve');
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(ok ? 'Peer approved' : 'Invalid 64-hex PeerId')),
+                            );
+                          },
+                          child: const Text('Approve Peer', style: TextStyle(fontSize: 11)),
+                        ),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.blue.shade800),
+                          onPressed: () {
+                            final pid = peerTrustCtrl.text.trim();
+                            final ok = _bridge.setPeerTrustState(pid, 'introducer');
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(ok ? 'Peer approved as 1-Hop Introducer' : 'Invalid 64-hex PeerId')),
+                            );
+                          },
+                          child: const Text('Approve + Introducer', style: TextStyle(fontSize: 11)),
+                        ),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade900),
+                          onPressed: () {
+                            final pid = peerTrustCtrl.text.trim();
+                            final ok = _bridge.setPeerTrustState(pid, 'block');
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(ok ? 'Peer blocked & vouchers revoked' : 'Invalid 64-hex PeerId')),
+                            );
+                          },
+                          child: const Text('Block Peer', style: TextStyle(fontSize: 11)),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 20),
+                    const Text(
+                      '2. Issue 1-Hop Capability Voucher (Ed25519 Signed)',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.greenAccent),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: subjectCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Subject PeerId (64 hex)',
+                        labelStyle: TextStyle(fontSize: 11),
+                        isDense: true,
+                      ),
+                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: audienceCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Audience PeerId (64 hex of verifier/gateway)',
+                        labelStyle: TextStyle(fontSize: 11),
+                        isDense: true,
+                      ),
+                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        const Text('Capability: ', style: TextStyle(fontSize: 11)),
+                        const SizedBox(width: 8),
+                        DropdownButton<String>(
+                          value: selectedCap,
+                          items: const [
+                            DropdownMenuItem(value: 'direct_message', child: Text('DirectMessage (1 hop)', style: TextStyle(fontSize: 12))),
+                            DropdownMenuItem(value: 'gateway_forward', child: Text('GatewayForward (1 hop)', style: TextStyle(fontSize: 12))),
+                          ],
+                          onChanged: (v) {
+                            if (v != null) {
+                              setModalState(() => selectedCap = v);
+                            }
+                          },
+                        ),
+                        const Spacer(),
+                        ElevatedButton(
+                          onPressed: () {
+                            final uri = _bridge.issueVoucher(
+                              subjectPeerIdHex: subjectCtrl.text.trim(),
+                              audiencePeerIdHex: audienceCtrl.text.trim(),
+                              capability: selectedCap,
+                            );
+                            setModalState(() => issuedVoucherUri = uri);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(uri != null ? 'Signed 1-hop voucher generated' : 'Failed: check 64-hex Subject & Audience PeerIds')),
+                            );
+                          },
+                          child: const Text('Issue Voucher', style: TextStyle(fontSize: 11)),
+                        ),
+                      ],
+                    ),
+                    if (issuedVoucherUri != null) ...[
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              issuedVoucherUri!,
+                              style: const TextStyle(fontSize: 9, fontFamily: 'monospace', color: Color(0xFF81C784)),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.copy, size: 15),
+                            onPressed: () {
+                              Clipboard.setData(ClipboardData(text: issuedVoucherUri!));
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Voucher URI copied')),
+                              );
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.qr_code, size: 16),
+                            onPressed: () => _showQrDialog(issuedVoucherUri!),
+                          ),
+                        ],
+                      ),
+                    ],
+                    const Divider(height: 20),
+                    const Text(
+                      '3. Import 1-Hop Voucher (Requires Approved Introducer)',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.amberAccent),
+                    ),
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: importVoucherCtrl,
+                            decoration: const InputDecoration(
+                              hintText: 'bitchat-voucher://...',
+                              hintStyle: TextStyle(fontSize: 11),
+                              isDense: true,
+                            ),
+                            style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: () {
+                            final uri = importVoucherCtrl.text.trim();
+                            final res = _bridge.importVoucher(uri);
+                            final subjectShortId = res?['subject_short_id'] as String?;
+                            setModalState(() {});
+                            setState(() {});
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  subjectShortId != null
+                                      ? 'Introduced peer $subjectShortId via 1-hop voucher (not independent identity verification)'
+                                      : 'Rejected voucher (untrusted introducer, wrong audience, or expired)',
+                                ),
+                              ),
+                            );
+                          },
+                          child: const Text('Import', style: TextStyle(fontSize: 11)),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   Future<void> _openQrScanner() async {
     final scanned = await Navigator.push<String>(
       context,
@@ -1129,7 +1568,24 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       return;
     }
 
-    // 2. Peer ShortId / Hex identifier
+    // 2. Signed 1-Hop Capability Voucher URI
+    if (trimmed.startsWith('bitchat-voucher://')) {
+      final res = _bridge.importVoucher(trimmed);
+      final subjectShortId = res?['subject_short_id'] as String?;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            subjectShortId != null
+                ? 'Introduced peer $subjectShortId via 1-hop voucher (scoped capability only)'
+                : 'Rejected voucher QR (untrusted introducer, wrong audience, or expired)',
+          ),
+        ),
+      );
+      return;
+    }
+
+    // 3. Peer ShortId / Hex identifier
     String peerId = trimmed;
     if (peerId.startsWith('bitchat-id://')) {
       peerId = peerId.substring('bitchat-id://'.length);

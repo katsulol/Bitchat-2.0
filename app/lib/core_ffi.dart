@@ -107,6 +107,14 @@ class RustDiagnostics {
   final bool gatewayActive;
   final bool gatewayRelayDisabled;
   final String? lastRouteCandidate;
+  final String buildVersion;
+  final String resourceProfile;
+  final String batteryBand;
+  final String chargingState;
+  final String powerSaveMode;
+  final int pendingGatewayCount;
+  final int approvedGatewayCount;
+  final int activeVouchersCount;
 
   RustDiagnostics({
     required this.myShortId,
@@ -118,6 +126,14 @@ class RustDiagnostics {
     required this.gatewayActive,
     required this.gatewayRelayDisabled,
     this.lastRouteCandidate,
+    this.buildVersion = 'v2.0.5-phase5',
+    this.resourceProfile = 'Balanced',
+    this.batteryBand = 'Unknown',
+    this.chargingState = 'Unknown',
+    this.powerSaveMode = 'False',
+    this.pendingGatewayCount = 0,
+    this.approvedGatewayCount = 0,
+    this.activeVouchersCount = 0,
   });
 
   factory RustDiagnostics.fromJson(Map<String, dynamic> json) {
@@ -131,6 +147,42 @@ class RustDiagnostics {
       gatewayActive: json['gateway_active'] as bool? ?? false,
       gatewayRelayDisabled: json['gateway_relay_disabled'] as bool? ?? true,
       lastRouteCandidate: json['last_route_candidate'] as String?,
+      buildVersion: json['build_version'] as String? ?? 'v2.0.5-phase5',
+      resourceProfile: json['resource_profile'] as String? ?? 'Balanced',
+      batteryBand: json['battery_band'] as String? ?? 'Unknown',
+      chargingState: json['charging_state'] as String? ?? 'Unknown',
+      powerSaveMode: json['power_save_mode'] as String? ?? 'False',
+      pendingGatewayCount: json['pending_gateway_count'] as int? ?? 0,
+      approvedGatewayCount: json['approved_gateway_count'] as int? ?? 0,
+      activeVouchersCount: json['active_vouchers_count'] as int? ?? 0,
+    );
+  }
+}
+
+class RustPendingGatewayPeer {
+  final String endpointId;
+  final String peerId;
+  RustPendingGatewayPeer({required this.endpointId, required this.peerId});
+
+  String get shortId => peerId.length >= 16 ? peerId.substring(0, 16).toUpperCase() : peerId;
+
+  factory RustPendingGatewayPeer.fromJson(Map<String, dynamic> json) {
+    return RustPendingGatewayPeer(
+      endpointId: json['endpoint_id'] as String? ?? '',
+      peerId: json['peer_id'] as String? ?? '',
+    );
+  }
+}
+
+class RustVolatileState {
+  final String state;
+  final int retentionSecs;
+  RustVolatileState({required this.state, required this.retentionSecs});
+
+  factory RustVolatileState.fromJson(Map<String, dynamic> json) {
+    return RustVolatileState(
+      state: json['state'] as String? ?? 'NotRequested',
+      retentionSecs: json['retention_secs'] as int? ?? 0,
     );
   }
 }
@@ -170,6 +222,17 @@ class CoreFfi {
   late final BitchatGatewaySetRouteDart _gatewaySetRoute;
   late final BitchatStringDart _gatewayGetStats;
   late final BitchatStringDart _gatewayGetRoutes;
+  late final BitchatStringDart _gatewayListPending;
+  late final BitchatPeerDart _gatewayApprovePeer;
+  late final BitchatGatewayRevokeOrBlockDart _gatewayRevokeOrBlockPeer;
+  late final BitchatTrustSetPeerStateDart _trustSetPeerState;
+  late final BitchatTrustIssueVoucherDart _trustIssueVoucher;
+  late final BitchatGatewayImportDart _trustImportVoucher;
+  late final BitchatUpdateResourceStateDart _updateResourceState;
+  late final BitchatRecordBleRssiDart _recordBleRssi;
+  late final BitchatGetDeliveryStateDart _getPeerProximity;
+  late final BitchatSetVolatileSessionDart _setVolatileSession;
+  late final BitchatGetDeliveryStateDart _getVolatileState;
 
   bool loadLibrary() {
     if (_initialized) return true;
@@ -208,6 +271,17 @@ class CoreFfi {
       _gatewaySetRoute = _lib!.lookupFunction<BitchatGatewaySetRouteC, BitchatGatewaySetRouteDart>('bitchat_gateway_set_route');
       _gatewayGetStats = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_gateway_get_stats');
       _gatewayGetRoutes = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_gateway_get_routes');
+      _gatewayListPending = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_gateway_list_pending');
+      _gatewayApprovePeer = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_gateway_approve_peer');
+      _gatewayRevokeOrBlockPeer = _lib!.lookupFunction<BitchatGatewayRevokeOrBlockC, BitchatGatewayRevokeOrBlockDart>('bitchat_gateway_revoke_or_block_peer');
+      _trustSetPeerState = _lib!.lookupFunction<BitchatTrustSetPeerStateC, BitchatTrustSetPeerStateDart>('bitchat_trust_set_peer_state');
+      _trustIssueVoucher = _lib!.lookupFunction<BitchatTrustIssueVoucherC, BitchatTrustIssueVoucherDart>('bitchat_trust_issue_voucher');
+      _trustImportVoucher = _lib!.lookupFunction<BitchatGatewayImportC, BitchatGatewayImportDart>('bitchat_trust_import_voucher');
+      _updateResourceState = _lib!.lookupFunction<BitchatUpdateResourceStateC, BitchatUpdateResourceStateDart>('bitchat_update_resource_state');
+      _recordBleRssi = _lib!.lookupFunction<BitchatRecordBleRssiC, BitchatRecordBleRssiDart>('bitchat_record_ble_rssi');
+      _getPeerProximity = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_peer_proximity');
+      _setVolatileSession = _lib!.lookupFunction<BitchatSetVolatileSessionC, BitchatSetVolatileSessionDart>('bitchat_set_volatile_session');
+      _getVolatileState = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_volatile_state');
 
       _initialized = true;
       return true;
@@ -553,6 +627,159 @@ class CoreFfi {
     if (!_initialized) return -1;
     return _pumpOutbox();
   }
+
+  List<RustPendingGatewayPeer> gatewayListPending() {
+    if (!_initialized) return [];
+    final ptr = _gatewayListPending();
+    if (ptr == nullptr) return [];
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      final List<dynamic> list = jsonDecode(jsonStr);
+      return list.map((e) => RustPendingGatewayPeer.fromJson(e as Map<String, dynamic>)).toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  bool gatewayApprovePeer(String endpointIdHex) {
+    if (!_initialized) return false;
+    final ptr = endpointIdHex.toNativeUtf8();
+    try {
+      return _gatewayApprovePeer(ptr) == 0;
+    } finally {
+      calloc.free(ptr);
+    }
+  }
+
+  bool gatewayRevokeOrBlockPeer(String endpointIdHex, {required bool block}) {
+    if (!_initialized) return false;
+    final ptr = endpointIdHex.toNativeUtf8();
+    try {
+      return _gatewayRevokeOrBlockPeer(ptr, block ? 1 : 0) == 0;
+    } finally {
+      calloc.free(ptr);
+    }
+  }
+
+  bool trustSetPeerState(String peerIdHex, String action) {
+    if (!_initialized) return false;
+    final pidPtr = peerIdHex.toNativeUtf8();
+    final actPtr = action.toNativeUtf8();
+    try {
+      return _trustSetPeerState(pidPtr, actPtr) == 0;
+    } finally {
+      calloc.free(pidPtr);
+      calloc.free(actPtr);
+    }
+  }
+
+  String? trustIssueVoucher(String subjectPeerIdHex, String audiencePeerIdHex, String capability, int lifetimeSecs) {
+    if (!_initialized) return null;
+    final subjPtr = subjectPeerIdHex.toNativeUtf8();
+    final audPtr = audiencePeerIdHex.toNativeUtf8();
+    final capPtr = capability.toNativeUtf8();
+    try {
+      final ptr = _trustIssueVoucher(subjPtr, audPtr, capPtr, lifetimeSecs);
+      if (ptr == nullptr) return null;
+      final uri = ptr.toDartString();
+      _freeString(ptr);
+      return uri;
+    } finally {
+      calloc.free(subjPtr);
+      calloc.free(audPtr);
+      calloc.free(capPtr);
+    }
+  }
+
+  Map<String, dynamic>? trustImportVoucher(String voucherUri) {
+    if (!_initialized) return null;
+    final uriPtr = voucherUri.toNativeUtf8();
+    try {
+      final ptr = _trustImportVoucher(uriPtr);
+      if (ptr == nullptr) return null;
+      final jsonStr = ptr.toDartString();
+      _freeString(ptr);
+      return jsonDecode(jsonStr) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    } finally {
+      calloc.free(uriPtr);
+    }
+  }
+
+  String? updateResourceState({
+    required int batteryPct,
+    required int charging,
+    required int powerSave,
+    required int thermal,
+    required bool userPaused,
+  }) {
+    if (!_initialized) return null;
+    final ptr = _updateResourceState(batteryPct, charging, powerSave, thermal, userPaused ? 1 : 0);
+    if (ptr == nullptr) return null;
+    final prof = ptr.toDartString();
+    _freeString(ptr);
+    return prof;
+  }
+
+  String recordBleRssi(String shortIdHex, int rssiDbm) {
+    if (!_initialized) return 'Unknown';
+    final idPtr = shortIdHex.toNativeUtf8();
+    try {
+      final ptr = _recordBleRssi(idPtr, rssiDbm);
+      if (ptr == nullptr) return 'Unknown';
+      final cat = ptr.toDartString();
+      _freeString(ptr);
+      return cat;
+    } finally {
+      calloc.free(idPtr);
+    }
+  }
+
+  String getPeerProximity(String shortIdHex) {
+    if (!_initialized) return 'Unknown';
+    final idPtr = shortIdHex.toNativeUtf8();
+    try {
+      final ptr = _getPeerProximity(idPtr);
+      if (ptr == nullptr) return 'Unknown';
+      final cat = ptr.toDartString();
+      _freeString(ptr);
+      return cat;
+    } finally {
+      calloc.free(idPtr);
+    }
+  }
+
+  String? setVolatileSession(String recipientShortId, int retentionSecs) {
+    if (!_initialized) return null;
+    final recipPtr = recipientShortId.toNativeUtf8();
+    try {
+      final ptr = _setVolatileSession(recipPtr, retentionSecs);
+      if (ptr == nullptr) return null;
+      final st = ptr.toDartString();
+      _freeString(ptr);
+      return st;
+    } finally {
+      calloc.free(recipPtr);
+    }
+  }
+
+  RustVolatileState getVolatileState(String recipientShortId) {
+    if (!_initialized) return RustVolatileState(state: 'NotRequested', retentionSecs: 0);
+    final recipPtr = recipientShortId.toNativeUtf8();
+    try {
+      final ptr = _getVolatileState(recipPtr);
+      if (ptr == nullptr) return RustVolatileState(state: 'NotRequested', retentionSecs: 0);
+      final jsonStr = ptr.toDartString();
+      _freeString(ptr);
+      return RustVolatileState.fromJson(jsonDecode(jsonStr) as Map<String, dynamic>);
+    } catch (_) {
+      return RustVolatileState(state: 'NotRequested', retentionSecs: 0);
+    } finally {
+      calloc.free(recipPtr);
+    }
+  }
 }
 
 // FFI native signatures
@@ -612,3 +839,21 @@ typedef BitchatGatewayConnectDart = int Function(Pointer<Utf8> contactStr);
 
 typedef BitchatGatewaySetRouteC = Int32 Function(Pointer<Utf8> recipient, Pointer<Utf8> target);
 typedef BitchatGatewaySetRouteDart = int Function(Pointer<Utf8> recipient, Pointer<Utf8> target);
+
+typedef BitchatGatewayRevokeOrBlockC = Int32 Function(Pointer<Utf8> endpointId, Uint8 block);
+typedef BitchatGatewayRevokeOrBlockDart = int Function(Pointer<Utf8> endpointId, int block);
+
+typedef BitchatTrustSetPeerStateC = Int32 Function(Pointer<Utf8> peerId, Pointer<Utf8> action);
+typedef BitchatTrustSetPeerStateDart = int Function(Pointer<Utf8> peerId, Pointer<Utf8> action);
+
+typedef BitchatTrustIssueVoucherC = Pointer<Utf8> Function(Pointer<Utf8> subject, Pointer<Utf8> audience, Pointer<Utf8> capability, Uint64 lifetimeSecs);
+typedef BitchatTrustIssueVoucherDart = Pointer<Utf8> Function(Pointer<Utf8> subject, Pointer<Utf8> audience, Pointer<Utf8> capability, int lifetimeSecs);
+
+typedef BitchatUpdateResourceStateC = Pointer<Utf8> Function(Int32 batteryPct, Int32 charging, Int32 powerSave, Int32 thermal, Uint8 userPaused);
+typedef BitchatUpdateResourceStateDart = Pointer<Utf8> Function(int batteryPct, int charging, int powerSave, int thermal, int userPaused);
+
+typedef BitchatRecordBleRssiC = Pointer<Utf8> Function(Pointer<Utf8> shortId, Int8 rssiDbm);
+typedef BitchatRecordBleRssiDart = Pointer<Utf8> Function(Pointer<Utf8> shortId, int rssiDbm);
+
+typedef BitchatSetVolatileSessionC = Pointer<Utf8> Function(Pointer<Utf8> recipient, Uint32 retentionSecs);
+typedef BitchatSetVolatileSessionDart = Pointer<Utf8> Function(Pointer<Utf8> recipient, int retentionSecs);
