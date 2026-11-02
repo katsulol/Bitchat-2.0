@@ -12,12 +12,23 @@ use crate::mesh::delivery::{
 };
 use crate::mesh::peer::PeerSessionManager;
 use crate::mesh::policy::CoverageAwareFlood;
+use crate::mesh::proximity::ProximityTracker;
 use crate::mesh::relay::MeshNode;
+use crate::mesh::resource::{
+    BatteryBand, NetworkMetering, RelayResourceProfile, ResourceBudgetManager, ResourceSnapshot,
+    ThermalState, TriState,
+};
+use crate::storage::volatile::{
+    VolatileNegotiationFrame, VolatileSessionManager, VolatileSessionState, VOLATILE_MAGIC,
+};
 use crate::storage::{
     InjectedKeyProvider, KeyProvider, MemoryOutboxStore, MessageMode, OutboxLimits, OutboxManager,
     SendResult, SqliteOutboxStore,
 };
 use crate::transport::bridge::{BridgeHandle, BridgeTransport};
+use crate::trust::{Capability, SignedVoucher, TrustQuotaConfig, TrustStore};
+
+pub const CORE_BUILD_VERSION: &str = "v2.0.5-phase5";
 
 // ponytail: flutter_rust_bridge API surface wrapping core identity, mesh routing, and BLE bridge transport.
 
@@ -42,6 +53,14 @@ pub struct DiagnosticsSnapshot {
     pub gateway_active: bool,
     pub gateway_relay_disabled: bool,
     pub last_route_candidate: Option<String>,
+    pub build_version: String,
+    pub resource_profile: String,
+    pub battery_band: String,
+    pub charging_state: String,
+    pub power_save_mode: String,
+    pub pending_gateway_count: usize,
+    pub approved_gateway_count: usize,
+    pub active_vouchers_count: usize,
 }
 
 /// High-level routing metrics snapshot for mobile UI.
@@ -82,6 +101,12 @@ pub struct BitchatCoreService {
     delivery_events: Vec<DeliveryEventRecord>,
     gateway_bridge: Option<std::sync::Arc<crate::gateway::GatewayBridge>>,
     last_route_candidate: Option<String>,
+    trust_store: TrustStore,
+    resource_mgr: ResourceBudgetManager,
+    resource_snapshot: ResourceSnapshot,
+    proximity_tracker: ProximityTracker,
+    volatile_mgr: VolatileSessionManager,
+    next_voucher_seq: u32,
 }
 
 static SERVICE: OnceLock<RwLock<Option<BitchatCoreService>>> = OnceLock::new();
@@ -147,6 +172,7 @@ pub async fn init_with_key(
     let outbox_mgr = OutboxManager::new(peer_id, sqlite_store, memory_store, limits);
     let delivery_coord = DeliveryCoordinator::new(peer_id);
     let dedup = InboxDeduplicator::new(10_000, std::time::Duration::from_secs(86400));
+    let now_instant = std::time::Instant::now();
 
     let service = BitchatCoreService {
         node,
@@ -158,6 +184,16 @@ pub async fn init_with_key(
         delivery_events: Vec::new(),
         gateway_bridge: None,
         last_route_candidate: None,
+        trust_store: TrustStore::new(peer_id, TrustQuotaConfig::default()),
+        resource_mgr: ResourceBudgetManager::new(
+            RelayResourceProfile::Balanced,
+            std::time::Duration::from_secs(10),
+            now_instant,
+        ),
+        resource_snapshot: ResourceSnapshot::default_at(now_instant),
+        proximity_tracker: ProximityTracker::default(),
+        volatile_mgr: VolatileSessionManager::new(true),
+        next_voucher_seq: 1,
     };
 
     *lock = Some(service);
@@ -368,6 +404,14 @@ pub async fn get_diagnostics() -> Result<String, String> {
     let lock = get_service().read().await;
     let svc = lock.as_ref().ok_or("Service not initialized")?;
 
+    let (pending_gw, approved_gw) = if let Some(ref bridge) = svc.gateway_bridge {
+        let cfg_arc = bridge.config();
+        let cfg = cfg_arc.read().await;
+        (cfg.list_pending().len(), cfg.approved_count())
+    } else {
+        (0, 0)
+    };
+
     let diag = DiagnosticsSnapshot {
         my_short_id: svc.node.identity().short_id().to_string(),
         my_peer_id: svc.node.identity().peer_id().to_string(),
@@ -378,6 +422,14 @@ pub async fn get_diagnostics() -> Result<String, String> {
         gateway_active: svc.gateway_bridge.is_some(),
         gateway_relay_disabled: true,
         last_route_candidate: svc.last_route_candidate.clone(),
+        build_version: CORE_BUILD_VERSION.to_string(),
+        resource_profile: format!("{:?}", svc.resource_mgr.active_profile()),
+        battery_band: format!("{:?}", svc.resource_snapshot.battery_band),
+        charging_state: format!("{:?}", svc.resource_snapshot.charging),
+        power_save_mode: format!("{:?}", svc.resource_snapshot.power_save_mode),
+        pending_gateway_count: pending_gw,
+        approved_gateway_count: approved_gw,
+        active_vouchers_count: svc.trust_store.active_voucher_count(),
     };
 
     serde_json::to_string(&diag).map_err(|e| format!("Serialization error: {e}"))
@@ -393,6 +445,11 @@ pub async fn pump_outbox() -> Result<usize, String> {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+
+    // Prune and zeroize expired volatile conversation messages
+    let _ = svc.volatile_mgr.prune_expired(now_instant);
+    svc.trust_store
+        .prune_expired_vouchers(now_instant, Some(now_secs));
 
     let actions = svc.delivery_coord.check_timeouts(now_instant);
     let mut handled = 0;
@@ -514,14 +571,14 @@ pub async fn on_peer_connected(short_id: String) -> Result<(), String> {
     svc.handle.on_peer_connected(peer);
 
     // Reset backoff for any queued messages waiting for this peer only if identity is verified
-    let is_verified = svc
-        .peer_mgr
-        .get_session(&peer)
-        .and_then(|s| s.peer_id())
-        .is_some();
+    let verified_pid = svc.peer_mgr.get_session(&peer).and_then(|s| s.peer_id());
+    if let Some(pid) = verified_pid {
+        svc.proximity_tracker
+            .bind_verified_peer(&peer.to_string(), pid, std::time::Instant::now());
+    }
     svc.delivery_coord.reset_backoff_for_verified_peer(
         &peer,
-        is_verified,
+        verified_pid.is_some(),
         std::time::Instant::now(),
     );
 
@@ -544,9 +601,11 @@ pub async fn on_peer_connected(short_id: String) -> Result<(), String> {
 /// Notify Rust that a BLE peer disconnected.
 pub async fn on_peer_disconnected(short_id: String) -> Result<(), String> {
     let peer = hex_to_short_id(&short_id)?;
-    let lock = get_service().read().await;
-    let svc = lock.as_ref().ok_or("Service not initialized")?;
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
     svc.handle.on_peer_disconnected(peer);
+    svc.proximity_tracker
+        .on_link_disconnected(&peer.to_string());
     if let Some(ref bridge) = svc.gateway_bridge {
         let peers = svc.handle.connected_peers();
         let bridge = std::sync::Arc::clone(bridge);
@@ -601,11 +660,23 @@ pub async fn poll_inbound() -> Result<Option<BridgeMessage>, String> {
         if msg.msg_type == MsgType::Handshake {
             let _ = svc.peer_mgr.handle_handshake(&mut svc.node, &msg).await;
             if svc.peer_mgr.is_session_ready(&msg.origin_sender) {
+                let now_inst = std::time::Instant::now();
                 svc.delivery_coord.reset_backoff_for_verified_peer(
                     &msg.origin_sender,
                     true,
-                    std::time::Instant::now(),
+                    now_inst,
                 );
+                if let Some(pid) = svc
+                    .peer_mgr
+                    .get_session(&msg.origin_sender)
+                    .and_then(|s| s.peer_id())
+                {
+                    svc.proximity_tracker.bind_verified_peer(
+                        &msg.origin_sender.to_string(),
+                        pid,
+                        now_inst,
+                    );
+                }
             }
             return Ok(None);
         }
@@ -623,6 +694,48 @@ pub async fn poll_inbound() -> Result<Option<BridgeMessage>, String> {
 
                 match app_frame.kind {
                     ApplicationFrameKind::Message => {
+                        // Check if this is an authenticated VolatileNegotiationFrame (BC2V)
+                        if app_frame.body.starts_with(VOLATILE_MAGIC) {
+                            if let Ok(vframe) = VolatileNegotiationFrame::decode(&app_frame.body) {
+                                let sender_pid = app_frame.sender_peer_id;
+                                if let Ok(Some(resp_frame)) =
+                                    svc.volatile_mgr.handle_negotiation_frame(
+                                        sender_pid,
+                                        &vframe,
+                                        &mut svc.outbox_mgr,
+                                        &mut svc.delivery_coord,
+                                    )
+                                {
+                                    let mut resp_logical_id = [0u8; 16];
+                                    rand::RngCore::fill_bytes(
+                                        &mut rand::rngs::OsRng,
+                                        &mut resp_logical_id,
+                                    );
+                                    let resp_app = ApplicationFrame::new_message(
+                                        resp_logical_id,
+                                        svc.node.identity().peer_id(),
+                                        sender_pid,
+                                        resp_frame.encode().to_vec(),
+                                        std::time::Duration::from_secs(60),
+                                        now_secs,
+                                    );
+                                    if let Ok(padded_resp) =
+                                        pad_inner_payload(&resp_app.encode(), true)
+                                    {
+                                        let _ = svc
+                                            .peer_mgr
+                                            .send_encrypted(
+                                                &mut svc.node,
+                                                decrypted.origin_sender,
+                                                &padded_resp,
+                                            )
+                                            .await;
+                                    }
+                                }
+                            }
+                            return Ok(None);
+                        }
+
                         let dedup_status = svc.dedup.check_or_insert(
                             &app_frame.sender_peer_id,
                             &app_frame.logical_id,
@@ -645,6 +758,14 @@ pub async fn poll_inbound() -> Result<Option<BridgeMessage>, String> {
                         }
 
                         if dedup_status == DedupStatus::New {
+                            // If conversation is in Active volatile mode, record in zeroizing memory store
+                            let _ = svc.volatile_mgr.record_volatile_message(
+                                app_frame.sender_peer_id,
+                                app_frame.logical_id,
+                                app_frame.sender_peer_id,
+                                app_frame.body.clone(),
+                                std::time::Instant::now(),
+                            );
                             let text = String::from_utf8_lossy(&app_frame.body).to_string();
                             return Ok(Some(BridgeMessage {
                                 msg_id: hex::encode(app_frame.logical_id),
@@ -900,6 +1021,504 @@ pub async fn gateway_get_routes() -> Result<Vec<String>, String> {
     }
 }
 
+/// List incoming gateway peers currently in `IdentityVerifiedPendingConsent` as a JSON array.
+pub async fn gateway_list_pending() -> Result<String, String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+
+    if let Some(bridge) = svc.gateway_bridge.as_ref() {
+        let pending = bridge.config().read().await.list_pending();
+        let items: Vec<serde_json::Value> = pending
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "endpoint_id": p.endpoint_id.to_string(),
+                    "peer_id": PeerId(p.bitchat_pubkey).to_string(),
+                })
+            })
+            .collect();
+        serde_json::to_string(&items).map_err(|e| format!("Serialization error: {e}"))
+    } else {
+        Ok("[]".to_string())
+    }
+}
+
+/// Explicitly approve a pending or recognized gateway endpoint ID (`IdentityVerifiedPendingConsent -> Approved`).
+pub async fn gateway_approve_peer(endpoint_id_hex: String) -> Result<(), String> {
+    let endpoint_id = endpoint_id_hex
+        .trim()
+        .parse::<iroh::EndpointId>()
+        .map_err(|e| format!("Invalid endpoint ID: {e}"))?;
+
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    let bridge = svc
+        .gateway_bridge
+        .as_ref()
+        .ok_or("Gateway bridge is not running")?;
+
+    let pending_pubkey = bridge
+        .config()
+        .read()
+        .await
+        .list_pending()
+        .into_iter()
+        .find(|p| p.endpoint_id == endpoint_id)
+        .map(|p| PeerId(p.bitchat_pubkey));
+
+    let approved = bridge.config().write().await.approve_gateway(endpoint_id);
+    if !approved {
+        return Err("Gateway endpoint is blocked locally".to_string());
+    }
+
+    if let Some(pid) = pending_pubkey {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut caps = std::collections::HashSet::new();
+        caps.insert(Capability::UseGatewayForForwarding);
+        caps.insert(Capability::PermitOutboundGateway);
+        caps.insert(Capability::ReceiveDirectMessage);
+        let _ = svc.trust_store.approve_peer(pid, caps.clone(), now_secs);
+        let _ = bridge
+            .trust_store()
+            .write()
+            .await
+            .approve_peer(pid, caps, now_secs);
+    }
+    Ok(())
+}
+
+/// Revoke or permanently block a gateway endpoint ID, atomically withdrawing routes and closing sessions.
+pub async fn gateway_revoke_or_block_peer(
+    endpoint_id_hex: String,
+    block: bool,
+) -> Result<(), String> {
+    let endpoint_id = endpoint_id_hex
+        .trim()
+        .parse::<iroh::EndpointId>()
+        .map_err(|e| format!("Invalid endpoint ID: {e}"))?;
+
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+    let bridge = svc
+        .gateway_bridge
+        .as_ref()
+        .ok_or("Gateway bridge is not running")?;
+    bridge.revoke_or_block_peer(endpoint_id, block).await;
+    Ok(())
+}
+
+/// Set local trust state for a 64-hex `PeerId`: `"approve"`, `"introducer"`, `"revoke"`, or `"block"`.
+pub async fn trust_set_peer_state(peer_id_hex: String, action: String) -> Result<(), String> {
+    let pid = PeerId::from_hex(&peer_id_hex)
+        .ok_or_else(|| "Invalid PeerId: expected 64 strict hex characters".to_string())?;
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    match action.as_str() {
+        "approve" => {
+            let mut caps = std::collections::HashSet::new();
+            caps.insert(Capability::ReceiveDirectMessage);
+            caps.insert(Capability::UseGatewayForForwarding);
+            caps.insert(Capability::PermitOutboundGateway);
+            svc.trust_store
+                .approve_peer(pid, caps.clone(), now_secs)
+                .map_err(|e| format!("Approve failed: {e}"))?;
+            if let Some(ref bridge) = svc.gateway_bridge {
+                let _ = bridge
+                    .trust_store()
+                    .write()
+                    .await
+                    .approve_peer(pid, caps, now_secs);
+            }
+        }
+        "introducer" => {
+            let mut caps = std::collections::HashSet::new();
+            caps.insert(Capability::ReceiveDirectMessage);
+            caps.insert(Capability::UseGatewayForForwarding);
+            caps.insert(Capability::PermitOutboundGateway);
+            caps.insert(Capability::ActAsIntroducer);
+            svc.trust_store
+                .approve_peer(pid, caps.clone(), now_secs)
+                .map_err(|e| format!("Approve introducer failed: {e}"))?;
+            if let Some(ref bridge) = svc.gateway_bridge {
+                let _ = bridge
+                    .trust_store()
+                    .write()
+                    .await
+                    .approve_peer(pid, caps, now_secs);
+            }
+        }
+        "revoke" => {
+            svc.trust_store.revoke_peer(pid, now_secs);
+            if let Some(ref bridge) = svc.gateway_bridge {
+                bridge
+                    .trust_store()
+                    .write()
+                    .await
+                    .revoke_peer(pid, now_secs);
+            }
+        }
+        "block" => {
+            svc.trust_store.block_peer(pid, now_secs);
+            if let Some(ref bridge) = svc.gateway_bridge {
+                bridge.trust_store().write().await.block_peer(pid, now_secs);
+            }
+        }
+        other => return Err(format!("Unsupported trust action: {other}")),
+    }
+
+    Ok(())
+}
+
+/// Issue a signed one-hop Ed25519 capability voucher (`bitchat-voucher://<hex>`).
+///
+/// `capability_str`: `"direct_message"` or `"gateway_forward"`.
+pub async fn trust_issue_voucher(
+    subject_peer_id_hex: String,
+    audience_peer_id_hex: String,
+    capability_str: String,
+    lifetime_secs: u64,
+) -> Result<String, String> {
+    let subject = PeerId::from_hex(&subject_peer_id_hex)
+        .ok_or_else(|| "Invalid subject PeerId (expected 64 hex chars)".to_string())?;
+    let audience = PeerId::from_hex(&audience_peer_id_hex)
+        .ok_or_else(|| "Invalid audience PeerId (expected 64 hex chars)".to_string())?;
+
+    let cap = match capability_str.as_str() {
+        "gateway_forward" => Capability::UseGatewayForForwarding,
+        _ => Capability::ReceiveDirectMessage,
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let bounded_lifetime = lifetime_secs.clamp(60, crate::trust::MAX_VOUCHER_LIFETIME_SECS);
+
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    let seq = svc.next_voucher_seq;
+    svc.next_voucher_seq = svc.next_voucher_seq.saturating_add(1);
+
+    let voucher = SignedVoucher::issue(
+        svc.node.identity(),
+        subject,
+        audience,
+        cap,
+        now_secs,
+        now_secs.saturating_add(bounded_lifetime),
+        seq,
+    )
+    .map_err(|e| format!("Failed to sign voucher: {e}"))?;
+
+    let wire = voucher
+        .to_wire_bytes()
+        .map_err(|e| format!("Failed to encode voucher: {e}"))?;
+    Ok(format!("bitchat-voucher://{}", hex::encode(wire)))
+}
+
+/// Import and verify a signed one-hop capability voucher (`bitchat-voucher://<hex>`).
+pub async fn trust_import_voucher(voucher_uri: String) -> Result<String, String> {
+    let trimmed = voucher_uri.trim();
+    let hex_part = trimmed
+        .strip_prefix("bitchat-voucher://")
+        .unwrap_or(trimmed);
+    if hex_part.len() != crate::trust::SIGNED_VOUCHER_WIRE_LEN * 2 {
+        return Err(format!(
+            "Invalid voucher hex length: expected {}, got {}",
+            crate::trust::SIGNED_VOUCHER_WIRE_LEN * 2,
+            hex_part.len()
+        ));
+    }
+
+    let mut raw = [0u8; crate::trust::SIGNED_VOUCHER_WIRE_LEN];
+    for i in 0..crate::trust::SIGNED_VOUCHER_WIRE_LEN {
+        raw[i] = u8::from_str_radix(&hex_part[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("Invalid voucher hex byte: {e}"))?;
+    }
+
+    let voucher =
+        SignedVoucher::from_wire_bytes(&raw).map_err(|e| format!("Malformed voucher: {e}"))?;
+    let now_instant = std::time::Instant::now();
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    svc.trust_store
+        .import_voucher(&voucher, now_instant, Some(now_secs))
+        .map_err(|e| format!("Voucher rejected: {e}"))?;
+
+    if let Some(ref bridge) = svc.gateway_bridge {
+        let _ = bridge.trust_store().write().await.import_voucher(
+            &voucher,
+            now_instant,
+            Some(now_secs),
+        );
+    }
+
+    let summary = serde_json::json!({
+        "issuer": voucher.issuer.to_string(),
+        "subject": voucher.subject.to_string(),
+        "capability": format!("{:?}", voucher.capability),
+        "expires_at_unix": voucher.expires_at_unix,
+    });
+    serde_json::to_string(&summary).map_err(|e| format!("Serialization error: {e}"))
+}
+
+/// Update local device power/resource state and recompute `RelayResourceProfile` with hysteresis.
+///
+/// - `battery_pct`: `0..=100`, or `< 0` if unknown
+/// - `charging`: `1` = true, `0` = false, `< 0` = unknown
+/// - `power_save`: `1` = true, `0` = false, `< 0` = unknown
+/// - `thermal`: `0` = Nominal, `1` = Fair, `2` = Serious, `3` = Critical, `< 0` = Unknown
+/// - `user_paused`: `true` if user explicitly paused third-party mesh relaying
+pub async fn update_resource_state(
+    battery_pct: i32,
+    charging: i32,
+    power_save: i32,
+    thermal: i32,
+    user_paused: bool,
+) -> Result<String, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    let now_inst = std::time::Instant::now();
+    let battery_band = match battery_pct {
+        0..=9 => BatteryBand::Critical,
+        10..=24 => BatteryBand::Low,
+        25..=70 => BatteryBand::Medium,
+        71..=100 => BatteryBand::High,
+        _ => BatteryBand::Unknown,
+    };
+    let charging_state = match charging {
+        1 => TriState::True,
+        0 => TriState::False,
+        _ => TriState::Unknown,
+    };
+    let power_save_state = match power_save {
+        1 => TriState::True,
+        0 => TriState::False,
+        _ => TriState::Unknown,
+    };
+    let thermal_state = match thermal {
+        0 => ThermalState::Nominal,
+        1 => ThermalState::Fair,
+        2 => ThermalState::Serious,
+        3 => ThermalState::Critical,
+        _ => ThermalState::Unknown,
+    };
+
+    let snap = ResourceSnapshot {
+        charging: charging_state,
+        battery_band,
+        power_save_mode: power_save_state,
+        thermal_state,
+        network_metering: NetworkMetering::Unknown,
+        ble_ready: true,
+        is_foreground: true,
+        user_paused_relaying: user_paused,
+        user_profile_override: None,
+        timestamp: now_inst,
+    };
+
+    let profile = svc.resource_mgr.update_snapshot(&snap);
+    svc.resource_snapshot = snap;
+    Ok(format!("{profile:?}"))
+}
+
+/// Record a direct-link BLE RSSI sample (`rssi_dbm`) for `short_id_hex` and return its coarse proximity category.
+pub async fn record_ble_rssi(short_id_hex: String, rssi_dbm: i8) -> Result<String, String> {
+    let peer_short = hex_to_short_id(&short_id_hex)?;
+    let link_key = peer_short.to_string();
+    let now_inst = std::time::Instant::now();
+
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    svc.proximity_tracker
+        .record_direct_link_rssi(&link_key, rssi_dbm, 1, now_inst);
+
+    let verified_pid = svc
+        .peer_mgr
+        .get_session(&peer_short)
+        .and_then(|s| s.peer_id())
+        .unwrap_or_else(|| {
+            // Bind to link-derived synthetic PeerId once link identity is established on direct BLE
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&peer_short.0);
+            PeerId(b)
+        });
+    svc.proximity_tracker
+        .bind_verified_peer(&link_key, verified_pid, now_inst);
+
+    let cat = svc
+        .proximity_tracker
+        .peer_proximity(&verified_pid, now_inst);
+    Ok(format!("{cat:?}"))
+}
+
+/// Query coarse proximity category (`"Nearby"`, `"Further"`, `"Unknown"`) for a peer `ShortId`.
+pub async fn get_peer_proximity(short_id_hex: String) -> Result<String, String> {
+    let peer_short = hex_to_short_id(&short_id_hex)?;
+    let now_inst = std::time::Instant::now();
+
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    let verified_pid = svc
+        .peer_mgr
+        .get_session(&peer_short)
+        .and_then(|s| s.peer_id())
+        .unwrap_or_else(|| {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&peer_short.0);
+            PeerId(b)
+        });
+
+    let cat = svc
+        .proximity_tracker
+        .peer_proximity(&verified_pid, now_inst);
+    Ok(format!("{cat:?}"))
+}
+
+/// Initiate or update an authenticated volatile conversation with `recipient_short_id`.
+///
+/// If `retention_secs == 0`, closes the volatile session and cancels pending volatile sends.
+pub async fn set_volatile_session(
+    recipient_short_id: String,
+    retention_secs: u32,
+) -> Result<String, String> {
+    let target = hex_to_short_id(&recipient_short_id)?;
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+
+    let recipient_peer_id = svc
+        .peer_mgr
+        .get_session(&target)
+        .and_then(|s| s.peer_id())
+        .unwrap_or_else(|| {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&target.0);
+            PeerId(b)
+        });
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    if retention_secs == 0 {
+        let close_frame = match svc.volatile_mgr.session_state(&recipient_peer_id) {
+            VolatileSessionState::PendingNegotiation { session_id, .. }
+            | VolatileSessionState::Active { session_id, .. } => {
+                Some(VolatileNegotiationFrame::new_close(session_id))
+            }
+            _ => None,
+        };
+        svc.volatile_mgr.close_conversation(
+            &recipient_peer_id,
+            &mut svc.outbox_mgr,
+            &mut svc.delivery_coord,
+        );
+        if let Some(cf) = close_frame {
+            if svc.peer_mgr.is_session_ready(&target) {
+                let mut lid = [0u8; 16];
+                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut lid);
+                let app_frame = ApplicationFrame::new_message(
+                    lid,
+                    svc.node.identity().peer_id(),
+                    recipient_peer_id,
+                    cf.encode().to_vec(),
+                    std::time::Duration::from_secs(60),
+                    now_secs,
+                );
+                if let Ok(padded) = pad_inner_payload(&app_frame.encode(), true) {
+                    let _ = svc
+                        .peer_mgr
+                        .send_encrypted(&mut svc.node, target, &padded)
+                        .await;
+                }
+            }
+        }
+        return Ok("NotRequested".to_string());
+    }
+
+    let offer = svc
+        .volatile_mgr
+        .initiate_volatile_session(recipient_peer_id, retention_secs);
+
+    if svc.peer_mgr.is_session_ready(&target) {
+        let mut lid = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut lid);
+        let app_frame = ApplicationFrame::new_message(
+            lid,
+            svc.node.identity().peer_id(),
+            recipient_peer_id,
+            offer.encode().to_vec(),
+            std::time::Duration::from_secs(60),
+            now_secs,
+        );
+        if let Ok(padded) = pad_inner_payload(&app_frame.encode(), true) {
+            let _ = svc
+                .peer_mgr
+                .send_encrypted(&mut svc.node, target, &padded)
+                .await;
+        }
+    } else {
+        let _ = svc.peer_mgr.initiate_handshake(&mut svc.node, target).await;
+    }
+
+    Ok("PendingNegotiation".to_string())
+}
+
+/// Query volatile conversation state for `recipient_short_id` as JSON (`{state, retention_secs}`).
+pub async fn get_volatile_state(recipient_short_id: String) -> Result<String, String> {
+    let target = hex_to_short_id(&recipient_short_id)?;
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+
+    let recipient_peer_id = svc
+        .peer_mgr
+        .get_session(&target)
+        .and_then(|s| s.peer_id())
+        .unwrap_or_else(|| {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&target.0);
+            PeerId(b)
+        });
+
+    let (state_str, ret_secs) = match svc.volatile_mgr.session_state(&recipient_peer_id) {
+        VolatileSessionState::NotRequested => ("NotRequested", 0u64),
+        VolatileSessionState::PendingNegotiation {
+            requested_retention,
+            ..
+        } => ("PendingNegotiation", requested_retention.as_secs()),
+        VolatileSessionState::Active {
+            effective_retention,
+            ..
+        } => ("Active", effective_retention.as_secs()),
+        VolatileSessionState::UnsupportedByPeer => ("UnsupportedByPeer", 0u64),
+    };
+
+    let json = serde_json::json!({
+        "state": state_str,
+        "retention_secs": ret_secs,
+    });
+    serde_json::to_string(&json).map_err(|e| format!("Serialization error: {e}"))
+}
+
 mod hex {
     pub fn encode<T: AsRef<[u8]>>(data: T) -> String {
         data.as_ref().iter().map(|b| format!("{b:02x}")).collect()
@@ -990,6 +1609,41 @@ mod tests {
 
         let diag_json = get_diagnostics().await.expect("Get diagnostics");
         assert!(diag_json.contains("\"my_short_id\""));
+        assert!(diag_json.contains("\"build_version\":\"v2.0.5-phase5\""));
+
+        // Test Phase 5 Resource, Proximity, Voucher & Volatile APIs
+        let prof = update_resource_state(15, 0, 1, 0, false)
+            .await
+            .expect("Update resource state");
+        assert_eq!(prof, "Minimal");
+
+        let _ = record_ble_rssi(neighbor_hex.to_string(), -58).await;
+        let _ = record_ble_rssi(neighbor_hex.to_string(), -57).await;
+        let prox = record_ble_rssi(neighbor_hex.to_string(), -56)
+            .await
+            .expect("Record RSSI");
+        assert_eq!(prox, "Nearby");
+        assert_eq!(
+            get_peer_proximity(neighbor_hex.to_string()).await.unwrap(),
+            "Nearby"
+        );
+
+        let vol_st = set_volatile_session(neighbor_hex.to_string(), 300)
+            .await
+            .expect("Set volatile session");
+        assert_eq!(vol_st, "PendingNegotiation");
+        let vol_json = get_volatile_state(neighbor_hex.to_string())
+            .await
+            .expect("Get volatile state");
+        assert!(vol_json.contains("\"PendingNegotiation\""));
+
+        let subject_pk = crate::identity::Identity::generate().peer_id().to_string();
+        let audience_pk = crate::identity::Identity::generate().peer_id().to_string();
+        let voucher_uri =
+            trust_issue_voucher(subject_pk, audience_pk, "direct_message".to_string(), 600)
+                .await
+                .expect("Issue voucher");
+        assert!(voucher_uri.starts_with("bitchat-voucher://"));
 
         let pumped = pump_outbox().await.expect("Pump outbox");
         let _ = pumped;

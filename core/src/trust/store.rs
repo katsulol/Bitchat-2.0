@@ -82,6 +82,10 @@ impl TrustStore {
         self.peer_states.get(peer).cloned().unwrap_or_default()
     }
 
+    pub fn active_voucher_count(&self) -> usize {
+        self.active_vouchers.len()
+    }
+
     pub fn approved_introducer_count(&self) -> usize {
         self.peer_states
             .values()

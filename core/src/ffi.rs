@@ -680,6 +680,284 @@ pub unsafe extern "C" fn bitchat_pump_outbox() -> i32 {
     }
 }
 
+/// List incoming gateway peers currently in `IdentityVerifiedPendingConsent` as a JSON array.
+///
+/// # Safety
+///
+/// Returned JSON string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_list_pending() -> *mut c_char {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::gateway_list_pending()) {
+        Ok(json) => string_to_c_char(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Explicitly approve a pending or recognized gateway endpoint ID.
+///
+/// # Safety
+///
+/// `endpoint_id` must be a valid null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_approve_peer(endpoint_id: *const c_char) -> i32 {
+    let ep = match c_str_to_string(endpoint_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::gateway_approve_peer(ep)) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Revoke (`block == 0`) or permanently block (`block != 0`) a gateway endpoint ID.
+///
+/// # Safety
+///
+/// `endpoint_id` must be a valid null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_gateway_revoke_or_block_peer(
+    endpoint_id: *const c_char,
+    block: u8,
+) -> i32 {
+    let ep = match c_str_to_string(endpoint_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::gateway_revoke_or_block_peer(ep, block != 0)) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Set local trust state for a 64-hex `PeerId` (`"approve"`, `"introducer"`, `"revoke"`, `"block"`).
+///
+/// # Safety
+///
+/// `peer_id` and `action` must be valid null-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_trust_set_peer_state(
+    peer_id: *const c_char,
+    action: *const c_char,
+) -> i32 {
+    let pid = match c_str_to_string(peer_id) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let act = match c_str_to_string(action) {
+        Some(s) => s,
+        None => return -1,
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::trust_set_peer_state(pid, act)) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// Issue a signed one-hop Ed25519 capability voucher (`bitchat-voucher://<hex>`).
+///
+/// # Safety
+///
+/// `subject`, `audience`, and `capability` must be valid null-terminated C strings.
+/// Returned string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_trust_issue_voucher(
+    subject: *const c_char,
+    audience: *const c_char,
+    capability: *const c_char,
+    lifetime_secs: u64,
+) -> *mut c_char {
+    let subj = match c_str_to_string(subject) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let aud = c_str_to_string(audience).unwrap_or_default();
+    let cap = match c_str_to_string(capability) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::trust_issue_voucher(subj, aud, cap, lifetime_secs)) {
+        Ok(uri) => string_to_c_char(uri),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Import and verify a signed one-hop capability voucher (`bitchat-voucher://<hex>`).
+///
+/// # Safety
+///
+/// `voucher_uri` must be a valid null-terminated C string.
+/// Returned JSON summary string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_trust_import_voucher(voucher_uri: *const c_char) -> *mut c_char {
+    let uri = match c_str_to_string(voucher_uri) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::trust_import_voucher(uri)) {
+        Ok(json) => string_to_c_char(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Update local device power/resource state and recompute `RelayResourceProfile`.
+///
+/// # Safety
+///
+/// Returned profile string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_update_resource_state(
+    battery_pct: i32,
+    charging: i32,
+    power_save: i32,
+    thermal: i32,
+    user_paused: u8,
+) -> *mut c_char {
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::update_resource_state(
+        battery_pct,
+        charging,
+        power_save,
+        thermal,
+        user_paused != 0,
+    )) {
+        Ok(prof) => string_to_c_char(prof),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Record a direct-link BLE RSSI sample and return its coarse proximity category.
+///
+/// # Safety
+///
+/// `short_id` must be a valid null-terminated C string.
+/// Returned category string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_record_ble_rssi(
+    short_id: *const c_char,
+    rssi_dbm: i8,
+) -> *mut c_char {
+    let sid = match c_str_to_string(short_id) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::record_ble_rssi(sid, rssi_dbm)) {
+        Ok(cat) => string_to_c_char(cat),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Query coarse proximity category (`"Nearby"`, `"Further"`, `"Unknown"`) for `short_id`.
+///
+/// # Safety
+///
+/// `short_id` must be a valid null-terminated C string.
+/// Returned category string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_get_peer_proximity(short_id: *const c_char) -> *mut c_char {
+    let sid = match c_str_to_string(short_id) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::get_peer_proximity(sid)) {
+        Ok(cat) => string_to_c_char(cat),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Initiate or close an authenticated volatile conversation with `recipient`.
+///
+/// # Safety
+///
+/// `recipient` must be a valid null-terminated C string.
+/// Returned state string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_set_volatile_session(
+    recipient: *const c_char,
+    retention_secs: u32,
+) -> *mut c_char {
+    let recip = match c_str_to_string(recipient) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::set_volatile_session(recip, retention_secs)) {
+        Ok(st) => string_to_c_char(st),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Query volatile conversation state for `recipient` as JSON (`{state, retention_secs}`).
+///
+/// # Safety
+///
+/// `recipient` must be a valid null-terminated C string.
+/// Returned JSON string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_get_volatile_state(recipient: *const c_char) -> *mut c_char {
+    let recip = match c_str_to_string(recipient) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::get_volatile_state(recip)) {
+        Ok(json) => string_to_c_char(json),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Free a C string allocated by Bitchat core.
 ///
 /// # Safety
