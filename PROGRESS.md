@@ -1,12 +1,12 @@
 # Bitchat 2.0 Progress & Verification Log
 
 ## Status Overview
-- Cumulative Effort Progress: Phase 4 Complete; **Phase 5 Gate 0 & Part A Complete (Stopped at Part A Gate for Approval)**
-- Current Milestone: **Phase 5 Part A Acceptance Gate**
+- Cumulative Effort Progress: Phase 4 Complete; **Phase 5 Gate 0, Part A & Part B Complete (Pending Task 9 Physical Field Validation)**
+- Current Milestone: **Phase 5 Complete (`v2.0.5-phase5`)**
 - Branch: `phase-5-trust`
 - Phase 5 Gate 0 Status: **100% Complete & Verified** (`0.1` Gateway Consent, `0.2` Conservative Coverage & Priority Quota, `0.3` BC2K Wrapped Key & Timestamp AAD, `0.4` Strict Hex & BLE Readiness, `0.5` Handshake/Retry Separation & Coalesced Wakeups, `0.6` 400-Run Evaluation Baseline)
 - Phase 5 Part A Status: **100% Complete & Verified** (Tasks 1–7: Scoped Trust, One-Hop Vouchers, Gateway Trust Failover, Resource-Budgeted Relaying, Coarse Proximity, Volatile Chat, E2E Policy Tests & 400-Run Evaluation)
-- Phase 5 Part B Status: **NOT STARTED (Awaiting Human Review & Approval of Part A)**
+- Phase 5 Part B Status: **100% Code & Build Complete** (`8.1` Rust C ABI & Service Integration, `8.2` Android Battery/Power/Thermal & BLE RSSI Callbacks + `FLAG_SECURE`, `8.3` Flutter Trust/Voucher/Gateway Consent/Volatile Chat/Resource Controls UI)
 
 
 ---
@@ -166,4 +166,9 @@
 | **Part A Task 6 — Volatile Chat Negotiation** | `storage::volatile::tests::*` (2 tests incl. downgrade reject & zeroizing expiry) | Rust Unit (Simulated) | **PASS** |
 | **Part A Task 7 — Public-Runtime E2E Suite** | `test_phase5_policy_e2e` (5 integration tests) | Desktop Multi-Node Integration | **PASS** |
 | **Part A Evaluation & Gate Docs** | [`docs/PHASE5_EVALUATION.md`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/docs/PHASE5_EVALUATION.md), [`docs/PART_A_ACCEPTANCE_REVIEW.md`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/docs/PART_A_ACCEPTANCE_REVIEW.md) | 400-Run Benchmark & Docs | **PASS** |
+| **Part B Task 8.1 — Phase 5 C ABI & Service API** | [`core/src/api.rs`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/core/src/api.rs), [`core/src/ffi.rs`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/core/src/ffi.rs), `api::tests::test_bridge_api_lifecycle` | Rust FFI + `aarch64-linux-android` | **PASS** |
+| **Part B Task 8.2 — Android Resource/RSSI & Secure Screen** | [`BitchatBleService.kt`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/app/android/app/src/main/kotlin/com/bitchat/bitchat2/BitchatBleService.kt), [`MainActivity.kt`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/app/android/app/src/main/kotlin/com/bitchat/bitchat2/MainActivity.kt) | Android Native Service | **PASS** |
+| **Part B Task 8.3 — Flutter Trust, Voucher, Volatile & Power UI** | [`core_ffi.dart`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/app/lib/core_ffi.dart), [`mesh_bridge.dart`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/app/lib/mesh_bridge.dart), [`main.dart`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/app/lib/main.dart) | `flutter analyze` (0 issues) & `flutter test` | **PASS** |
+| **Part B Task 9 — Physical Multi-Device Field Tests** | Gateway consent, 1-hop voucher QR, volatile chat `FLAG_SECURE`, battery saver hysteresis | Physical Android Hardware | **PENDING PHYSICAL** |
+
 
