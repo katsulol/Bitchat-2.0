@@ -27,9 +27,14 @@ use std::sync::{Arc, Mutex};
 /// - `created_at`, `expires_at`, `attempt_count`, `last_attempt_at`: delivery timestamps.
 /// - `key_version`: DEK version identifier.
 ///
-/// Protected data:
+/// Protected data and Integrity Model:
 /// - `body`: Always encrypted with ChaCha20-Poly1305 before SQL INSERT.
-/// - AEAD Associated Data (AAD) binds record type, schema version, identities, logical ID, and mode.
+/// - AEAD Associated Data (AAD) cryptographically binds immutable record fields:
+///   `b"bitchat2-outbox-v1:" || key_version || logical_id || sender || recipient || mode || created_at || expires_at`.
+///   Tampering with `created_at` or `expires_at` in SQLite causes AEAD decryption failure.
+/// - Mutable operational columns (`state`, `attempt_count`, `last_attempt_at`) are governed by
+///   monotonic SQL transitions (`WHERE state NOT IN (terminal)`), but are not re-encrypted per attempt;
+///   full database file rollback against an OS-level disk snapshot is not claimed without external hardware counters.
 pub struct SqliteOutboxStore {
     conn: Mutex<Connection>,
     key_provider: Arc<dyn KeyProvider>,
@@ -44,6 +49,8 @@ struct DecryptParams<'a> {
     sender: &'a PeerId,
     recipient: &'a PeerId,
     mode: MessageMode,
+    created_at: u64,
+    expires_at: u64,
 }
 
 impl SqliteOutboxStore {
@@ -120,14 +127,18 @@ impl SqliteOutboxStore {
         sender: &PeerId,
         recipient: &PeerId,
         mode: MessageMode,
+        created_at: u64,
+        expires_at: u64,
     ) -> Vec<u8> {
-        let mut aad = Vec::with_capacity(4 + 16 + 32 + 32 + 1 + 19);
+        let mut aad = Vec::with_capacity(4 + 16 + 32 + 32 + 1 + 16 + 19);
         aad.extend_from_slice(b"bitchat2-outbox-v1:");
         aad.extend_from_slice(&key_version.to_le_bytes());
         aad.extend_from_slice(logical_id);
         aad.extend_from_slice(sender.as_bytes());
         aad.extend_from_slice(recipient.as_bytes());
         aad.push(mode as u8);
+        aad.extend_from_slice(&created_at.to_be_bytes());
+        aad.extend_from_slice(&expires_at.to_be_bytes());
         aad
     }
 
@@ -155,6 +166,8 @@ impl SqliteOutboxStore {
             &record.sender,
             &record.recipient,
             record.mode,
+            record.created_at,
+            record.expires_at,
         );
 
         let ciphertext = cipher
@@ -195,6 +208,8 @@ impl SqliteOutboxStore {
             params.sender,
             params.recipient,
             params.mode,
+            params.created_at,
+            params.expires_at,
         );
 
         cipher
@@ -467,6 +482,8 @@ impl OutboxStore for SqliteOutboxStore {
                 sender: &sender,
                 recipient: &recipient,
                 mode,
+                created_at,
+                expires_at,
             })?;
 
             Ok(Some(OutboxRecord {

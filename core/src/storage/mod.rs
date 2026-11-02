@@ -8,7 +8,10 @@ pub mod memory;
 pub mod outbox;
 pub mod sqlite;
 
-pub use key::{DataEncryptionKey, FailingKeyProvider, InjectedKeyProvider, KeyProvider};
+pub use key::{
+    DataEncryptionKey, FailingKeyProvider, InjectedKeyProvider, KeyProvider, KeySecurityLevel,
+    WrappedKeyFileProvider,
+};
 pub use memory::MemoryOutboxStore;
 pub use outbox::{MessageMode, OutboxLimits, OutboxRecord, OutboxStore, SendRejection, SendResult};
 pub use sqlite::SqliteOutboxStore;
@@ -311,6 +314,40 @@ mod tests {
         }
 
         // Retrieving the record must fail with StorageError (AEAD auth error), never corrupted text
+        let err = manager.get(&logical_id);
+        assert!(err.is_err());
+        assert!(matches!(err.unwrap_err(), SendRejection::StorageError(_)));
+    }
+
+    #[test]
+    fn test_tampered_timestamps_or_expiry_fails_aead_authentication() {
+        let id_a = Identity::generate();
+        let id_b = Identity::generate();
+        let key_provider = Arc::new(InjectedKeyProvider::random(1));
+        let limits = OutboxLimits::default();
+
+        let sqlite = SqliteOutboxStore::in_memory(key_provider.clone(), limits).unwrap();
+        let memory = MemoryOutboxStore::new(limits);
+        let mut manager = OutboxManager::new(id_a.peer_id(), sqlite, memory, limits);
+
+        let body = b"Expiry-bound message".to_vec();
+        let logical_id = match manager.send_to(id_b.peer_id(), body, MessageMode::Normal, None, 100)
+        {
+            SendResult::Accepted { logical_id, .. } => logical_id,
+            SendResult::Rejected(e) => panic!("Rejected: {e:?}"),
+        };
+
+        // Tamper with expires_at in SQLite without updating AEAD tag
+        {
+            let conn = manager.sqlite_store.raw_conn_for_test().lock().unwrap();
+            conn.execute(
+                "UPDATE outbox SET expires_at = expires_at + 999999 WHERE logical_id = ?1",
+                rusqlite::params![logical_id.as_slice()],
+            )
+            .unwrap();
+        }
+
+        // Retrieving the record must fail AEAD authentication because expires_at is bound into AAD
         let err = manager.get(&logical_id);
         assert!(err.is_err());
         assert!(matches!(err.unwrap_err(), SendRejection::StorageError(_)));
