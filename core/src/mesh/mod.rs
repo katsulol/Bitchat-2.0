@@ -3,6 +3,7 @@ pub mod fragment;
 pub mod peer;
 pub mod policy;
 pub mod relay;
+pub mod resource;
 pub mod router;
 pub mod seen;
 pub mod stats;
@@ -17,6 +18,11 @@ pub use policy::{
     NeighborStatus, NeighborTable, RelayContext, RelayPolicy,
 };
 pub use relay::{InboundMessage, MeshNode};
+pub use resource::{
+    BatteryBand, NetworkMetering, RelayResourceProfile, ResourceAdmission,
+    ResourceAwareRelayPolicy, ResourceBudgetManager, ResourceSnapshot, ThermalState, TrafficOrigin,
+    TriState,
+};
 pub use router::{
     IrohPathObservation, RouteCandidate, RouteContext, RouteDecision, RouteReason, Router,
 };
