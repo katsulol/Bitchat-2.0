@@ -272,6 +272,8 @@ pub struct OutgoingRecord {
     pub expires_at: Instant,
     pub attempts: u32,
     pub max_attempts: u32,
+    pub handshake_attempts: u32,
+    pub max_handshake_attempts: u32,
     pub next_attempt_at: Instant,
     pub body: Vec<u8>,
     pub is_privacy_mode: bool,
@@ -285,11 +287,16 @@ pub enum DeliveryAction {
     Failed(LogicalMessageId),
 }
 
+pub const DEFAULT_MAX_HANDSHAKE_ATTEMPTS: u32 = 5;
+pub const DEFAULT_RECONNECT_WAKEUP_COOLDOWN: Duration = Duration::from_secs(5);
+
 /// Sender delivery coordinator managing logical message states, retries, and authenticated ACKs.
 #[derive(Debug, Clone)]
 pub struct DeliveryCoordinator {
     local_peer_id: PeerId,
     records: HashMap<LogicalMessageId, OutgoingRecord>,
+    last_reconnect_wakeup: HashMap<ShortId, Instant>,
+    reconnect_cooldown: Duration,
 }
 
 /// Request payload to enqueue a new outgoing logical message.
@@ -309,6 +316,8 @@ impl DeliveryCoordinator {
         Self {
             local_peer_id,
             records: HashMap::new(),
+            last_reconnect_wakeup: HashMap::new(),
+            reconnect_cooldown: DEFAULT_RECONNECT_WAKEUP_COOLDOWN,
         }
     }
 
@@ -322,6 +331,8 @@ impl DeliveryCoordinator {
             expires_at: now + req.ttl,
             attempts: 0,
             max_attempts: req.max_attempts,
+            handshake_attempts: 0,
+            max_handshake_attempts: DEFAULT_MAX_HANDSHAKE_ATTEMPTS,
             next_attempt_at: now,
             body: req.body,
             is_privacy_mode: req.is_privacy_mode,
@@ -373,6 +384,40 @@ impl DeliveryCoordinator {
         record.state = DeliveryState::InFlight;
         record.next_attempt_at = now + backoff_delay;
 
+        Ok(())
+    }
+
+    /// Defer dispatch when no route is available or when waiting on a Noise XX handshake.
+    ///
+    /// Gate 0.5 invariants:
+    /// - `NoRouteAvailable` (`has_route == false`) keeps the message `Queued` and does NOT
+    ///   consume `attempts` or `handshake_attempts`.
+    /// - Session handshake initiation (`has_route == true`) increments `handshake_attempts`
+    ///   (bounded separately by `max_handshake_attempts`) while keeping the message `Queued`
+    ///   and preserving the message's `attempts` budget for actual payload transmissions.
+    pub fn defer_until_session_or_route(
+        &mut self,
+        logical_id: &LogicalMessageId,
+        has_route: bool,
+        backoff_delay: Duration,
+        now: Instant,
+    ) -> Result<()> {
+        let record = self
+            .records
+            .get_mut(logical_id)
+            .ok_or_else(|| Error::Crypto(format!("Unknown logical message {logical_id:?}")))?;
+
+        if record.state.is_terminal() {
+            return Err(Error::Crypto(format!(
+                "Cannot defer terminal message {:?}",
+                record.state
+            )));
+        }
+
+        if has_route {
+            record.handshake_attempts = record.handshake_attempts.saturating_add(1);
+        }
+        record.next_attempt_at = now + backoff_delay;
         Ok(())
     }
 
@@ -434,13 +479,39 @@ impl DeliveryCoordinator {
         false
     }
 
-    /// Wake up any non-terminal messages queued for this peer so they attempt immediately.
-    pub fn reset_backoff_for_peer(&mut self, recipient: &ShortId, now: Instant) {
+    /// Wake up any non-terminal messages queued for a verified peer, coalesced by cooldown.
+    ///
+    /// Gate 0.5 invariants:
+    /// - Unverified ShortId link announcements (`is_identity_verified == false`) cannot trigger
+    ///   wakeup resets (prevents spoofed beacon wakeup storms).
+    /// - Repeated reconnects for the same peer within `reconnect_cooldown` are coalesced.
+    /// - Never extends `expires_at` (`TTL`) or resets `attempts`.
+    pub fn reset_backoff_for_verified_peer(
+        &mut self,
+        recipient: &ShortId,
+        is_identity_verified: bool,
+        now: Instant,
+    ) -> bool {
+        if !is_identity_verified {
+            return false;
+        }
+        if let Some(&last) = self.last_reconnect_wakeup.get(recipient) {
+            if now.saturating_duration_since(last) < self.reconnect_cooldown {
+                return false;
+            }
+        }
+        self.last_reconnect_wakeup.insert(*recipient, now);
         for record in self.records.values_mut() {
             if record.recipient_short_id == *recipient && !record.state.is_terminal() {
                 record.next_attempt_at = now;
             }
         }
+        true
+    }
+
+    /// Wake up any non-terminal messages queued for this peer so they attempt immediately.
+    pub fn reset_backoff_for_peer(&mut self, recipient: &ShortId, now: Instant) {
+        let _ = self.reset_backoff_for_verified_peer(recipient, true, now);
     }
 
     /// Check timers, advancing expired or exhausted messages to terminal states.
@@ -455,7 +526,9 @@ impl DeliveryCoordinator {
             if now >= record.expires_at {
                 record.state = DeliveryState::Expired;
                 actions.push(DeliveryAction::Expired(record.logical_id));
-            } else if record.attempts >= record.max_attempts {
+            } else if record.attempts >= record.max_attempts
+                || record.handshake_attempts >= record.max_handshake_attempts
+            {
                 record.state = DeliveryState::Failed;
                 actions.push(DeliveryAction::Failed(record.logical_id));
             } else if now >= record.next_attempt_at {
@@ -677,5 +750,93 @@ mod tests {
         let actions_exp = coord.check_timeouts(now + Duration::from_secs(6));
         assert!(actions_exp.contains(&DeliveryAction::Expired(id_exp)));
         assert_eq!(coord.get_state(&id_exp), Some(DeliveryState::Expired));
+    }
+
+    #[test]
+    fn test_no_route_and_handshake_separation_plus_coalesced_wakeup() {
+        let id_local = crate::identity::Identity::generate();
+        let id_remote = crate::identity::Identity::generate();
+        let s_remote = id_remote.short_id();
+
+        let mut coord = DeliveryCoordinator::new(id_local.peer_id());
+        let logical_id = generate_logical_id();
+        let now = Instant::now();
+
+        coord.enqueue(
+            EnqueueMessage {
+                logical_id,
+                recipient_peer_id: id_remote.peer_id(),
+                recipient_short_id: s_remote,
+                body: b"queued payload".to_vec(),
+                ttl: Duration::from_secs(60),
+                max_attempts: 3,
+                is_privacy_mode: false,
+            },
+            now,
+        );
+
+        // 1. NoRouteAvailable (`has_route = false`) must keep message Queued and burn 0 attempts
+        for step in 1..=10 {
+            coord
+                .defer_until_session_or_route(
+                    &logical_id,
+                    false,
+                    Duration::from_secs(1),
+                    now + Duration::from_secs(step),
+                )
+                .unwrap();
+        }
+        let rec = coord.get_record(&logical_id).unwrap();
+        assert_eq!(rec.state, DeliveryState::Queued);
+        assert_eq!(rec.attempts, 0);
+        assert_eq!(rec.handshake_attempts, 0);
+
+        // 2. Handshake attempts (`has_route = true`) consume handshake_attempts, not message attempts
+        coord
+            .defer_until_session_or_route(
+                &logical_id,
+                true,
+                Duration::from_secs(10),
+                now + Duration::from_secs(11),
+            )
+            .unwrap();
+        let rec = coord.get_record(&logical_id).unwrap();
+        assert_eq!(rec.state, DeliveryState::Queued);
+        assert_eq!(rec.attempts, 0);
+        assert_eq!(rec.handshake_attempts, 1);
+
+        // 3. Unverified ShortId link announcements cannot wake up backoff
+        assert!(!coord.reset_backoff_for_verified_peer(
+            &s_remote,
+            false,
+            now + Duration::from_secs(12),
+        ));
+        assert_eq!(
+            coord.get_record(&logical_id).unwrap().next_attempt_at,
+            now + Duration::from_secs(21)
+        );
+
+        // 4. Verified peer wakeup resets next_attempt_at once, coalesces within cooldown, and preserves TTL
+        let orig_expiry = coord.get_record(&logical_id).unwrap().expires_at;
+        assert!(coord.reset_backoff_for_verified_peer(
+            &s_remote,
+            true,
+            now + Duration::from_secs(12),
+        ));
+        assert_eq!(
+            coord.get_record(&logical_id).unwrap().next_attempt_at,
+            now + Duration::from_secs(12)
+        );
+        assert_eq!(
+            coord.get_record(&logical_id).unwrap().expires_at,
+            orig_expiry
+        );
+
+        // Rapid second wakeup 1s later is coalesced (rejected)
+        assert!(!coord.reset_backoff_for_verified_peer(
+            &s_remote,
+            true,
+            now + Duration::from_secs(13),
+        ));
     }
 }

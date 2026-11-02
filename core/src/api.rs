@@ -91,20 +91,12 @@ fn get_service() -> &'static RwLock<Option<BitchatCoreService>> {
 }
 
 fn hex_to_short_id(hex_str: &str) -> Result<ShortId, String> {
-    let hex_clean = hex_str.trim().trim_start_matches("0x");
-    if !hex_clean.is_ascii() || hex_clean.len() != 16 {
-        return Err(format!(
-            "Invalid ShortId: expected 16 ASCII hexadecimal characters, got len {}",
-            hex_clean.len()
-        ));
-    }
-    let mut bytes = [0u8; 8];
-    for i in 0..8 {
-        let byte_str = &hex_clean[i * 2..i * 2 + 2];
-        bytes[i] = u8::from_str_radix(byte_str, 16)
-            .map_err(|e| format!("Invalid hex character at byte {i}: {e}"))?;
-    }
-    Ok(ShortId(bytes))
+    ShortId::from_user_input(hex_str).ok_or_else(|| {
+        format!(
+            "Invalid ShortId '{}': expected 16 strict ASCII hex characters (non-zero)",
+            hex_str
+        )
+    })
 }
 
 /// Initialize the Bitchat core service, loading or generating long-term identity in `storage_path`.
@@ -435,10 +427,17 @@ pub async fn pump_outbox() -> Result<usize, String> {
                             handled += 1;
                         }
                     } else {
-                        let _ = svc.peer_mgr.initiate_handshake(&mut svc.node, target).await;
-                        let delay_ms = (1000u64 * (1u64 << record.attempts.min(4))).min(10000);
-                        let _ = svc.delivery_coord.mark_in_flight(
+                        let has_ble = !svc.handle.connected_peers().is_empty();
+                        let has_gateway = svc.gateway_bridge.is_some();
+                        let has_route = has_ble || has_gateway;
+                        if has_route {
+                            let _ = svc.peer_mgr.initiate_handshake(&mut svc.node, target).await;
+                        }
+                        let delay_ms =
+                            (1000u64 * (1u64 << record.handshake_attempts.min(4))).min(10000);
+                        let _ = svc.delivery_coord.defer_until_session_or_route(
                             &logical_id,
+                            has_route,
                             std::time::Duration::from_millis(delay_ms),
                             now_instant,
                         );
@@ -514,9 +513,14 @@ pub async fn on_peer_connected(short_id: String) -> Result<(), String> {
     let svc = lock.as_mut().ok_or("Service not initialized")?;
     svc.handle.on_peer_connected(peer);
 
-    // Reset backoff for any queued messages waiting for this peer
+    // Reset backoff for any queued messages waiting for this peer only if identity is verified
+    let is_verified = svc
+        .peer_mgr
+        .get_session(&peer)
+        .and_then(|s| s.peer_id())
+        .is_some();
     svc.delivery_coord
-        .reset_backoff_for_peer(&peer, std::time::Instant::now());
+        .reset_backoff_for_verified_peer(&peer, is_verified, std::time::Instant::now());
 
     // Auto-initiate handshake with peer if lower ShortId and session not ready
     let my_short = svc.node.identity().short_id();
@@ -593,6 +597,13 @@ pub async fn poll_inbound() -> Result<Option<BridgeMessage>, String> {
         // If message is a handshake frame, handle it internally
         if msg.msg_type == MsgType::Handshake {
             let _ = svc.peer_mgr.handle_handshake(&mut svc.node, &msg).await;
+            if svc.peer_mgr.is_session_ready(&msg.origin_sender) {
+                svc.delivery_coord.reset_backoff_for_verified_peer(
+                    &msg.origin_sender,
+                    true,
+                    std::time::Instant::now(),
+                );
+            }
             return Ok(None);
         }
 
