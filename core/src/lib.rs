@@ -15,3 +15,4 @@ pub mod identity;
 pub mod mesh;
 pub mod storage;
 pub mod transport;
+pub mod trust;
