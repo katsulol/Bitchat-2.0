@@ -760,7 +760,8 @@ pub async fn gateway_stop() -> Result<(), String> {
     }
 }
 
-/// Export this node's gateway contact string (URI) for out-of-band QR or link sharing.
+/// Export this node's gateway pairing contact string (URI) for out-of-band QR sharing.
+/// Generates a bounded, single-use pairing invitation capability with 5-minute monotonic expiry.
 pub async fn gateway_export_contact() -> Result<String, String> {
     let lock = get_service().read().await;
     let svc = lock.as_ref().ok_or("Service not initialized")?;
@@ -770,7 +771,7 @@ pub async fn gateway_export_contact() -> Result<String, String> {
         .as_ref()
         .ok_or("Gateway bridge is not running")?;
     let contact = bridge
-        .export_contact()
+        .export_pairing_contact(None, true)
         .await
         .map_err(|e| format!("Failed to export contact: {e}"))?;
 

@@ -9,7 +9,7 @@ pub mod stats;
 pub mod wire;
 
 pub use bridge::GatewayBridge;
-pub use config::GatewayConfig;
+pub use config::{GatewayConfig, GatewayConsentState, PendingGatewayPeer};
 pub use contact::GatewayContact;
 pub use fairness::{
     GatewayRateLimiter, QuotaRejection, CONTROL_PLANE_RESERVATION_RATIO,

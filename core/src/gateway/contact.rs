@@ -24,7 +24,7 @@ pub enum ContactError {
 }
 
 /// A shareable gateway contact document used to dial and verify an internet gateway.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayContact {
     pub version: u32,
     pub bitchat_pubkey_hex: String,
@@ -32,6 +32,28 @@ pub struct GatewayContact {
     pub relay_url: Option<String>,
     pub direct_addresses: Vec<String>,
     pub binding: IdentityBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation_expiry_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for GatewayContact {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayContact")
+            .field("version", &self.version)
+            .field("bitchat_pubkey_hex", &self.bitchat_pubkey_hex)
+            .field("iroh_endpoint_id_hex", &self.iroh_endpoint_id_hex)
+            .field("relay_url", &self.relay_url)
+            .field("direct_addresses", &self.direct_addresses)
+            .field("binding", &self.binding)
+            .field(
+                "invitation_token",
+                &self.invitation_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("invitation_expiry_secs", &self.invitation_expiry_secs)
+            .finish()
+    }
 }
 
 impl GatewayContact {
@@ -50,7 +72,16 @@ impl GatewayContact {
             relay_url,
             direct_addresses,
             binding,
+            invitation_token: None,
+            invitation_expiry_secs: None,
         })
+    }
+
+    /// Attach a single-use pairing invitation capability and its expiry timestamp.
+    pub fn with_invitation(mut self, token_hex: String, expiry_unix_secs: u64) -> Self {
+        self.invitation_token = Some(token_hex);
+        self.invitation_expiry_secs = Some(expiry_unix_secs);
+        self
     }
 
     /// Export contact document as a compact, copyable string.

@@ -46,10 +46,25 @@ pub enum RejectReason {
 }
 
 /// Initial handshake frame establishing gateway identity and authorization.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewayHello {
     pub protocol_version: u32,
     pub binding: IdentityBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation_token: Option<String>,
+}
+
+impl std::fmt::Debug for GatewayHello {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayHello")
+            .field("protocol_version", &self.protocol_version)
+            .field("binding", &self.binding)
+            .field(
+                "invitation_token",
+                &self.invitation_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
 }
 
 /// Mesh packet forwarded across internet gateway connection.

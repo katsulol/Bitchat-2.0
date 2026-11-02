@@ -6,14 +6,15 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::envelope::Envelope;
 use crate::error::{Error, Result};
-use crate::gateway::config::GatewayConfig;
+use crate::gateway::config::{GatewayConfig, GatewayConsentState, DEFAULT_INVITATION_TTL};
 use crate::gateway::contact::GatewayContact;
 use crate::gateway::identity_binding::IdentityBinding;
 use crate::gateway::iroh_link::{create_endpoint, dial_gateway};
 use crate::gateway::routes::GatewayRouteTable;
 use crate::gateway::stats::GatewayStats;
 use crate::gateway::wire::{
-    GatewayForward, GatewayHello, GatewayMessage, WireError, DEFAULT_READ_TIMEOUT, WIRE_VERSION,
+    GatewayForward, GatewayHello, GatewayMessage, RejectReason, WireError, DEFAULT_READ_TIMEOUT,
+    WIRE_VERSION,
 };
 use crate::identity::Identity;
 use iroh::endpoint::Connection;
@@ -90,6 +91,7 @@ impl GatewayBridge {
     }
 
     /// Export local gateway contact document for out-of-band exchange.
+    /// Does not include an automatic pairing invitation unless `export_pairing_contact` is used.
     pub async fn export_contact(&self) -> Result<GatewayContact> {
         let addr = self.endpoint.addr();
         let binding = IdentityBinding::sign(
@@ -105,6 +107,33 @@ impl GatewayBridge {
             .map_err(|e| Error::Transport(format!("Failed to create contact: {e}")))
     }
 
+    /// Explicitly generate a single-use pairing invitation capability and export it inside a QR contact.
+    pub async fn export_pairing_contact(
+        &self,
+        ttl: Option<Duration>,
+        auto_admit_on_redemption: bool,
+    ) -> Result<GatewayContact> {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let (token, exp_secs) = {
+            let mut cfg = self.config.write().await;
+            cfg.enabled = true;
+            cfg.allow_invitation_auto_admit = auto_admit_on_redemption;
+            cfg.generate_invitation(
+                ttl.unwrap_or(DEFAULT_INVITATION_TTL),
+                Instant::now(),
+                now_secs,
+            )
+            .map_err(Error::Transport)?
+        };
+
+        let contact = self.export_contact().await?;
+        Ok(contact.with_invitation(token, exp_secs))
+    }
+
     /// Import and approve a remote gateway contact document.
     pub async fn import_and_approve_contact(&self, contact_str: &str) -> Result<GatewayContact> {
         let contact = GatewayContact::import_from_str(contact_str)
@@ -115,19 +144,42 @@ impl GatewayBridge {
             .map_err(|e| Error::Transport(format!("Invalid endpoint id: {e}")))?;
 
         let mut cfg = self.config.write().await;
-        cfg.approve_gateway(id);
+        if !cfg.approve_gateway(id) {
+            return Err(Error::Transport("Peer is blocked locally".into()));
+        }
         cfg.enabled = true;
         drop(cfg);
         Ok(contact)
     }
 
+    /// Revoke or permanently block a gateway peer, atomically withdrawing routes and closing active sessions.
+    pub async fn revoke_or_block_peer(&self, endpoint_id: EndpointId, block: bool) {
+        {
+            let mut cfg = self.config.write().await;
+            if block {
+                cfg.block_gateway(endpoint_id);
+            } else {
+                cfg.revoke_gateway(&endpoint_id);
+            }
+        }
+        self.active_sessions.write().await.remove(&endpoint_id);
+        self.routes
+            .write()
+            .await
+            .remove_routes_for_endpoint(&endpoint_id);
+        self.stats
+            .set_active_connections(self.active_sessions.read().await.len() as u64);
+    }
+
     /// Enable or disable gateway bridging.
     ///
-    /// When disabled, route table is immediately cleared/withdrawn.
+    /// When disabled, route table and active sessions are immediately cleared/withdrawn.
     pub async fn set_enabled(&self, enabled: bool) {
         self.config.write().await.enabled = enabled;
         if !enabled {
             self.routes.write().await.clear();
+            self.active_sessions.write().await.clear();
+            self.stats.set_active_connections(0);
         }
     }
 
@@ -178,6 +230,17 @@ impl GatewayBridge {
         let (mut send_stream, mut recv_stream, remote_bitchat_pubkey) =
             match contact_hint {
                 Some(contact) => {
+                    // Verify pinned host EndpointId before presenting any invitation capability
+                    let pinned_id = contact.endpoint_id().map_err(|e| {
+                        Error::Transport(format!("Invalid pinned endpoint id in contact: {e}"))
+                    })?;
+                    if remote_id != pinned_id {
+                        self.stats.inc_rejected();
+                        return Err(Error::Transport(
+                            "Connected remote EndpointId does not match pinned contact".into(),
+                        ));
+                    }
+
                     // We dialed: open bi stream and send Hello
                     let (mut s, r) = conn
                         .open_bi()
@@ -195,6 +258,7 @@ impl GatewayBridge {
                     let hello = GatewayMessage::Hello(GatewayHello {
                         protocol_version: WIRE_VERSION,
                         binding,
+                        invitation_token: contact.invitation_token.clone(),
                     });
 
                     hello
@@ -209,7 +273,7 @@ impl GatewayBridge {
                 }
                 None => {
                     // Remote dialed: accept bi stream and read Hello
-                    let (s, mut r) = conn.accept_bi().await.map_err(|e| {
+                    let (mut s, mut r) = conn.accept_bi().await.map_err(|e| {
                         Error::Transport(format!("Failed to accept bi stream: {e}"))
                     })?;
 
@@ -219,13 +283,95 @@ impl GatewayBridge {
 
                     let pubkey = if let GatewayMessage::Hello(hello) = hello_msg {
                         hello.binding.verify(&remote_id).map_err(|e| {
+                            self.stats.inc_rejected();
                             Error::Transport(format!("Binding verification failed: {e}"))
                         })?;
-                        self.config.write().await.approve_gateway(remote_id);
-                        hello.binding.bitchat_pubkey().map_err(|e| {
+                        let pk = hello.binding.bitchat_pubkey().map_err(|e| {
+                            self.stats.inc_rejected();
                             Error::Transport(format!("Invalid Bitchat public key: {e}"))
-                        })?
+                        })?;
+
+                        // Evaluate explicit gateway consent state; NEVER auto-approve from identity binding alone!
+                        let mut cfg = self.config.write().await;
+                        if !cfg.enabled {
+                            drop(cfg);
+                            self.stats.inc_rejected();
+                            let _ = (GatewayMessage::Rejected {
+                                transfer_id: 0,
+                                reason: RejectReason::Unauthorized,
+                            })
+                            .write_framed(&mut s)
+                            .await;
+                            return Err(Error::Transport("Gateway is disabled".into()));
+                        }
+
+                        match cfg.consent_state(&remote_id) {
+                            GatewayConsentState::Blocked | GatewayConsentState::Revoked => {
+                                drop(cfg);
+                                self.stats.inc_rejected();
+                                let _ = (GatewayMessage::Rejected {
+                                    transfer_id: 0,
+                                    reason: RejectReason::Unauthorized,
+                                })
+                                .write_framed(&mut s)
+                                .await;
+                                return Err(Error::Transport(
+                                    "Remote gateway peer is blocked or revoked".into(),
+                                ));
+                            }
+                            GatewayConsentState::Approved => {
+                                drop(cfg);
+                            }
+                            GatewayConsentState::Unrecognized
+                            | GatewayConsentState::IdentityVerifiedPendingConsent => {
+                                let admitted = if let Some(ref token) = hello.invitation_token {
+                                    match cfg.redeem_invitation(
+                                        token,
+                                        remote_id,
+                                        pk,
+                                        Instant::now(),
+                                    ) {
+                                        Ok(GatewayConsentState::Approved) => true,
+                                        Ok(_) => false,
+                                        Err(e) => {
+                                            drop(cfg);
+                                            self.stats.inc_rejected();
+                                            let _ = (GatewayMessage::Rejected {
+                                                transfer_id: 0,
+                                                reason: RejectReason::Unauthorized,
+                                            })
+                                            .write_framed(&mut s)
+                                            .await;
+                                            return Err(Error::Transport(format!(
+                                                "Pairing invitation rejected: {e}"
+                                            )));
+                                        }
+                                    }
+                                } else {
+                                    let _ =
+                                        cfg.record_verified_pending(remote_id, pk, Instant::now());
+                                    false
+                                };
+                                drop(cfg);
+
+                                if !admitted {
+                                    self.stats.inc_rejected();
+                                    let _ = (GatewayMessage::Rejected {
+                                        transfer_id: 0,
+                                        reason: RejectReason::Unauthorized,
+                                    })
+                                    .write_framed(&mut s)
+                                    .await;
+                                    return Err(Error::Transport(
+                                        "Identity verified; awaiting explicit host gateway approval"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
+                        pk
                     } else {
+                        self.stats.inc_rejected();
                         return Err(Error::Transport(
                             "Expected Hello as first gateway frame".into(),
                         ));
@@ -533,5 +679,109 @@ impl GatewayBridge {
     pub async fn close(&self) {
         self.active_sessions.write().await.clear();
         self.endpoint.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gateway::iroh_link::accept_gateway_conn;
+
+    #[tokio::test]
+    async fn test_unsolicited_valid_binding_stays_pending_and_rejected() {
+        let id_host = Identity::generate();
+        let id_dialer = Identity::generate();
+
+        let host = GatewayBridge::new(id_host, None, RelayMode::Disabled)
+            .await
+            .unwrap();
+        host.set_enabled(true).await;
+
+        let dialer = GatewayBridge::new(id_dialer, None, RelayMode::Disabled)
+            .await
+            .unwrap();
+
+        // Host exports raw contact WITHOUT invitation capability
+        let host_contact = host.export_contact().await.unwrap();
+        dialer
+            .import_and_approve_contact(&host_contact.export_to_string().unwrap())
+            .await
+            .unwrap();
+
+        let host_ep = host.endpoint().clone();
+        let accept_task = tokio::spawn(async move { accept_gateway_conn(&host_ep).await.unwrap() });
+
+        let dialer_connect = dialer.connect_to_contact(&host_contact).await;
+        assert!(dialer_connect.is_ok());
+
+        let (remote_id, incoming_conn) = accept_task.await.unwrap();
+        let host_res = host.spawn_session_handler(incoming_conn, None).await;
+
+        // Must fail because dialer was not approved and presented no invitation
+        assert!(host_res.is_err());
+        assert!(!host.config().read().await.is_approved(&remote_id));
+        assert_eq!(
+            host.config().read().await.consent_state(&remote_id),
+            GatewayConsentState::IdentityVerifiedPendingConsent
+        );
+        assert_eq!(host.routes().read().await.list_routes().len(), 0);
+
+        host.close().await;
+        dialer.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_pairing_invitation_single_use_and_revocation() {
+        let id_host = Identity::generate();
+        let id_d1 = Identity::generate();
+        let id_d2 = Identity::generate();
+
+        let host = GatewayBridge::new(id_host, None, RelayMode::Disabled)
+            .await
+            .unwrap();
+        let d1 = GatewayBridge::new(id_d1, None, RelayMode::Disabled)
+            .await
+            .unwrap();
+        let d2 = GatewayBridge::new(id_d2, None, RelayMode::Disabled)
+            .await
+            .unwrap();
+
+        // Host generates a single-use pairing contact with auto-admit enabled
+        let pairing_contact = host
+            .export_pairing_contact(Some(Duration::from_secs(60)), true)
+            .await
+            .unwrap();
+        let pairing_str = pairing_contact.export_to_string().unwrap();
+
+        d1.import_and_approve_contact(&pairing_str).await.unwrap();
+        d2.import_and_approve_contact(&pairing_str).await.unwrap();
+
+        // First redemption by d1 succeeds
+        let host_ep = host.endpoint().clone();
+        let accept1 = tokio::spawn(async move { accept_gateway_conn(&host_ep).await.unwrap() });
+        d1.connect_to_contact(&pairing_contact).await.unwrap();
+        let (d1_id, conn1) = accept1.await.unwrap();
+        assert!(host.spawn_session_handler(conn1, None).await.is_ok());
+        assert!(host.config().read().await.is_approved(&d1_id));
+
+        // Second redemption of the SAME single-use contact by d2 fails
+        let host_ep2 = host.endpoint().clone();
+        let accept2 = tokio::spawn(async move { accept_gateway_conn(&host_ep2).await.unwrap() });
+        d2.connect_to_contact(&pairing_contact).await.unwrap();
+        let (d2_id, conn2) = accept2.await.unwrap();
+        assert!(host.spawn_session_handler(conn2, None).await.is_err());
+        assert!(!host.config().read().await.is_approved(&d2_id));
+
+        // Revoking d1 removes approval and routes
+        host.revoke_or_block_peer(d1_id, true).await;
+        assert!(!host.config().read().await.is_approved(&d1_id));
+        assert_eq!(
+            host.config().read().await.consent_state(&d1_id),
+            GatewayConsentState::Blocked
+        );
+
+        host.close().await;
+        d1.close().await;
+        d2.close().await;
     }
 }
