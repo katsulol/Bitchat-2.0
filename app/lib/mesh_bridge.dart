@@ -133,6 +133,10 @@ class MeshBridge {
     return CoreFfi.instance.trustImportVoucher(voucherUri);
   }
 
+  String? getPeerFullId(String shortIdHex) {
+    return CoreFfi.instance.getPeerId(shortIdHex);
+  }
+
   String getPeerProximity(String shortIdHex) {
     return CoreFfi.instance.getPeerProximity(shortIdHex);
   }
@@ -382,6 +386,7 @@ class MeshBridge {
         if (shortId != myShortId) {
           _connectedPeers.add(shortId);
           CoreFfi.instance.onPeerConnected(shortId);
+          _drainOutbound();
           if (!_peersController.isClosed) {
             _peersController.add(_connectedPeers.toList());
           }

@@ -233,6 +233,7 @@ class CoreFfi {
   late final BitchatGetDeliveryStateDart _getPeerProximity;
   late final BitchatSetVolatileSessionDart _setVolatileSession;
   late final BitchatGetDeliveryStateDart _getVolatileState;
+  late final BitchatGetDeliveryStateDart _getPeerId;
 
   bool loadLibrary() {
     if (_initialized) return true;
@@ -282,6 +283,7 @@ class CoreFfi {
       _getPeerProximity = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_peer_proximity');
       _setVolatileSession = _lib!.lookupFunction<BitchatSetVolatileSessionC, BitchatSetVolatileSessionDart>('bitchat_set_volatile_session');
       _getVolatileState = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_volatile_state');
+      _getPeerId = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_peer_id');
 
       _initialized = true;
       return true;
@@ -778,6 +780,22 @@ class CoreFfi {
       return RustVolatileState(state: 'NotRequested', retentionSecs: 0);
     } finally {
       calloc.free(recipPtr);
+    }
+  }
+
+  String? getPeerId(String shortId) {
+    if (!_initialized) return null;
+    final ptr = shortId.toNativeUtf8();
+    try {
+      final resPtr = _getPeerId(ptr);
+      if (resPtr == nullptr) return null;
+      final str = resPtr.toDartString();
+      _freeString(resPtr);
+      return str;
+    } catch (_) {
+      return null;
+    } finally {
+      calloc.free(ptr);
     }
   }
 }

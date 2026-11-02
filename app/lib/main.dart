@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -1337,6 +1338,8 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
     final importVoucherCtrl = TextEditingController();
     String selectedCap = 'direct_message';
     String? issuedVoucherUri;
+    String? statusMessage;
+    bool statusSuccess = true;
 
     showModalBottomSheet(
       context: context,
@@ -1366,6 +1369,41 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       'Vouchers grant scoped capability authorization (1 hop only) and do NOT establish unique human identity.',
                       style: TextStyle(fontSize: 11, color: Colors.amberAccent),
                     ),
+                    if (statusMessage != null) ...[
+                      const SizedBox(height: 10),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: statusSuccess ? const Color(0xFF1B5E20) : const Color(0xFFB71C1C),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: statusSuccess ? Colors.greenAccent : Colors.redAccent,
+                            width: 1.2,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              statusSuccess ? Icons.check_circle : Icons.error_outline,
+                              color: statusSuccess ? Colors.greenAccent : Colors.redAccent,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                statusMessage!,
+                                style: TextStyle(
+                                  color: statusSuccess ? Colors.greenAccent : Colors.redAccent,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 10),
                     Row(
                       children: [
@@ -1382,9 +1420,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           tooltip: 'Copy full PeerId',
                           onPressed: () {
                             Clipboard.setData(ClipboardData(text: _bridge.myPeerId));
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Full 64-hex PeerId copied')),
-                            );
+                            setModalState(() {
+                              statusSuccess = true;
+                              statusMessage = 'Full 64-hex PeerId copied to clipboard.';
+                            });
                           },
                         ),
                         ElevatedButton.icon(
@@ -1426,17 +1465,49 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                               final hexOnly = scanned.replaceAll('bitchat-id://', '').replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
                               if (hexOnly.length >= 64) {
                                 peerTrustCtrl.text = hexOnly.substring(0, 64);
-                                setModalState(() {});
                               } else if (hexOnly.isNotEmpty) {
                                 peerTrustCtrl.text = hexOnly;
-                                setModalState(() {});
                               }
+                              setModalState(() {});
                             }
                           },
                         ),
                       ),
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
+                    if (_peers.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          const Text('Connected peers:', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                          for (final p in _peers)
+                            ActionChip(
+                              avatar: const Icon(Icons.bluetooth, size: 12, color: Colors.tealAccent),
+                              label: Text(p, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
+                              padding: EdgeInsets.zero,
+                              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              onPressed: () {
+                                final full = _bridge.getPeerFullId(p);
+                                if (full != null && full.length >= 64) {
+                                  peerTrustCtrl.text = full;
+                                  setModalState(() {
+                                    statusSuccess = true;
+                                    statusMessage = 'Target set to neighbor $p (64-hex).';
+                                  });
+                                } else {
+                                  setModalState(() {
+                                    statusSuccess = false;
+                                    statusMessage = 'Neighbor $p key not synced yet. Scan "Show My QR" from the other phone.';
+                                  });
+                                }
+                              },
+                            ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     Wrap(
                       spacing: 6,
@@ -1447,9 +1518,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           onPressed: () {
                             final pid = peerTrustCtrl.text.trim();
                             final ok = _bridge.setPeerTrustState(pid, 'approve');
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text(ok ? 'Peer approved' : 'Invalid 64-hex PeerId')),
-                            );
+                            setModalState(() {
+                              statusSuccess = ok;
+                              statusMessage = ok ? 'Peer approved.' : 'Invalid 64-hex PeerId.';
+                            });
                           },
                           child: const Text('Approve Peer', style: TextStyle(fontSize: 11)),
                         ),
@@ -1458,9 +1530,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           onPressed: () {
                             final pid = peerTrustCtrl.text.trim();
                             final ok = _bridge.setPeerTrustState(pid, 'introducer');
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text(ok ? 'Peer approved as 1-Hop Introducer' : 'Invalid 64-hex PeerId')),
-                            );
+                            setModalState(() {
+                              statusSuccess = ok;
+                              statusMessage = ok ? 'Peer approved as 1-Hop Introducer!' : 'Invalid 64-hex PeerId.';
+                            });
                           },
                           child: const Text('Approve + Introducer', style: TextStyle(fontSize: 11)),
                         ),
@@ -1469,9 +1542,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           onPressed: () {
                             final pid = peerTrustCtrl.text.trim();
                             final ok = _bridge.setPeerTrustState(pid, 'block');
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text(ok ? 'Peer blocked & vouchers revoked' : 'Invalid 64-hex PeerId')),
-                            );
+                            setModalState(() {
+                              statusSuccess = ok;
+                              statusMessage = ok ? 'Peer blocked & vouchers revoked.' : 'Invalid 64-hex PeerId.';
+                            });
                           },
                           child: const Text('Block Peer', style: TextStyle(fontSize: 11)),
                         ),
@@ -1501,22 +1575,36 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                               final hexOnly = scanned.replaceAll('bitchat-id://', '').replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
                               if (hexOnly.length >= 64) {
                                 subjectCtrl.text = hexOnly.substring(0, 64);
-                                setModalState(() {});
                               } else if (hexOnly.isNotEmpty) {
                                 subjectCtrl.text = hexOnly;
-                                setModalState(() {});
                               }
+                              setModalState(() {});
                             }
                           },
                         ),
                       ),
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
-                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        TextButton.icon(
+                          icon: const Icon(Icons.shuffle, size: 14),
+                          label: const Text('Generate Random Subject ID', style: TextStyle(fontSize: 10)),
+                          style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 4)),
+                          onPressed: () {
+                            final rnd = Random();
+                            final randHex = List.generate(64, (_) => rnd.nextInt(16).toRadixString(16)).join();
+                            subjectCtrl.text = randHex;
+                            setModalState(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
                     TextField(
                       controller: audienceCtrl,
                       decoration: InputDecoration(
-                        labelText: 'Audience PeerId (64 hex of verifier/gateway)',
+                        labelText: 'Audience PeerId (64 hex of verifier)',
                         labelStyle: const TextStyle(fontSize: 11),
                         isDense: true,
                         suffixIcon: Row(
@@ -1534,11 +1622,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                   final hexOnly = scanned.replaceAll('bitchat-id://', '').replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
                                   if (hexOnly.length >= 64) {
                                     audienceCtrl.text = hexOnly.substring(0, 64);
-                                    setModalState(() {});
                                   } else if (hexOnly.isNotEmpty) {
                                     audienceCtrl.text = hexOnly;
-                                    setModalState(() {});
                                   }
+                                  setModalState(() {});
                                 }
                               },
                             ),
@@ -1555,13 +1642,47 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       ),
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
+                    if (_peers.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          const Text('Audience from mesh:', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                          for (final p in _peers)
+                            ActionChip(
+                              avatar: const Icon(Icons.devices, size: 12, color: Colors.greenAccent),
+                              label: Text(p, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
+                              padding: EdgeInsets.zero,
+                              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              onPressed: () {
+                                final full = _bridge.getPeerFullId(p);
+                                if (full != null && full.length >= 64) {
+                                  audienceCtrl.text = full;
+                                  setModalState(() {
+                                    statusSuccess = true;
+                                    statusMessage = 'Audience set to neighbor $p (64-hex).';
+                                  });
+                                } else {
+                                  setModalState(() {
+                                    statusSuccess = false;
+                                    statusMessage = 'Neighbor $p key not synced yet. Scan "Show My QR" from the other phone.';
+                                  });
+                                }
+                              },
+                            ),
+                        ],
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     Row(
                       children: [
-                        const Text('Capability: ', style: TextStyle(fontSize: 11)),
+                        const Text('Capability: ', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                         const SizedBox(width: 8),
                         DropdownButton<String>(
                           value: selectedCap,
+                          isDense: true,
                           items: const [
                             DropdownMenuItem(value: 'direct_message', child: Text('DirectMessage (1 hop)', style: TextStyle(fontSize: 12))),
                             DropdownMenuItem(value: 'gateway_forward', child: Text('GatewayForward (1 hop)', style: TextStyle(fontSize: 12))),
@@ -1572,22 +1693,40 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                             }
                           },
                         ),
-                        const Spacer(),
-                        ElevatedButton(
-                          onPressed: () {
-                            final uri = _bridge.issueVoucher(
-                              subjectPeerIdHex: subjectCtrl.text.trim(),
-                              audiencePeerIdHex: audienceCtrl.text.trim(),
-                              capability: selectedCap,
-                            );
-                            setModalState(() => issuedVoucherUri = uri);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text(uri != null ? 'Signed 1-hop voucher generated' : 'Failed: check 64-hex Subject & Audience PeerIds')),
-                            );
-                          },
-                          child: const Text('Issue Voucher', style: TextStyle(fontSize: 11)),
-                        ),
                       ],
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        icon: const Icon(Icons.qr_code, size: 16),
+                        style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF2E7D32)),
+                        onPressed: () {
+                          final uri = _bridge.issueVoucher(
+                            subjectPeerIdHex: subjectCtrl.text.trim(),
+                            audiencePeerIdHex: audienceCtrl.text.trim(),
+                            capability: selectedCap,
+                          );
+                          setModalState(() {
+                            issuedVoucherUri = uri;
+                            if (uri != null) {
+                              statusSuccess = true;
+                              statusMessage = 'Signed 1-hop voucher generated! Scan QR on Audience phone.';
+                            } else {
+                              statusSuccess = false;
+                              statusMessage = 'Failed: check 64-hex Subject & Audience PeerIds.';
+                            }
+                          });
+                          if (uri != null) {
+                            _showQrDialog(
+                              uri,
+                              title: 'Signed 1-Hop Voucher QR',
+                              subtitle: 'Have the Audience phone scan this QR to authorize the Subject peer for 1 hop.',
+                            );
+                          }
+                        },
+                        label: const Text('Generate & Show Voucher QR', style: TextStyle(fontSize: 12)),
+                      ),
                     ),
                     if (issuedVoucherUri != null) ...[
                       const SizedBox(height: 6),
@@ -1605,9 +1744,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                             icon: const Icon(Icons.copy, size: 15),
                             onPressed: () {
                               Clipboard.setData(ClipboardData(text: issuedVoucherUri!));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Voucher URI copied')),
-                              );
+                              setModalState(() {
+                                statusSuccess = true;
+                                statusMessage = 'Voucher URI copied.';
+                              });
                             },
                           ),
                           IconButton(
@@ -1647,20 +1787,18 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                   if (scanned != null && scanned.trim().isNotEmpty) {
                                     importVoucherCtrl.text = scanned.trim();
                                     final res = _bridge.importVoucher(scanned.trim());
-                                    final subjectShortId = res?['subject_short_id'] as String?;
-                                    setModalState(() {});
+                                    final subjectShortId = res?['subject_short_id'] as String? ??
+                                        (res?['subject'] != null ? (res!['subject'] as String).substring(0, 8) : null);
+                                    setModalState(() {
+                                      if (subjectShortId != null) {
+                                        statusSuccess = true;
+                                        statusMessage = 'SUCCESS: Peer $subjectShortId introduced via 1-hop voucher (scoped capability authorized)!';
+                                      } else {
+                                        statusSuccess = false;
+                                        statusMessage = 'REJECTED: Untrusted introducer, wrong audience, or expired.';
+                                      }
+                                    });
                                     setState(() {});
-                                    if (context.mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            subjectShortId != null
-                                                ? 'Introduced peer $subjectShortId via 1-hop voucher (scoped capability only)'
-                                                : 'Rejected voucher (untrusted introducer, wrong audience, or expired)',
-                                          ),
-                                        ),
-                                      );
-                                    }
                                   }
                                 },
                               ),
@@ -1673,18 +1811,18 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           onPressed: () {
                             final uri = importVoucherCtrl.text.trim();
                             final res = _bridge.importVoucher(uri);
-                            final subjectShortId = res?['subject_short_id'] as String?;
-                            setModalState(() {});
+                            final subjectShortId = res?['subject_short_id'] as String? ??
+                                (res?['subject'] != null ? (res!['subject'] as String).substring(0, 8) : null);
+                            setModalState(() {
+                              if (subjectShortId != null) {
+                                statusSuccess = true;
+                                statusMessage = 'SUCCESS: Peer $subjectShortId introduced via 1-hop voucher!';
+                              } else {
+                                statusSuccess = false;
+                                statusMessage = 'REJECTED: Untrusted introducer, wrong audience, or expired.';
+                              }
+                            });
                             setState(() {});
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(
-                                  subjectShortId != null
-                                      ? 'Introduced peer $subjectShortId via 1-hop voucher (not independent identity verification)'
-                                      : 'Rejected voucher (untrusted introducer, wrong audience, or expired)',
-                                ),
-                              ),
-                            );
                           },
                           child: const Text('Import', style: TextStyle(fontSize: 11)),
                         ),

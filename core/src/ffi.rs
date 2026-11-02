@@ -958,6 +958,29 @@ pub unsafe extern "C" fn bitchat_get_volatile_state(recipient: *const c_char) ->
     }
 }
 
+/// Retrieve the verified 64-hex PeerId of a direct peer if Noise handshake is established.
+///
+/// # Safety
+///
+/// `short_id` must be a valid null-terminated C string.
+/// Returned string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_get_peer_id(short_id: *const c_char) -> *mut c_char {
+    let s = match c_str_to_string(short_id) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::get_peer_id(s)) {
+        Ok(pid) => string_to_c_char(pid),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Free a C string allocated by Bitchat core.
 ///
 /// # Safety

@@ -1271,10 +1271,22 @@ pub async fn trust_import_voucher(voucher_uri: String) -> Result<String, String>
     let summary = serde_json::json!({
         "issuer": voucher.issuer.to_string(),
         "subject": voucher.subject.to_string(),
+        "subject_short_id": voucher.subject.short_id().to_string(),
         "capability": format!("{:?}", voucher.capability),
         "expires_at_unix": voucher.expires_at_unix,
     });
     serde_json::to_string(&summary).map_err(|e| format!("Serialization error: {e}"))
+}
+
+/// Retrieve the verified 64-hex PeerId of a direct peer if Noise handshake is established.
+pub async fn get_peer_id(short_id: String) -> Result<String, String> {
+    let peer_short = ShortId::from_hex(&short_id).ok_or_else(|| "Invalid short ID".to_string())?;
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+    svc.peer_mgr
+        .verified_peer_id(&peer_short)
+        .map(|p| p.to_string())
+        .ok_or_else(|| "Peer session not established or peer ID unknown".to_string())
 }
 
 /// Update local device power/resource state and recompute `RelayResourceProfile` with hysteresis.
