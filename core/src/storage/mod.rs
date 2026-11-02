@@ -7,6 +7,7 @@ pub mod key;
 pub mod memory;
 pub mod outbox;
 pub mod sqlite;
+pub mod volatile;
 
 pub use key::{
     DataEncryptionKey, FailingKeyProvider, InjectedKeyProvider, KeyProvider, KeySecurityLevel,
@@ -15,6 +16,10 @@ pub use key::{
 pub use memory::MemoryOutboxStore;
 pub use outbox::{MessageMode, OutboxLimits, OutboxRecord, OutboxStore, SendRejection, SendResult};
 pub use sqlite::SqliteOutboxStore;
+pub use volatile::{
+    VolatileFrameKind, VolatileMessageEntry, VolatileNegotiationFrame, VolatileSendCheck,
+    VolatileSessionManager, VolatileSessionState,
+};
 
 use crate::identity::PeerId;
 use crate::mesh::delivery::DeliveryState;
