@@ -805,6 +805,8 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
 
   void _showGatewayDialog() {
     Timer? dialogTimer;
+    String? localContactUri;
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -812,14 +814,18 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            dialogTimer ??= Timer.periodic(const Duration(milliseconds: 500), (_) {
+            dialogTimer ??= Timer.periodic(const Duration(milliseconds: 600), (_) {
               if (context.mounted) {
                 setModalState(() {});
               }
             });
             final stats = _bridge.getGatewayStats();
             final isRunning = stats?.isRunning ?? false;
-            final contactUri = isRunning ? _bridge.exportGatewayContact() : null;
+            if (isRunning && localContactUri == null) {
+              localContactUri = _bridge.exportGatewayContact();
+            } else if (!isRunning) {
+              localContactUri = null;
+            }
 
             return Padding(
               padding: EdgeInsets.only(
@@ -854,64 +860,70 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       ],
                     ),
                     const SizedBox(height: 12),
-                    if (isRunning && stats?.endpointId != null) ...[
-                      const Text('Endpoint ID:', style: TextStyle(fontSize: 11, color: Colors.grey)),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              stats!.endpointId!,
-                              style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: Color(0xFF81C784)),
-                              overflow: TextOverflow.ellipsis,
+
+                    // Remote Gateway QR Scanner (ALWAYS available whether online or stopped)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        icon: const Icon(Icons.qr_code_scanner, size: 18),
+                        label: const Text('Scan Remote Gateway QR', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF00695C),
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                        ),
+                        onPressed: () {
+                          Navigator.pop(ctx);
+                          _openQrScanner();
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+
+                    if (isRunning) ...[
+                      if (stats?.endpointId != null) ...[
+                        const Text('Endpoint ID:', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                stats!.endpointId!,
+                                style: const TextStyle(fontSize: 11, fontFamily: 'monospace', color: Color(0xFF81C784)),
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.copy, size: 16),
-                            onPressed: () {
-                              Clipboard.setData(ClipboardData(text: stats.endpointId!));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Endpoint ID copied')),
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                    ],
-                    if (isRunning && contactUri != null) ...[
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Gateway Contact URI (includes single-use 5-min pairing token):',
-                        style: TextStyle(fontSize: 11, color: Colors.grey),
-                      ),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              contactUri,
-                              style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
+                            IconButton(
+                              icon: const Icon(Icons.copy, size: 16),
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(text: stats.endpointId!));
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Endpoint ID copied')),
+                                );
+                              },
                             ),
-                          ),
-                          IconButton(
-                            icon: const Icon(Icons.copy, size: 16),
-                            onPressed: () {
-                              Clipboard.setData(ClipboardData(text: contactUri));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('Contact URI copied')),
-                              );
-                            },
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                      ],
                       Row(
                         children: [
                           Expanded(
                             child: OutlinedButton.icon(
                               icon: const Icon(Icons.qr_code, size: 16),
-                              label: const Text('Show QR', style: TextStyle(fontSize: 12)),
-                              onPressed: () => _showQrDialog(contactUri),
+                              label: const Text('Show My Gateway QR', style: TextStyle(fontSize: 12)),
+                              onPressed: () {
+                                final uri = localContactUri ?? _bridge.exportGatewayContact();
+                                if (uri != null && uri.isNotEmpty) {
+                                  _showQrDialog(
+                                    uri,
+                                    title: 'Gateway Pairing QR',
+                                    subtitle: 'Scan with another phone to connect via Iroh QUIC tunnel (includes single-use 5-min pairing token).',
+                                  );
+                                } else {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Starting gateway... please try again in a moment')),
+                                  );
+                                }
+                              },
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -919,26 +931,17 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                             child: OutlinedButton.icon(
                               icon: const Icon(Icons.share, size: 16),
                               label: const Text('Share Link', style: TextStyle(fontSize: 12)),
-                              onPressed: () => _bridge.shareText(contactUri, title: 'Share Gateway Contact'),
+                              onPressed: () {
+                                final uri = localContactUri ?? _bridge.exportGatewayContact();
+                                if (uri != null && uri.isNotEmpty) {
+                                  _bridge.shareText(uri, title: 'Share Gateway Contact');
+                                }
+                              },
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 6),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton.icon(
-                          icon: const Icon(Icons.qr_code_scanner, size: 16),
-                          label: const Text('Scan Remote Gateway QR', style: TextStyle(fontSize: 12)),
-                          onPressed: () {
-                            Navigator.pop(ctx);
-                            _openQrScanner();
-                          },
-                        ),
-                      ),
-                    ],
-                    const Divider(height: 24),
-                    if (isRunning) ...[
+                      const SizedBox(height: 12),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceAround,
                         children: [
@@ -1058,7 +1061,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           );
                         },
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(height: 12),
                       Row(
                         children: [
                           Expanded(
@@ -1080,24 +1083,53 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           ),
                         ],
                       ),
-                      const SizedBox(height: 12),
+                    ] else ...[
+                      Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.symmetric(vertical: 8),
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF242424),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.white12),
+                        ),
+                        child: const Text(
+                          'Gateway Bridge is offline on this phone. Start the bridge to act as an Internet gateway for mesh nodes, or tap "Scan Remote Gateway QR" above to connect to another node\'s gateway as a client.',
+                          style: TextStyle(fontSize: 11, color: Colors.white70),
+                        ),
+                      ),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.connect_without_contact, size: 16),
+                          label: const Text('Enter Gateway Contact URI Manually', style: TextStyle(fontSize: 12)),
+                          onPressed: () => _promptConnectContact(setModalState),
+                        ),
+                      ),
                     ],
+                    const SizedBox(height: 12),
                     SizedBox(
                       width: double.infinity,
                       child: ElevatedButton(
                         style: ElevatedButton.styleFrom(
                           backgroundColor: isRunning ? Colors.red.shade900 : Colors.green.shade800,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
                         ),
                         onPressed: () async {
                           if (isRunning) {
                             await _bridge.stopGateway();
+                            localContactUri = null;
                           } else {
                             await _bridge.startGateway();
+                            localContactUri = _bridge.exportGatewayContact();
                           }
                           setModalState(() {});
                           setState(() {});
                         },
-                        child: Text(isRunning ? 'Stop Gateway Bridge' : 'Start Gateway Bridge'),
+                        child: Text(
+                          isRunning ? 'Stop Gateway Bridge' : 'Start Gateway Bridge',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
                       ),
                     ),
                   ],
@@ -1206,26 +1238,39 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
     );
   }
 
-  void _showQrDialog(String data) {
+  void _showQrDialog(String data, {String title = 'QR Code', String? subtitle}) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: const Color(0xFF1E1E1E),
-        title: const Text('Gateway Contact QR', style: TextStyle(fontSize: 16)),
-        content: SizedBox(
-          width: 240,
-          height: 240,
-          child: Center(
-            child: Container(
-              padding: const EdgeInsets.all(8),
-              color: Colors.white,
-              child: QrImageView(
-                data: data,
-                version: QrVersions.auto,
-                size: 220.0,
+        title: Text(title, style: const TextStyle(fontSize: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 240,
+              height: 240,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  color: Colors.white,
+                  child: QrImageView(
+                    data: data,
+                    version: QrVersions.auto,
+                    size: 220.0,
+                  ),
+                ),
               ),
             ),
-          ),
+            if (subtitle != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                subtitle,
+                style: const TextStyle(fontSize: 11, color: Colors.grey),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ],
         ),
         actions: [
           TextButton(
@@ -1326,14 +1371,14 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       children: [
                         Expanded(
                           child: Text(
-                            'My 64-hex PeerId: ${_bridge.myPeerId}',
+                            'My PeerId: ${_bridge.myPeerId}',
                             style: const TextStyle(fontSize: 10, fontFamily: 'monospace', color: Colors.grey),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         IconButton(
-                          icon: const Icon(Icons.copy, size: 15),
+                          icon: const Icon(Icons.copy, size: 16),
                           tooltip: 'Copy full PeerId',
                           onPressed: () {
                             Clipboard.setData(ClipboardData(text: _bridge.myPeerId));
@@ -1342,10 +1387,18 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                             );
                           },
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.qr_code, size: 16, color: Color(0xFF81C784)),
-                          tooltip: 'Show full PeerId QR',
-                          onPressed: () => _showQrDialog(_bridge.myPeerId),
+                        ElevatedButton.icon(
+                          icon: const Icon(Icons.qr_code, size: 16),
+                          label: const Text('Show My QR', style: TextStyle(fontSize: 11)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF2E7D32),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          ),
+                          onPressed: () => _showQrDialog(
+                            'bitchat-id://${_bridge.myPeerId}',
+                            title: 'My 64-Hex PeerId QR',
+                            subtitle: 'Other phones can scan this directly to approve you or issue a voucher to you.',
+                          ),
                         ),
                       ],
                     ),
@@ -1357,10 +1410,30 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     const SizedBox(height: 6),
                     TextField(
                       controller: peerTrustCtrl,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Target PeerId (64 hex chars)',
-                        labelStyle: TextStyle(fontSize: 11),
+                        labelStyle: const TextStyle(fontSize: 11),
                         isDense: true,
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.qr_code_scanner, color: Colors.tealAccent, size: 20),
+                          tooltip: 'Scan PeerId QR from other phone',
+                          onPressed: () async {
+                            final scanned = await Navigator.push<String>(
+                              context,
+                              MaterialPageRoute(builder: (ctx) => const QrScanScreen()),
+                            );
+                            if (scanned != null && scanned.isNotEmpty) {
+                              final hexOnly = scanned.replaceAll('bitchat-id://', '').replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+                              if (hexOnly.length >= 64) {
+                                peerTrustCtrl.text = hexOnly.substring(0, 64);
+                                setModalState(() {});
+                              } else if (hexOnly.isNotEmpty) {
+                                peerTrustCtrl.text = hexOnly;
+                                setModalState(() {});
+                              }
+                            }
+                          },
+                        ),
                       ),
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
@@ -1412,20 +1485,73 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     const SizedBox(height: 6),
                     TextField(
                       controller: subjectCtrl,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Subject PeerId (64 hex)',
-                        labelStyle: TextStyle(fontSize: 11),
+                        labelStyle: const TextStyle(fontSize: 11),
                         isDense: true,
+                        suffixIcon: IconButton(
+                          icon: const Icon(Icons.qr_code_scanner, color: Colors.greenAccent, size: 20),
+                          tooltip: 'Scan Subject PeerId QR',
+                          onPressed: () async {
+                            final scanned = await Navigator.push<String>(
+                              context,
+                              MaterialPageRoute(builder: (ctx) => const QrScanScreen()),
+                            );
+                            if (scanned != null && scanned.isNotEmpty) {
+                              final hexOnly = scanned.replaceAll('bitchat-id://', '').replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+                              if (hexOnly.length >= 64) {
+                                subjectCtrl.text = hexOnly.substring(0, 64);
+                                setModalState(() {});
+                              } else if (hexOnly.isNotEmpty) {
+                                subjectCtrl.text = hexOnly;
+                                setModalState(() {});
+                              }
+                            }
+                          },
+                        ),
                       ),
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
                     const SizedBox(height: 6),
                     TextField(
                       controller: audienceCtrl,
-                      decoration: const InputDecoration(
+                      decoration: InputDecoration(
                         labelText: 'Audience PeerId (64 hex of verifier/gateway)',
-                        labelStyle: TextStyle(fontSize: 11),
+                        labelStyle: const TextStyle(fontSize: 11),
                         isDense: true,
+                        suffixIcon: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.qr_code_scanner, color: Colors.greenAccent, size: 20),
+                              tooltip: 'Scan Audience PeerId QR',
+                              onPressed: () async {
+                                final scanned = await Navigator.push<String>(
+                                  context,
+                                  MaterialPageRoute(builder: (ctx) => const QrScanScreen()),
+                                );
+                                if (scanned != null && scanned.isNotEmpty) {
+                                  final hexOnly = scanned.replaceAll('bitchat-id://', '').replaceAll(RegExp(r'[^0-9a-fA-F]'), '');
+                                  if (hexOnly.length >= 64) {
+                                    audienceCtrl.text = hexOnly.substring(0, 64);
+                                    setModalState(() {});
+                                  } else if (hexOnly.isNotEmpty) {
+                                    audienceCtrl.text = hexOnly;
+                                    setModalState(() {});
+                                  }
+                                }
+                              },
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.person, color: Colors.grey, size: 18),
+                              tooltip: 'Paste My PeerId',
+                              onPressed: () {
+                                audienceCtrl.text = _bridge.myPeerId;
+                                setModalState(() {});
+                              },
+                            ),
+                          ],
+                        ),
                       ),
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
@@ -1486,7 +1612,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           ),
                           IconButton(
                             icon: const Icon(Icons.qr_code, size: 16),
-                            onPressed: () => _showQrDialog(issuedVoucherUri!),
+                            onPressed: () => _showQrDialog(
+                              issuedVoucherUri!,
+                              title: 'Signed 1-Hop Voucher QR',
+                              subtitle: 'Have the Audience phone scan this QR to authorize the Subject peer for 1 hop.',
+                            ),
                           ),
                         ],
                       ),
@@ -1502,10 +1632,38 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                         Expanded(
                           child: TextField(
                             controller: importVoucherCtrl,
-                            decoration: const InputDecoration(
+                            decoration: InputDecoration(
                               hintText: 'bitchat-voucher://...',
-                              hintStyle: TextStyle(fontSize: 11),
+                              hintStyle: const TextStyle(fontSize: 11),
                               isDense: true,
+                              suffixIcon: IconButton(
+                                icon: const Icon(Icons.qr_code_scanner, color: Colors.amberAccent, size: 20),
+                                tooltip: 'Scan Voucher QR',
+                                onPressed: () async {
+                                  final scanned = await Navigator.push<String>(
+                                    context,
+                                    MaterialPageRoute(builder: (ctx) => const QrScanScreen()),
+                                  );
+                                  if (scanned != null && scanned.trim().isNotEmpty) {
+                                    importVoucherCtrl.text = scanned.trim();
+                                    final res = _bridge.importVoucher(scanned.trim());
+                                    final subjectShortId = res?['subject_short_id'] as String?;
+                                    setModalState(() {});
+                                    setState(() {});
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            subjectShortId != null
+                                                ? 'Introduced peer $subjectShortId via 1-hop voucher (scoped capability only)'
+                                                : 'Rejected voucher (untrusted introducer, wrong audience, or expired)',
+                                          ),
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                              ),
                             ),
                             style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                           ),
