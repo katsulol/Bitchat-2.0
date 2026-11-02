@@ -70,6 +70,25 @@ impl GatewayRouteTable {
             .map(|e| &e.gateway)
     }
 
+    /// Lookup remote gateway endpoint for a recipient ShortId, filtering only gateways that
+    /// pass the caller's authorization predicate.
+    pub fn lookup_authorized_at<F>(
+        &self,
+        recipient: &ShortId,
+        now: Instant,
+        is_authorized: F,
+    ) -> Option<EndpointId>
+    where
+        F: Fn(&EndpointId) -> bool,
+    {
+        let entries = self.routes.get(recipient)?;
+        entries
+            .iter()
+            .filter(|e| e.expires_at > now && is_authorized(&e.gateway))
+            .max_by_key(|e| e.sequence)
+            .map(|e| e.gateway)
+    }
+
     /// Apply an authenticated RouteSnapshot atomically.
     ///
     /// Validates session epoch and strict sequence monotonicity.

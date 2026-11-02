@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,7 +16,11 @@ use crate::gateway::wire::{
     GatewayForward, GatewayHello, GatewayMessage, RejectReason, WireError, DEFAULT_READ_TIMEOUT,
     WIRE_VERSION,
 };
-use crate::identity::Identity;
+use crate::identity::{Identity, PeerId};
+use crate::trust::{
+    AuthOutcome, AuthReason, AuthorizationContext, Capability, PeerTrustState, TrustPolicy,
+    TrustQuotaConfig, TrustStore,
+};
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey};
 
@@ -34,6 +38,7 @@ pub struct GatewayBridge {
     bitchat_identity: Identity,
     endpoint: Endpoint,
     config: Arc<RwLock<GatewayConfig>>,
+    trust_store: Arc<RwLock<TrustStore>>,
     routes: Arc<RwLock<GatewayRouteTable>>,
     stats: Arc<GatewayStats>,
     active_sessions: Arc<RwLock<HashMap<EndpointId, ActiveGatewaySession>>>,
@@ -55,11 +60,16 @@ impl GatewayBridge {
             .map_err(|e| Error::Transport(format!("Failed to bind Iroh endpoint: {e}")))?;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(128);
+        let local_peer_id = bitchat_identity.peer_id();
 
         Ok(Self {
             bitchat_identity,
             endpoint,
             config: Arc::new(RwLock::new(GatewayConfig::new())),
+            trust_store: Arc::new(RwLock::new(TrustStore::new(
+                local_peer_id,
+                TrustQuotaConfig::default(),
+            ))),
             routes: Arc::new(RwLock::new(GatewayRouteTable::new())),
             stats: Arc::new(GatewayStats::new()),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -68,6 +78,10 @@ impl GatewayBridge {
             inbound_mesh_tx: inbound_tx,
             inbound_mesh_rx: Arc::new(tokio::sync::Mutex::new(inbound_rx)),
         })
+    }
+
+    pub fn trust_store(&self) -> Arc<RwLock<TrustStore>> {
+        Arc::clone(&self.trust_store)
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -142,6 +156,31 @@ impl GatewayBridge {
         let id = contact
             .endpoint_id()
             .map_err(|e| Error::Transport(format!("Invalid endpoint id: {e}")))?;
+        let pubkey = contact
+            .binding
+            .bitchat_pubkey()
+            .map_err(|e| Error::Transport(format!("Invalid Bitchat pubkey in contact: {e}")))?;
+        let remote_peer_id = PeerId(pubkey);
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        {
+            let mut ts = self.trust_store.write().await;
+            if matches!(
+                ts.peer_state(&remote_peer_id),
+                PeerTrustState::Blocked { .. }
+            ) {
+                return Err(Error::Transport("Peer identity is blocked locally".into()));
+            }
+            let mut caps = HashSet::new();
+            caps.insert(Capability::PermitOutboundGateway);
+            caps.insert(Capability::UseGatewayForForwarding);
+            caps.insert(Capability::ReceiveDirectMessage);
+            let _ = ts.approve_peer(remote_peer_id, caps, now_secs);
+        }
 
         let mut cfg = self.config.write().await;
         if !cfg.approve_gateway(id) {
@@ -154,12 +193,32 @@ impl GatewayBridge {
 
     /// Revoke or permanently block a gateway peer, atomically withdrawing routes and closing active sessions.
     pub async fn revoke_or_block_peer(&self, endpoint_id: EndpointId, block: bool) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let assoc_peer_id = self
+            .active_sessions
+            .read()
+            .await
+            .get(&endpoint_id)
+            .map(|s| PeerId(s.remote_bitchat_pubkey));
+
         {
             let mut cfg = self.config.write().await;
             if block {
                 cfg.block_gateway(endpoint_id);
             } else {
                 cfg.revoke_gateway(&endpoint_id);
+            }
+        }
+        if let Some(pid) = assoc_peer_id {
+            let mut ts = self.trust_store.write().await;
+            if block {
+                ts.block_peer(pid, now_secs);
+            } else {
+                ts.revoke_peer(pid, now_secs);
             }
         }
         self.active_sessions.write().await.remove(&endpoint_id);
@@ -291,9 +350,31 @@ impl GatewayBridge {
                             Error::Transport(format!("Invalid Bitchat public key: {e}"))
                         })?;
 
-                        // Evaluate explicit gateway consent state; NEVER auto-approve from identity binding alone!
+                        let remote_peer_id = PeerId(pk);
+                        let now_secs = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+
+                        // Evaluate Task 1 TrustPolicy capability check + GatewayConfig consent state!
                         let mut cfg = self.config.write().await;
-                        if !cfg.enabled {
+                        let mut ts = self.trust_store.write().await;
+
+                        let auth_ctx = AuthorizationContext {
+                            now_monotonic: Instant::now(),
+                            now_unix: Some(now_secs),
+                            gateway_opted_in: cfg.enabled,
+                            allow_vouched_gateway_forwarding: cfg.allow_invitation_auto_admit,
+                        };
+                        let trust_dec = TrustPolicy::authorize(
+                            &mut ts,
+                            &remote_peer_id,
+                            Capability::UseGatewayForForwarding,
+                            &auth_ctx,
+                        );
+
+                        if !cfg.enabled || trust_dec.reason == AuthReason::LocalBlocked {
+                            drop(ts);
                             drop(cfg);
                             self.stats.inc_rejected();
                             let _ = (GatewayMessage::Rejected {
@@ -302,11 +383,14 @@ impl GatewayBridge {
                             })
                             .write_framed(&mut s)
                             .await;
-                            return Err(Error::Transport("Gateway is disabled".into()));
+                            return Err(Error::Transport(
+                                "Gateway disabled or peer identity blocked".into(),
+                            ));
                         }
 
                         match cfg.consent_state(&remote_id) {
                             GatewayConsentState::Blocked | GatewayConsentState::Revoked => {
+                                drop(ts);
                                 drop(cfg);
                                 self.stats.inc_rejected();
                                 let _ = (GatewayMessage::Rejected {
@@ -320,20 +404,49 @@ impl GatewayBridge {
                                 ));
                             }
                             GatewayConsentState::Approved => {
+                                if matches!(
+                                    ts.peer_state(&remote_peer_id),
+                                    PeerTrustState::Revoked { .. } | PeerTrustState::Blocked { .. }
+                                ) {
+                                    cfg.revoke_gateway(&remote_id);
+                                    drop(ts);
+                                    drop(cfg);
+                                    self.stats.inc_rejected();
+                                    let _ = (GatewayMessage::Rejected {
+                                        transfer_id: 0,
+                                        reason: RejectReason::Unauthorized,
+                                    })
+                                    .write_framed(&mut s)
+                                    .await;
+                                    return Err(Error::Transport(
+                                        "Remote gateway peer identity was revoked/blocked".into(),
+                                    ));
+                                }
+                                drop(ts);
                                 drop(cfg);
                             }
                             GatewayConsentState::Unrecognized
                             | GatewayConsentState::IdentityVerifiedPendingConsent => {
-                                let admitted = if let Some(ref token) = hello.invitation_token {
+                                let admitted = if trust_dec.outcome == AuthOutcome::Allow {
+                                    cfg.approve_gateway(remote_id)
+                                } else if let Some(ref token) = hello.invitation_token {
                                     match cfg.redeem_invitation(
                                         token,
                                         remote_id,
                                         pk,
                                         Instant::now(),
                                     ) {
-                                        Ok(GatewayConsentState::Approved) => true,
+                                        Ok(GatewayConsentState::Approved) => {
+                                            let mut caps = HashSet::new();
+                                            caps.insert(Capability::UseGatewayForForwarding);
+                                            caps.insert(Capability::ReceiveDirectMessage);
+                                            let _ =
+                                                ts.approve_peer(remote_peer_id, caps, now_secs);
+                                            true
+                                        }
                                         Ok(_) => false,
                                         Err(e) => {
+                                            drop(ts);
                                             drop(cfg);
                                             self.stats.inc_rejected();
                                             let _ = (GatewayMessage::Rejected {
@@ -350,8 +463,10 @@ impl GatewayBridge {
                                 } else {
                                     let _ =
                                         cfg.record_verified_pending(remote_id, pk, Instant::now());
+                                    let _ = ts.record_identity_verified(remote_peer_id);
                                     false
                                 };
+                                drop(ts);
                                 drop(cfg);
 
                                 if !admitted {
@@ -444,12 +559,26 @@ impl GatewayBridge {
         let stats_reader = Arc::clone(&self.stats);
         let sessions = Arc::clone(&self.active_sessions);
         let routes_reader = Arc::clone(&self.routes);
+        let config_reader = Arc::clone(&self.config);
+        let trust_reader = Arc::clone(&self.trust_store);
         let my_short = self.bitchat_identity.short_id();
+        let remote_peer_id = PeerId(remote_bitchat_pubkey);
 
         tokio::spawn(async move {
             loop {
                 match GatewayMessage::read_framed(&mut recv_stream, DEFAULT_READ_TIMEOUT).await {
                     Ok(GatewayMessage::Forward(fwd)) => {
+                        // Task 3: Re-verify gateway approval & trust authorization before admitting forwarded traffic
+                        let is_still_approved = config_reader.read().await.is_approved(&remote_id);
+                        let is_blocked_or_revoked = matches!(
+                            trust_reader.read().await.peer_state(&remote_peer_id),
+                            PeerTrustState::Blocked { .. } | PeerTrustState::Revoked { .. }
+                        );
+                        if !is_still_approved || is_blocked_or_revoked {
+                            stats_reader.inc_rejected();
+                            break;
+                        }
+
                         // Validate bridge loop policy: frame may cross the internet bridge at most once!
                         if fwd.bridge_crossings > 1 {
                             stats_reader.inc_loops_prevented();
@@ -472,6 +601,21 @@ impl GatewayBridge {
                         }
                     }
                     Ok(GatewayMessage::RouteSync(snapshot)) => {
+                        // Task 3: Reject route snapshots from gateways whose approval was revoked/blocked
+                        let is_still_approved = config_reader.read().await.is_approved(&remote_id);
+                        let is_blocked_or_revoked = matches!(
+                            trust_reader.read().await.peer_state(&remote_peer_id),
+                            PeerTrustState::Blocked { .. } | PeerTrustState::Revoked { .. }
+                        );
+                        if !is_still_approved || is_blocked_or_revoked {
+                            stats_reader.inc_rejected();
+                            routes_reader
+                                .write()
+                                .await
+                                .remove_routes_for_endpoint(&remote_id);
+                            break;
+                        }
+
                         // 1. Validate bounded size & lease
                         if let Err(e) = snapshot.validate_bounds() {
                             tracing::warn!(
@@ -573,19 +717,40 @@ impl GatewayBridge {
             return Ok(false);
         }
 
-        // Rule 2: Lookup route
-        let target_gw = match self
-            .routes
-            .read()
-            .await
-            .lookup(&envelope.recipient_short_id)
-        {
-            Some(gw) => *gw,
-            None => return Ok(false), // No route configured: local delivery only
+        // Rule 2: Lookup route among currently approved and authorized gateways
+        let cfg_guard = self.config.read().await;
+        if !cfg_guard.enabled {
+            return Ok(false);
+        }
+        let ts_guard = self.trust_store.read().await;
+        let sessions = self.active_sessions.read().await;
+
+        let target_gw = match self.routes.read().await.lookup_authorized_at(
+            &envelope.recipient_short_id,
+            Instant::now(),
+            |gw_id| {
+                if !cfg_guard.is_approved(gw_id) {
+                    return false;
+                }
+                if let Some(s) = sessions.get(gw_id) {
+                    let pid = PeerId(s.remote_bitchat_pubkey);
+                    if matches!(
+                        ts_guard.peer_state(&pid),
+                        PeerTrustState::Blocked { .. } | PeerTrustState::Revoked { .. }
+                    ) {
+                        return false;
+                    }
+                }
+                true
+            },
+        ) {
+            Some(gw) => gw,
+            None => return Ok(false), // No authorized route configured: local delivery only
         };
+        drop(ts_guard);
+        drop(cfg_guard);
 
         // Rule 3: Session check
-        let sessions = self.active_sessions.read().await;
         let session = match sessions.get(&target_gw) {
             Some(s) => s,
             None => {
@@ -780,8 +945,90 @@ mod tests {
             GatewayConsentState::Blocked
         );
 
+        // Blocked peer cannot re-onboard even with a brand new valid pairing invitation!
+        let fresh_pairing = host
+            .export_pairing_contact(Some(Duration::from_secs(60)), true)
+            .await
+            .unwrap();
+        let host_ep3 = host.endpoint().clone();
+        let accept3 = tokio::spawn(async move { accept_gateway_conn(&host_ep3).await.unwrap() });
+        d1.connect_to_contact(&fresh_pairing).await.unwrap();
+        let (_, conn3) = accept3.await.unwrap();
+        assert!(host.spawn_session_handler(conn3, None).await.is_err());
+
         host.close().await;
         d1.close().await;
         d2.close().await;
+    }
+
+    #[tokio::test]
+    async fn test_two_gateways_one_blocked_atomic_withdrawal_and_failover() {
+        let id_host = Identity::generate();
+        let id_gw1 = Identity::generate();
+        let id_gw2 = Identity::generate();
+        let target_short = crate::identity::ShortId([0xAA; 8]);
+
+        let host = GatewayBridge::new(id_host, None, RelayMode::Disabled)
+            .await
+            .unwrap();
+        let gw1 = GatewayBridge::new(id_gw1, None, RelayMode::Disabled)
+            .await
+            .unwrap();
+        let gw2 = GatewayBridge::new(id_gw2, None, RelayMode::Disabled)
+            .await
+            .unwrap();
+
+        let gw1_id = gw1.endpoint_id();
+        let gw2_id = gw2.endpoint_id();
+
+        // Approve both gateways on host
+        let c1 = gw1.export_contact().await.unwrap();
+        let c2 = gw2.export_contact().await.unwrap();
+        host.import_and_approve_contact(&c1.export_to_string().unwrap())
+            .await
+            .unwrap();
+        host.import_and_approve_contact(&c2.export_to_string().unwrap())
+            .await
+            .unwrap();
+
+        let now = Instant::now();
+        let routes_arc = host.routes();
+        let cfg_arc = host.config();
+        {
+            let mut routes = routes_arc.write().await;
+            routes
+                .apply_snapshot(gw1_id, 1, 10, vec![target_short], Duration::from_secs(60), now)
+                .unwrap();
+            routes
+                .apply_snapshot(gw2_id, 1, 5, vec![target_short], Duration::from_secs(60), now)
+                .unwrap();
+        }
+
+        // Initially gw1 is preferred (higher sequence 10 > 5)
+        let cfg = cfg_arc.read().await;
+        assert_eq!(
+            routes_arc
+                .read()
+                .await
+                .lookup_authorized_at(&target_short, now, |id| cfg.is_approved(id)),
+            Some(gw1_id)
+        );
+        drop(cfg);
+
+        // Block gw1 -> routes for gw1 are atomically withdrawn and lookup fails over to gw2!
+        host.revoke_or_block_peer(gw1_id, true).await;
+        let cfg2 = cfg_arc.read().await;
+        assert_eq!(
+            routes_arc
+                .read()
+                .await
+                .lookup_authorized_at(&target_short, now, |id| cfg2.is_approved(id)),
+            Some(gw2_id)
+        );
+        drop(cfg2);
+
+        host.close().await;
+        gw1.close().await;
+        gw2.close().await;
     }
 }
