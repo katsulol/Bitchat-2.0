@@ -2,6 +2,7 @@ pub mod delivery;
 pub mod fragment;
 pub mod peer;
 pub mod policy;
+pub mod proximity;
 pub mod relay;
 pub mod resource;
 pub mod router;
@@ -17,6 +18,7 @@ pub use policy::{
     AdaptiveFlood, AdaptiveFloodConfig, CoverageAwareFlood, CoverageAwareFloodConfig, NaiveFlood,
     NeighborStatus, NeighborTable, RelayContext, RelayPolicy,
 };
+pub use proximity::{ProximityCategory, ProximityConfig, ProximityTracker};
 pub use relay::{InboundMessage, MeshNode};
 pub use resource::{
     BatteryBand, NetworkMetering, RelayResourceProfile, ResourceAdmission,
