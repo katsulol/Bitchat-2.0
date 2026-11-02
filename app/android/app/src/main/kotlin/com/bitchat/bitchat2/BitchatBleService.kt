@@ -88,11 +88,18 @@ class BitchatBleService : Service() {
     private val addrToShortId = ConcurrentHashMap<String, String>()
     private val shortIdToLinks = ConcurrentHashMap<String, MutableSet<String>>()
     private val scannedShortIds = ConcurrentHashMap<String, String>()
+    private val lastRssiReportMs = ConcurrentHashMap<String, Long>()
 
     // Local Short ID
     private var localShortIdHex: String = ""
     private var isScanning = false
     private var isGattServerReady = false
+
+    // Coalesced resource state tracking
+    private var lastReportedBatteryPct: Int = -1
+    private var lastReportedCharging: Int = -1
+    private var lastReportedPowerSave: Int = -1
+    private var lastReportedThermal: Int = 0
 
     // Callback listener for Flutter integration
     var listener: BleEventListener? = null
@@ -101,6 +108,8 @@ class BitchatBleService : Service() {
         fun onPeerConnected(shortId: String)
         fun onPeerDisconnected(shortId: String)
         fun onFrameReceived(senderShortId: String, data: ByteArray)
+        fun onPeerRssi(shortId: String, rssi: Int)
+        fun onResourceStateChanged(batteryPct: Int, charging: Int, powerSave: Int, thermal: Int)
     }
 
     inner class LocalBinder : Binder() {
@@ -123,6 +132,76 @@ class BitchatBleService : Service() {
             val filter = android.content.IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
             registerReceiver(bluetoothReceiver, filter)
         } catch (_: Exception) {}
+
+        try {
+            val resFilter = android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_BATTERY_CHANGED)
+                addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
+            }
+            registerReceiver(resourceReceiver, resFilter)
+        } catch (_: Exception) {}
+    }
+
+    private val resourceReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: android.content.Intent?) {
+            val state = queryCurrentResourceState()
+            val bat = state["batteryPct"] ?: -1
+            val chg = state["charging"] ?: -1
+            val pwr = state["powerSave"] ?: -1
+            val thm = state["thermal"] ?: 0
+
+            // Coalesce resource events: notify only when a coarse band or state changes
+            if (bat != lastReportedBatteryPct || chg != lastReportedCharging ||
+                pwr != lastReportedPowerSave || thm != lastReportedThermal) {
+                lastReportedBatteryPct = bat
+                lastReportedCharging = chg
+                lastReportedPowerSave = pwr
+                lastReportedThermal = thm
+                listener?.onResourceStateChanged(bat, chg, pwr, thm)
+            }
+        }
+    }
+
+    fun queryCurrentResourceState(): Map<String, Int> {
+        var batteryPct = -1
+        var charging = -1
+        var powerSave = -1
+        var thermal = 0
+
+        try {
+            val bm = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+            if (bm != null) {
+                val cap = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+                if (cap in 0..100) batteryPct = cap
+                charging = if (bm.isCharging) 1 else 0
+            }
+        } catch (_: Exception) {}
+
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (pm != null) {
+                powerSave = if (pm.isPowerSaveMode) 1 else 0
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    thermal = when (pm.currentThermalStatus) {
+                        PowerManager.THERMAL_STATUS_NONE,
+                        PowerManager.THERMAL_STATUS_LIGHT -> 0
+                        PowerManager.THERMAL_STATUS_MODERATE -> 1
+                        PowerManager.THERMAL_STATUS_SEVERE -> 2
+                        PowerManager.THERMAL_STATUS_CRITICAL,
+                        PowerManager.THERMAL_STATUS_EMERGENCY,
+                        PowerManager.THERMAL_STATUS_SHUTDOWN -> 3
+                        else -> 0
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        return mapOf(
+            "batteryPct" to batteryPct,
+            "charging" to charging,
+            "powerSave" to powerSave,
+            "thermal" to thermal
+        )
     }
 
     private val bluetoothReceiver = object : android.content.BroadcastReceiver() {
@@ -565,6 +644,17 @@ class BitchatBleService : Service() {
                 val peerShortId = byteArrayToHexString(shortBytes)
                 if (peerShortId != localShortIdHex && peerShortId.length == 16) {
                     scannedShortIds[addr] = peerShortId
+                }
+            }
+
+            // Forward direct-link RSSI only for connected/verified peers, throttled to <= 1 sample / 1.5s
+            val boundShortId = addrToShortId[addr]
+            if (boundShortId != null) {
+                val nowMs = System.currentTimeMillis()
+                val prevMs = lastRssiReportMs[boundShortId] ?: 0L
+                if (nowMs - prevMs >= 1500L) {
+                    lastRssiReportMs[boundShortId] = nowMs
+                    listener?.onPeerRssi(boundShortId, result.rssi)
                 }
             }
 
@@ -1094,6 +1184,9 @@ class BitchatBleService : Service() {
         stopMesh()
         try {
             unregisterReceiver(bluetoothReceiver)
+        } catch (_: Exception) {}
+        try {
+            unregisterReceiver(resourceReceiver)
         } catch (_: Exception) {}
         super.onDestroy()
     }

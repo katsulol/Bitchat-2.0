@@ -100,6 +100,26 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
                         startActivity(chooser)
                         result.success(true)
                     }
+                    "getDeviceResourceState" -> {
+                        val state = bleService?.queryCurrentResourceState() ?: mapOf(
+                            "batteryPct" to -1,
+                            "charging" to -1,
+                            "powerSave" to -1,
+                            "thermal" to 0
+                        )
+                        result.success(state)
+                    }
+                    "setSecureScreen" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        runOnUiThread {
+                            if (enabled) {
+                                window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                            } else {
+                                window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                            }
+                        }
+                        result.success(true)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -213,6 +233,26 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
     override fun onFrameReceived(senderShortId: String, data: ByteArray) {
         runOnUiThread {
             methodChannel?.invokeMethod("onFrameReceived", mapOf("sender" to senderShortId, "data" to data))
+        }
+    }
+
+    override fun onPeerRssi(shortId: String, rssi: Int) {
+        runOnUiThread {
+            methodChannel?.invokeMethod("onPeerRssi", mapOf("shortId" to shortId, "rssi" to rssi))
+        }
+    }
+
+    override fun onResourceStateChanged(batteryPct: Int, charging: Int, powerSave: Int, thermal: Int) {
+        runOnUiThread {
+            methodChannel?.invokeMethod(
+                "onResourceStateChanged",
+                mapOf(
+                    "batteryPct" to batteryPct,
+                    "charging" to charging,
+                    "powerSave" to powerSave,
+                    "thermal" to thermal
+                )
+            )
         }
     }
 
