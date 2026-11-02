@@ -33,7 +33,9 @@ impl Capability {
             3 => Ok(Self::UseGatewayForForwarding),
             4 => Ok(Self::PermitOutboundGateway),
             5 => Ok(Self::IssueIntroduction),
-            other => Err(Error::Crypto(format!("Invalid Capability enum value: {other}"))),
+            other => Err(Error::Crypto(format!(
+                "Invalid Capability enum value: {other}"
+            ))),
         }
     }
 

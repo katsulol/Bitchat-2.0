@@ -519,8 +519,11 @@ pub async fn on_peer_connected(short_id: String) -> Result<(), String> {
         .get_session(&peer)
         .and_then(|s| s.peer_id())
         .is_some();
-    svc.delivery_coord
-        .reset_backoff_for_verified_peer(&peer, is_verified, std::time::Instant::now());
+    svc.delivery_coord.reset_backoff_for_verified_peer(
+        &peer,
+        is_verified,
+        std::time::Instant::now(),
+    );
 
     // Auto-initiate handshake with peer if lower ShortId and session not ready
     let my_short = svc.node.identity().short_id();

@@ -69,3 +69,15 @@ To prevent Denial of Service (DoS) and radio starvation:
 - **Per-Peer Bandwidth**: Capped at 8 KB/s or max 16 envelopes per minute.
 - **Control Plane Reservation**: 25% of queue capacity is strictly reserved for handshake and route maintenance traffic, preventing chat flooding from starving session establishment.
 - Envelopes exceeding quota are silently dropped at the gateway boundary without generating error packets.
+
+---
+
+## 5. Phase 5 Extensions: Scoped Trust, Coarse Proximity & Volatile Chat
+
+1. **Scoped Gateway Consent (`docs/TRUST_PROTOCOL.md`)**:
+   - Cryptographic identity verification (`IdentityBind`) does not grant gateway relay or route announcement permissions. Peers must be explicitly authorized in `TrustStore` or present a single-use `GatewayPairingInvitation` or valid one-hop `CapabilityVoucher`.
+2. **Coarse Local BLE Proximity (`docs/PROXIMITY_LIMITATIONS.md`)**:
+   - Local RSSI observations are smoothed into coarse categories (`Immediate`, `Near`, `Far`, `Unknown`) and never transmitted over the network or converted into meter estimates.
+3. **Volatile Chat Boundaries (`docs/VOLATILE_CHAT.md`)**:
+   - Volatile conversations require bilateral authenticated negotiation (`VolatileChat` capability) and never write plaintext or ciphertext to SQLite on compliant nodes. This protects local device storage and cancels expired local outbox retries, but cannot prevent a compromised recipient from copying decrypted content.
+

@@ -242,7 +242,11 @@ pub struct ResourceBudgetManager {
 }
 
 impl ResourceBudgetManager {
-    pub fn new(initial_profile: RelayResourceProfile, min_upgrade_dwell: Duration, now: Instant) -> Self {
+    pub fn new(
+        initial_profile: RelayResourceProfile,
+        min_upgrade_dwell: Duration,
+        now: Instant,
+    ) -> Self {
         Self {
             active_profile: initial_profile,
             last_profile_change: now,
@@ -315,8 +319,7 @@ impl ResourceBudgetManager {
         }
 
         let max_queue = self.active_profile.max_transit_queue_len();
-        let max_data_queue =
-            (max_queue as f32 * (1.0 - CONTROL_PLANE_RESERVATION_RATIO)) as usize;
+        let max_data_queue = (max_queue as f32 * (1.0 - CONTROL_PLANE_RESERVATION_RATIO)) as usize;
 
         if self.current_transit_queue >= max_queue {
             return ResourceAdmission::RejectedTransitQueueFull;
@@ -326,13 +329,21 @@ impl ResourceBudgetManager {
         }
 
         let max_bytes = self.active_profile.transit_bytes_per_sec();
-        let max_data_bytes =
-            (max_bytes as f32 * (1.0 - CONTROL_PLANE_RESERVATION_RATIO)) as usize;
+        let max_data_bytes = (max_bytes as f32 * (1.0 - CONTROL_PLANE_RESERVATION_RATIO)) as usize;
 
-        if !is_control && self.transit_data_bytes_in_window.saturating_add(total_wire_bytes) > max_data_bytes {
+        if !is_control
+            && self
+                .transit_data_bytes_in_window
+                .saturating_add(total_wire_bytes)
+                > max_data_bytes
+        {
             return ResourceAdmission::RejectedControlCapacityReserved;
         }
-        if self.transit_bytes_in_window.saturating_add(total_wire_bytes) > max_bytes {
+        if self
+            .transit_bytes_in_window
+            .saturating_add(total_wire_bytes)
+            > max_bytes
+        {
             return ResourceAdmission::RejectedTransitBudgetExhausted;
         }
 
@@ -354,7 +365,9 @@ impl ResourceBudgetManager {
         }
 
         // Record consumption
-        self.transit_bytes_in_window = self.transit_bytes_in_window.saturating_add(total_wire_bytes);
+        self.transit_bytes_in_window = self
+            .transit_bytes_in_window
+            .saturating_add(total_wire_bytes);
         if !is_control {
             self.transit_data_bytes_in_window = self
                 .transit_data_bytes_in_window

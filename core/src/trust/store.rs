@@ -173,8 +173,12 @@ impl TrustStore {
     /// If `peer` was acting as an introducer, all active vouchers issued by `peer` are
     /// immediately invalidated.
     pub fn revoke_peer(&mut self, peer: PeerId, now_unix: u64) {
-        self.peer_states
-            .insert(peer, PeerTrustState::Revoked { revoked_at_unix: now_unix });
+        self.peer_states.insert(
+            peer,
+            PeerTrustState::Revoked {
+                revoked_at_unix: now_unix,
+            },
+        );
         self.active_vouchers.retain(|_, v| v.issuer != peer);
     }
 
@@ -184,8 +188,12 @@ impl TrustStore {
     /// where `peer` is the subject or issuer, while never punishing an introducer if an
     /// introduced `subject` is blocked.
     pub fn block_peer(&mut self, peer: PeerId, now_unix: u64) {
-        self.peer_states
-            .insert(peer, PeerTrustState::Blocked { blocked_at_unix: now_unix });
+        self.peer_states.insert(
+            peer,
+            PeerTrustState::Blocked {
+                blocked_at_unix: now_unix,
+            },
+        );
         self.active_vouchers
             .retain(|_, v| v.subject != peer && v.issuer != peer);
     }
@@ -323,7 +331,7 @@ impl TrustStore {
         }
 
         let mut imported = 0;
-        for chunk in wire_batch.chunks_exact(SIGNED_VOUCHER_WIRE_LEN) {
+        for chunk in wire_batch.as_chunks::<SIGNED_VOUCHER_WIRE_LEN>().0 {
             let voucher = SignedVoucher::from_wire_bytes(chunk)?;
             self.import_voucher(&voucher, now_monotonic, now_unix)?;
             imported += 1;
@@ -400,12 +408,12 @@ impl TrustStore {
         capability: Capability,
         now_monotonic: Instant,
         now_unix: Option<u64>,
-    ) -> std::result::Result<Option<ActiveVoucherGrant>, ()> {
+    ) -> Result<Option<ActiveVoucherGrant>> {
         self.prune_expired_vouchers(now_monotonic, now_unix);
 
         // If wall-clock validity is unknown, refuse automatic voucher elevation
         let Some(_now_u64) = now_unix else {
-            return Err(());
+            return Err(Error::Crypto("Wall-clock validity unknown".into()));
         };
 
         let mut best: Option<ActiveVoucherGrant> = None;

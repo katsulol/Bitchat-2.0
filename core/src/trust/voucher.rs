@@ -130,9 +130,7 @@ impl SignedVoucher {
             || self.subject.as_bytes() == &[0u8; 32]
             || self.audience.as_bytes() == &[0u8; 32]
         {
-            return Err(Error::Crypto(
-                "Zero PeerId in voucher is prohibited".into(),
-            ));
+            return Err(Error::Crypto("Zero PeerId in voucher is prohibited".into()));
         }
         if self.issuer == self.subject {
             return Err(Error::Crypto("Self-vouching is prohibited".into()));

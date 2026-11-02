@@ -61,3 +61,24 @@
 - **Decision**: Pad plaintext prior to AEAD encryption into fixed bucket sizes (64, 128, 256, 512 bytes). The inner length prefix is authenticated under the AEAD tag. Padded flag is tracked in frame metadata.
 - **Consequences**: Hides message length across radio and gateway transports. Unpadded handshakes and low-level control frames avoid wasted BLE bandwidth.
 
+## ADR-0013: Explicit Gateway Authorization and Single-Use Pairing Invitations
+- **Context**: In Phase 4, incoming gateway bridge peers that passed Ed25519 identity-binding verification were automatically approved in `BridgeService`. Proving ownership of an Ed25519 key pair does not prove permission to consume a node's gateway bandwidth or inject route snapshots.
+- **Decision**: Separate identity verification from gateway authorization. Incoming bridge peers must be explicitly pre-authorized in `TrustStore` (`UseLocalGateway` / `AcceptGatewayRoutes`) or present a valid, unexpired, single-use `GatewayPairingInvitation` signed under `b"bitchat2-gateway-invite-v1"`.
+- **Consequences**: Strangers cannot self-authorize gateway access. Pairing tokens are consumed on first admission and cannot be replayed.
+
+## ADR-0014: Scoped One-Hop Capability Vouchers without Sybil Identity Claims
+- **Context**: Offline and semi-connected groups need a way for a trusted operator to introduce peers to a gateway or relay without manual QR scanning between every pair of devices. However, open decentralized trust graphs are vulnerable to Sybil amplification and transitive pollution.
+- **Decision**: Implement one-hop Ed25519 `CapabilityVoucher` (`b"bitchat2/capability-voucher/v1"`) granting a strict subset of capabilities (`DirectMessage | UseLocalGateway | AcceptGatewayRoutes |VolatileChat`). `VouchOthers` is never delegable via voucher (`A -> B -> C` is structurally impossible). Enforce per-issuer active caps (8), hourly issuance rate limits (4/hr), global vouched caps (64), max 7-day expiry, and cascade invalidation on issuer revocation.
+- **Consequences**: Bounds worst-case compromise of a single trusted voucher issuer without claiming global Sybil resistance.
+
+## ADR-0015: Three-State Resource-Budgeted Relaying with Traffic-Class Token Buckets
+- **Context**: Unbounded third-party BLE mesh flooding under low battery or thermal throttling can starve the device's own user messages, E2E delivery ACKs, and Noise handshakes.
+- **Decision**: Introduce `ResourceBudgetManager` (`Normal`, `Constrained`, `Minimal`) with battery hysteresis (`20%/25%` and `10%/15%`) and three independent token buckets (`SelfOriginatedAndControl`, `TrustedPeerRelay`, `ThirdPartyMeshFlood`) weighted 8:4:1 in `Minimal` mode.
+- **Consequences**: Self-originated messages, handshakes, and ACKs never starve during third-party broadcast storms or low-battery states.
+
+## ADR-0016: Coarse Local BLE Proximity Categories and Honest Volatile Chat Boundaries
+- **Context**: Converting raw BLE RSSI to meter distances produces false precision due to multipath fading and body shadowing. Similarly, calling disappearing messages "guaranteed remote deletion" misleads users about compromised recipients.
+- **Decision**: Classify BLE RSSI into four coarse local categories (`Immediate`, `Near`, `Far`, `Unknown`) using a 5-sample median window, 5–6 dB hysteresis, and 30s staleness decay. Implement `VolatileSessionManager` requiring mutual authenticated negotiation (`VolatileChat`) and `ZeroizeOnDrop` in-memory retention while documenting that a modified recipient cannot be forced to delete received plaintext.
+- **Consequences**: Eliminates false spatial precision and aligns volatile chat security claims with verifiable local enforcement.
+
+

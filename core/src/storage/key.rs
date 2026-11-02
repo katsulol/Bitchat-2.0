@@ -342,13 +342,8 @@ mod tests {
 
         // 7. Restore valid wrapped file, then test deleted KEK / wrong KEK -> fails closed!
         fs::write(&dek_path, &valid_bytes).unwrap();
-        let deleted_kek_provider = WrappedKeyFileProvider::new(
-            &dek_path,
-            &db_path,
-            None,
-            1,
-            KeySecurityLevel::Unknown,
-        );
+        let deleted_kek_provider =
+            WrappedKeyFileProvider::new(&dek_path, &db_path, None, 1, KeySecurityLevel::Unknown);
         assert!(deleted_kek_provider.get_or_create_dek().is_err());
 
         let wrong_kek_provider = WrappedKeyFileProvider::new(

@@ -1,11 +1,13 @@
 # Bitchat 2.0 Progress & Verification Log
 
 ## Status Overview
-- Cumulative Effort Progress: ~92% (Part A Complete; Part B Platform Code Complete; Physical Multi-Device Execution Pending)
-- Current Milestone: **Phase 4 Part B Implementation Complete**
-- Branch: `phase-4-delivery`
-- Part A Status: **100% Simulator & Desktop Network Verified** (120 unit/sim tests, 0 warnings, verified bounds & monotonic epochs)
-- Part B Status: **100% Platform Integration & Desktop Verified** (Android Keystore hardware provider, public runtime daemon, outbox pump, Flutter UI reactive states, Gradle & Flutter analysis clean)
+- Cumulative Effort Progress: Phase 4 Complete; **Phase 5 Gate 0 & Part A Complete (Stopped at Part A Gate for Approval)**
+- Current Milestone: **Phase 5 Part A Acceptance Gate**
+- Branch: `phase-5-trust`
+- Phase 5 Gate 0 Status: **100% Complete & Verified** (`0.1` Gateway Consent, `0.2` Conservative Coverage & Priority Quota, `0.3` BC2K Wrapped Key & Timestamp AAD, `0.4` Strict Hex & BLE Readiness, `0.5` Handshake/Retry Separation & Coalesced Wakeups, `0.6` 400-Run Evaluation Baseline)
+- Phase 5 Part A Status: **100% Complete & Verified** (Tasks 1–7: Scoped Trust, One-Hop Vouchers, Gateway Trust Failover, Resource-Budgeted Relaying, Coarse Proximity, Volatile Chat, E2E Policy Tests & 400-Run Evaluation)
+- Phase 5 Part B Status: **NOT STARTED (Awaiting Human Review & Approval of Part A)**
+
 
 ---
 
@@ -144,3 +146,24 @@
 - **Flutter Framework**:
   - `flutter analyze`: No issues found! (0 errors, 0 warnings).
 - **Crypto Registry**: [`docs/CRYPTO_REVIEW.md`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/docs/CRYPTO_REVIEW.md) updated with `AndroidKeystoreProvider.kt`.
+
+---
+
+## Phase 5 Gate 0 & Part A Verification Matrix (`phase-5-trust`)
+
+| Scope | Test / Artifact | Target / Environment | Status |
+| :--- | :--- | :--- | :--- |
+| **Gate 0.1 — Gateway Consent & Pairing** | `gateway::tests::*` (35 tests incl. stranger reject, single-use invite, replay reject) | Rust Unit (Simulated) | **PASS** |
+| **Gate 0.2 — Coverage, Clock/RNG, Priority Quota** | `mesh::policy::tests::*` (7 tests incl. inferred vs observed, priority rate limit) | Rust SimNetwork (Simulated) | **PASS** |
+| **Gate 0.3 — BC2K Envelope & SQLite AAD** | `storage::tests::*` (10 tests incl. fail-closed recovery, timestamp AAD binding) | Rust SQLite + Memory | **PASS** |
+| **Gate 0.4 — Strict Hex & BLE Readiness** | `identity::tests::*` (7 tests incl. `from_hex_exact`), `BitchatBleService.kt` | Rust Unit + Kotlin Service | **PASS** |
+| **Gate 0.5 — Handshake vs Retry & Coalescing** | `mesh::delivery::tests::*` (7 tests incl. `NoRouteAvailable` stays `Queued`) | Rust Unit (Simulated) | **PASS** |
+| **Gate 0.6 — Baseline & Evaluation Harness** | `core/examples/evaluate.rs`, `evaluation_results.csv`, `docs/PHASE5_GATE0_REVIEW.md` | 400-Run SimNetwork Suite | **PASS** |
+| **Part A Task 1 & 2 — Trust & Vouchers** | `trust::tests::*` (6 tests incl. `Deny > Allow`, non-transitive vouch, caps, cascade) | Rust SQLite + Memory | **PASS** |
+| **Part A Task 3 — Gateway Trust & Failover** | `gateway::bridge::tests::test_gateway_trust_integration_and_atomic_failover` | Rust Unit (Simulated) | **PASS** |
+| **Part A Task 4 — Resource-Budgeted Relaying** | `mesh::resource::tests::*` (3 tests incl. hysteresis & 1:4:8 token buckets) | Rust Unit (Simulated) | **PASS** |
+| **Part A Task 5 — Coarse BLE Proximity** | `mesh::proximity::tests::*` (2 tests incl. median window, hysteresis, 30s decay) | Rust Unit (Simulated) | **PASS** |
+| **Part A Task 6 — Volatile Chat Negotiation** | `storage::volatile::tests::*` (2 tests incl. downgrade reject & zeroizing expiry) | Rust Unit (Simulated) | **PASS** |
+| **Part A Task 7 — Public-Runtime E2E Suite** | `test_phase5_policy_e2e` (5 integration tests) | Desktop Multi-Node Integration | **PASS** |
+| **Part A Evaluation & Gate Docs** | [`docs/PHASE5_EVALUATION.md`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/docs/PHASE5_EVALUATION.md), [`docs/PART_A_ACCEPTANCE_REVIEW.md`](file:///C:/Users/pulki/OneDrive/Pictures/Desktop/Bitchat/docs/PART_A_ACCEPTANCE_REVIEW.md) | 400-Run Benchmark & Docs | **PASS** |
+

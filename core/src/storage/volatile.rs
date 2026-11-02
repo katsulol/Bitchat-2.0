@@ -50,9 +50,7 @@ impl VolatileFrameKind {
             2 => Ok(Self::Accept),
             3 => Ok(Self::RejectUnsupported),
             4 => Ok(Self::CloseSession),
-            other => Err(Error::Crypto(format!(
-                "Invalid VolatileFrameKind: {other}"
-            ))),
+            other => Err(Error::Crypto(format!("Invalid VolatileFrameKind: {other}"))),
         }
     }
 }
@@ -70,7 +68,8 @@ impl VolatileNegotiationFrame {
     pub fn new_offer(retention_secs: u32) -> Self {
         let mut session_id = [0u8; 16];
         OsRng.fill_bytes(&mut session_id);
-        let bounded = retention_secs.clamp(MIN_VOLATILE_RETENTION_SECS, MAX_VOLATILE_RETENTION_SECS);
+        let bounded =
+            retention_secs.clamp(MIN_VOLATILE_RETENTION_SECS, MAX_VOLATILE_RETENTION_SECS);
         Self {
             version: VOLATILE_WIRE_VERSION,
             kind: VolatileFrameKind::Offer,
@@ -80,7 +79,8 @@ impl VolatileNegotiationFrame {
     }
 
     pub fn new_accept(session_id: [u8; 16], retention_secs: u32) -> Self {
-        let bounded = retention_secs.clamp(MIN_VOLATILE_RETENTION_SECS, MAX_VOLATILE_RETENTION_SECS);
+        let bounded =
+            retention_secs.clamp(MIN_VOLATILE_RETENTION_SECS, MAX_VOLATILE_RETENTION_SECS);
         Self {
             version: VOLATILE_WIRE_VERSION,
             kind: VolatileFrameKind::Accept,
@@ -142,7 +142,8 @@ impl VolatileNegotiationFrame {
         let retention_secs = u32::from_be_bytes(ret_bytes);
 
         if matches!(kind, VolatileFrameKind::Offer | VolatileFrameKind::Accept)
-            && !(MIN_VOLATILE_RETENTION_SECS..=MAX_VOLATILE_RETENTION_SECS).contains(&retention_secs)
+            && !(MIN_VOLATILE_RETENTION_SECS..=MAX_VOLATILE_RETENTION_SECS)
+                .contains(&retention_secs)
         {
             return Err(Error::Crypto(format!(
                 "Volatile retention_secs {} out of allowed bounds [{}..={}]",
@@ -299,28 +300,26 @@ impl VolatileSessionManager {
                     bounded_secs,
                 )))
             }
-            VolatileFrameKind::Accept => {
-                match self.sessions.get(&peer) {
-                    Some(VolatileSessionState::PendingNegotiation {
-                        session_id,
-                        requested_retention,
-                    }) if *session_id == frame.session_id => {
-                        let peer_ret = Duration::from_secs(frame.retention_secs as u64);
-                        let effective = (*requested_retention).min(peer_ret);
-                        self.sessions.insert(
-                            peer,
-                            VolatileSessionState::Active {
-                                session_id: frame.session_id,
-                                effective_retention: effective,
-                            },
-                        );
-                        Ok(None)
-                    }
-                    _ => Err(Error::Crypto(
-                        "Unexpected or replayed volatile Accept frame".into(),
-                    )),
+            VolatileFrameKind::Accept => match self.sessions.get(&peer) {
+                Some(VolatileSessionState::PendingNegotiation {
+                    session_id,
+                    requested_retention,
+                }) if *session_id == frame.session_id => {
+                    let peer_ret = Duration::from_secs(frame.retention_secs as u64);
+                    let effective = (*requested_retention).min(peer_ret);
+                    self.sessions.insert(
+                        peer,
+                        VolatileSessionState::Active {
+                            session_id: frame.session_id,
+                            effective_retention: effective,
+                        },
+                    );
+                    Ok(None)
                 }
-            }
+                _ => Err(Error::Crypto(
+                    "Unexpected or replayed volatile Accept frame".into(),
+                )),
+            },
             VolatileFrameKind::RejectUnsupported => {
                 if let Some(VolatileSessionState::PendingNegotiation { session_id, .. }) =
                     self.sessions.get(&peer)
@@ -345,10 +344,20 @@ impl VolatileSessionManager {
     ///
     /// If `require_volatile` is true or the conversation is in a volatile state, this method
     /// NEVER permits falling back to `MessageMode::Normal`.
-    pub fn check_send_policy(&self, peer: &PeerId, requested_mode: MessageMode) -> VolatileSendCheck {
+    pub fn check_send_policy(
+        &self,
+        peer: &PeerId,
+        requested_mode: MessageMode,
+    ) -> VolatileSendCheck {
         let state = self.session_state(peer);
         match (requested_mode, state) {
-            (_, VolatileSessionState::Active { effective_retention, .. }) => {
+            (
+                _,
+                VolatileSessionState::Active {
+                    effective_retention,
+                    ..
+                },
+            ) => {
                 // Once volatile session is active, all sends in this session use volatile Privacy storage
                 VolatileSendCheck::AllowVolatile {
                     ttl: effective_retention,
@@ -396,7 +405,9 @@ impl VolatileSessionManager {
         };
 
         if plaintext.len() > DEFAULT_MAX_BYTES_PER_CONVERSATION {
-            return Err(Error::Storage("Volatile message exceeds conversation byte cap".into()));
+            return Err(Error::Storage(
+                "Volatile message exceeds conversation byte cap".into(),
+            ));
         }
 
         let queue = self.messages.entry(peer).or_default();

@@ -12,6 +12,9 @@ use bitchat2_core::mesh::policy::{
     AdaptiveFlood, AdaptiveFloodConfig, CoverageAwareFlood, CoverageAwareFloodConfig, NaiveFlood,
 };
 use bitchat2_core::mesh::relay::MeshNode;
+use bitchat2_core::mesh::resource::{
+    RelayResourceProfile, ResourceAwareRelayPolicy, ResourceBudgetManager,
+};
 use bitchat2_core::transport::sim::SimNetwork;
 
 const NUM_SEEDS: usize = 20;
@@ -43,6 +46,7 @@ enum PolicyType {
     Naive,
     Adaptive,
     CoverageAware,
+    CoverageAwareResourceMinimal,
 }
 
 impl PolicyType {
@@ -51,6 +55,7 @@ impl PolicyType {
             PolicyType::Naive => "NaiveFlood",
             PolicyType::Adaptive => "AdaptiveFlood",
             PolicyType::CoverageAware => "CoverageAware",
+            PolicyType::CoverageAwareResourceMinimal => "Coverage+ResMin",
         }
     }
 }
@@ -258,6 +263,25 @@ async fn run_single_simulation(
                     }
                     MeshNode::new(id, t, Box::new(pol))
                 }
+                PolicyType::CoverageAwareResourceMinimal => {
+                    let pol = CoverageAwareFlood::with_seed(
+                        CoverageAwareFloodConfig::default(),
+                        node_seed,
+                    );
+                    let local_nbrs = net.neighbors_of(s);
+                    for &nbr in &local_nbrs {
+                        pol.record_observed(nbr, Instant::now());
+                        let nbr_nbrs = net.neighbors_of(nbr);
+                        pol.record_claimed_neighbors(nbr, nbr_nbrs, Instant::now());
+                    }
+                    let budget = ResourceBudgetManager::new(
+                        RelayResourceProfile::Minimal,
+                        Duration::from_secs(10),
+                        Instant::now(),
+                    );
+                    let res_pol = ResourceAwareRelayPolicy::new(pol, budget);
+                    MeshNode::new(id, t, Box::new(res_pol))
+                }
             }
         })
         .collect();
@@ -373,6 +397,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PolicyType::Naive,
         PolicyType::Adaptive,
         PolicyType::CoverageAware,
+        PolicyType::CoverageAwareResourceMinimal,
     ];
 
     let mut csv_file = File::create("evaluation_results.csv")?;

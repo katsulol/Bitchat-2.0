@@ -458,10 +458,7 @@ mod tests {
         // 2. Reject placeholder strings and non-hex characters (no character stripping!)
         assert_eq!(ShortId::from_hex("Initializing..."), None);
         assert_eq!(ShortId::from_user_input("Initializing..."), None);
-        assert_eq!(
-            ShortId::from_hex("0123456789abcdef_extra_garbage_12"),
-            None
-        );
+        assert_eq!(ShortId::from_hex("0123456789abcdef_extra_garbage_12"), None);
         assert_eq!(ShortId::from_user_input("0123-4567-89ab-cdef"), None);
         assert_eq!(ShortId::from_user_input("0123456789abcdeg"), None);
 
@@ -469,7 +466,10 @@ mod tests {
         assert_eq!(ShortId::from_hex(""), None);
         assert_eq!(ShortId::from_hex("0123456789abcde"), None); // 15 chars
         assert_eq!(ShortId::from_hex("0123456789abcdef0"), None); // 17 chars
-        assert_eq!(ShortId::from_user_input("０１２３４５６７８９ａｂｃｄｅｆ"), None); // fullwidth unicode
+        assert_eq!(
+            ShortId::from_user_input("０１２３４５６７８９ａｂｃｄｅｆ"),
+            None
+        ); // fullwidth unicode
         assert_eq!(PeerId::from_hex("012345"), None);
 
         // 4. Reject all-zero broadcast ShortId in user input and all-zero PeerId

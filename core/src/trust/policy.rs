@@ -77,7 +77,7 @@ impl TrustPolicy {
                         expires_at: Some(grant.expires_at_monotonic),
                     };
                 }
-                Err(()) => {
+                Err(_) => {
                     // Check if a voucher exists for this subject/capability when clock is unknown
                     store.prune_expired_vouchers(ctx.now_monotonic, None);
                     return AuthorizationDecision {

@@ -231,7 +231,8 @@ impl Default for AdaptiveFlood {
 
 impl AdaptiveFlood {
     pub fn new(config: AdaptiveFloodConfig) -> Self {
-        let quota = PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
+        let quota =
+            PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
         Self {
             config,
             seeded_rng: None,
@@ -240,7 +241,8 @@ impl AdaptiveFlood {
     }
 
     pub fn with_seed(config: AdaptiveFloodConfig, seed: u64) -> Self {
-        let quota = PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
+        let quota =
+            PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
         Self {
             config,
             seeded_rng: Some(Arc::new(Mutex::new(DeterministicRng::new(seed)))),
@@ -525,7 +527,8 @@ impl CoverageAwareFlood {
             config.max_neighbors,
             config.neighbor_ttl,
         )));
-        let quota = PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
+        let quota =
+            PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
         Self {
             config,
             table,
@@ -539,7 +542,8 @@ impl CoverageAwareFlood {
             config.max_neighbors,
             config.neighbor_ttl,
         )));
-        let quota = PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
+        let quota =
+            PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
         Self {
             config,
             table,

@@ -286,94 +286,110 @@ impl GatewayBridge {
             )));
         }
 
-        let (mut send_stream, mut recv_stream, remote_bitchat_pubkey) =
-            match contact_hint {
-                Some(contact) => {
-                    // Verify pinned host EndpointId before presenting any invitation capability
-                    let pinned_id = contact.endpoint_id().map_err(|e| {
-                        Error::Transport(format!("Invalid pinned endpoint id in contact: {e}"))
-                    })?;
-                    if remote_id != pinned_id {
+        let (mut send_stream, mut recv_stream, remote_bitchat_pubkey) = match contact_hint {
+            Some(contact) => {
+                // Verify pinned host EndpointId before presenting any invitation capability
+                let pinned_id = contact.endpoint_id().map_err(|e| {
+                    Error::Transport(format!("Invalid pinned endpoint id in contact: {e}"))
+                })?;
+                if remote_id != pinned_id {
+                    self.stats.inc_rejected();
+                    return Err(Error::Transport(
+                        "Connected remote EndpointId does not match pinned contact".into(),
+                    ));
+                }
+
+                // We dialed: open bi stream and send Hello
+                let (mut s, r) = conn
+                    .open_bi()
+                    .await
+                    .map_err(|e| Error::Transport(format!("Failed to open bi stream: {e}")))?;
+
+                let binding = IdentityBinding::sign(
+                    &self.bitchat_identity,
+                    &self.endpoint.id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                );
+                let hello = GatewayMessage::Hello(GatewayHello {
+                    protocol_version: WIRE_VERSION,
+                    binding,
+                    invitation_token: contact.invitation_token.clone(),
+                });
+
+                hello
+                    .write_framed(&mut s)
+                    .await
+                    .map_err(|e| Error::Transport(format!("Failed to send Hello: {e}")))?;
+
+                let pubkey = contact.binding.bitchat_pubkey().map_err(|e| {
+                    Error::Transport(format!("Invalid Bitchat pubkey in contact: {e}"))
+                })?;
+                (s, r, pubkey)
+            }
+            None => {
+                // Remote dialed: accept bi stream and read Hello
+                let (mut s, mut r) = conn
+                    .accept_bi()
+                    .await
+                    .map_err(|e| Error::Transport(format!("Failed to accept bi stream: {e}")))?;
+
+                let hello_msg = GatewayMessage::read_framed(&mut r, DEFAULT_READ_TIMEOUT)
+                    .await
+                    .map_err(|e| Error::Transport(format!("Failed to read Hello: {e}")))?;
+
+                let pubkey = if let GatewayMessage::Hello(hello) = hello_msg {
+                    hello.binding.verify(&remote_id).map_err(|e| {
                         self.stats.inc_rejected();
+                        Error::Transport(format!("Binding verification failed: {e}"))
+                    })?;
+                    let pk = hello.binding.bitchat_pubkey().map_err(|e| {
+                        self.stats.inc_rejected();
+                        Error::Transport(format!("Invalid Bitchat public key: {e}"))
+                    })?;
+
+                    let remote_peer_id = PeerId(pk);
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
+                    // Evaluate Task 1 TrustPolicy capability check + GatewayConfig consent state!
+                    let mut cfg = self.config.write().await;
+                    let mut ts = self.trust_store.write().await;
+
+                    let auth_ctx = AuthorizationContext {
+                        now_monotonic: Instant::now(),
+                        now_unix: Some(now_secs),
+                        gateway_opted_in: cfg.enabled,
+                        allow_vouched_gateway_forwarding: cfg.allow_invitation_auto_admit,
+                    };
+                    let trust_dec = TrustPolicy::authorize(
+                        &mut ts,
+                        &remote_peer_id,
+                        Capability::UseGatewayForForwarding,
+                        &auth_ctx,
+                    );
+
+                    if !cfg.enabled || trust_dec.reason == AuthReason::LocalBlocked {
+                        drop(ts);
+                        drop(cfg);
+                        self.stats.inc_rejected();
+                        let _ = (GatewayMessage::Rejected {
+                            transfer_id: 0,
+                            reason: RejectReason::Unauthorized,
+                        })
+                        .write_framed(&mut s)
+                        .await;
                         return Err(Error::Transport(
-                            "Connected remote EndpointId does not match pinned contact".into(),
+                            "Gateway disabled or peer identity blocked".into(),
                         ));
                     }
 
-                    // We dialed: open bi stream and send Hello
-                    let (mut s, r) = conn
-                        .open_bi()
-                        .await
-                        .map_err(|e| Error::Transport(format!("Failed to open bi stream: {e}")))?;
-
-                    let binding = IdentityBinding::sign(
-                        &self.bitchat_identity,
-                        &self.endpoint.id(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                    );
-                    let hello = GatewayMessage::Hello(GatewayHello {
-                        protocol_version: WIRE_VERSION,
-                        binding,
-                        invitation_token: contact.invitation_token.clone(),
-                    });
-
-                    hello
-                        .write_framed(&mut s)
-                        .await
-                        .map_err(|e| Error::Transport(format!("Failed to send Hello: {e}")))?;
-
-                    let pubkey = contact.binding.bitchat_pubkey().map_err(|e| {
-                        Error::Transport(format!("Invalid Bitchat pubkey in contact: {e}"))
-                    })?;
-                    (s, r, pubkey)
-                }
-                None => {
-                    // Remote dialed: accept bi stream and read Hello
-                    let (mut s, mut r) = conn.accept_bi().await.map_err(|e| {
-                        Error::Transport(format!("Failed to accept bi stream: {e}"))
-                    })?;
-
-                    let hello_msg = GatewayMessage::read_framed(&mut r, DEFAULT_READ_TIMEOUT)
-                        .await
-                        .map_err(|e| Error::Transport(format!("Failed to read Hello: {e}")))?;
-
-                    let pubkey = if let GatewayMessage::Hello(hello) = hello_msg {
-                        hello.binding.verify(&remote_id).map_err(|e| {
-                            self.stats.inc_rejected();
-                            Error::Transport(format!("Binding verification failed: {e}"))
-                        })?;
-                        let pk = hello.binding.bitchat_pubkey().map_err(|e| {
-                            self.stats.inc_rejected();
-                            Error::Transport(format!("Invalid Bitchat public key: {e}"))
-                        })?;
-
-                        let remote_peer_id = PeerId(pk);
-                        let now_secs = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-
-                        // Evaluate Task 1 TrustPolicy capability check + GatewayConfig consent state!
-                        let mut cfg = self.config.write().await;
-                        let mut ts = self.trust_store.write().await;
-
-                        let auth_ctx = AuthorizationContext {
-                            now_monotonic: Instant::now(),
-                            now_unix: Some(now_secs),
-                            gateway_opted_in: cfg.enabled,
-                            allow_vouched_gateway_forwarding: cfg.allow_invitation_auto_admit,
-                        };
-                        let trust_dec = TrustPolicy::authorize(
-                            &mut ts,
-                            &remote_peer_id,
-                            Capability::UseGatewayForForwarding,
-                            &auth_ctx,
-                        );
-
-                        if !cfg.enabled || trust_dec.reason == AuthReason::LocalBlocked {
+                    match cfg.consent_state(&remote_id) {
+                        GatewayConsentState::Blocked | GatewayConsentState::Revoked => {
                             drop(ts);
                             drop(cfg);
                             self.stats.inc_rejected();
@@ -384,12 +400,15 @@ impl GatewayBridge {
                             .write_framed(&mut s)
                             .await;
                             return Err(Error::Transport(
-                                "Gateway disabled or peer identity blocked".into(),
+                                "Remote gateway peer is blocked or revoked".into(),
                             ));
                         }
-
-                        match cfg.consent_state(&remote_id) {
-                            GatewayConsentState::Blocked | GatewayConsentState::Revoked => {
+                        GatewayConsentState::Approved => {
+                            if matches!(
+                                ts.peer_state(&remote_peer_id),
+                                PeerTrustState::Revoked { .. } | PeerTrustState::Blocked { .. }
+                            ) {
+                                cfg.revoke_gateway(&remote_id);
                                 drop(ts);
                                 drop(cfg);
                                 self.stats.inc_rejected();
@@ -400,101 +419,75 @@ impl GatewayBridge {
                                 .write_framed(&mut s)
                                 .await;
                                 return Err(Error::Transport(
-                                    "Remote gateway peer is blocked or revoked".into(),
+                                    "Remote gateway peer identity was revoked/blocked".into(),
                                 ));
                             }
-                            GatewayConsentState::Approved => {
-                                if matches!(
-                                    ts.peer_state(&remote_peer_id),
-                                    PeerTrustState::Revoked { .. } | PeerTrustState::Blocked { .. }
-                                ) {
-                                    cfg.revoke_gateway(&remote_id);
-                                    drop(ts);
-                                    drop(cfg);
-                                    self.stats.inc_rejected();
-                                    let _ = (GatewayMessage::Rejected {
-                                        transfer_id: 0,
-                                        reason: RejectReason::Unauthorized,
-                                    })
-                                    .write_framed(&mut s)
-                                    .await;
-                                    return Err(Error::Transport(
-                                        "Remote gateway peer identity was revoked/blocked".into(),
-                                    ));
-                                }
-                                drop(ts);
-                                drop(cfg);
-                            }
-                            GatewayConsentState::Unrecognized
-                            | GatewayConsentState::IdentityVerifiedPendingConsent => {
-                                let admitted = if trust_dec.outcome == AuthOutcome::Allow {
-                                    cfg.approve_gateway(remote_id)
-                                } else if let Some(ref token) = hello.invitation_token {
-                                    match cfg.redeem_invitation(
-                                        token,
-                                        remote_id,
-                                        pk,
-                                        Instant::now(),
-                                    ) {
-                                        Ok(GatewayConsentState::Approved) => {
-                                            let mut caps = HashSet::new();
-                                            caps.insert(Capability::UseGatewayForForwarding);
-                                            caps.insert(Capability::ReceiveDirectMessage);
-                                            let _ =
-                                                ts.approve_peer(remote_peer_id, caps, now_secs);
-                                            true
-                                        }
-                                        Ok(_) => false,
-                                        Err(e) => {
-                                            drop(ts);
-                                            drop(cfg);
-                                            self.stats.inc_rejected();
-                                            let _ = (GatewayMessage::Rejected {
-                                                transfer_id: 0,
-                                                reason: RejectReason::Unauthorized,
-                                            })
-                                            .write_framed(&mut s)
-                                            .await;
-                                            return Err(Error::Transport(format!(
-                                                "Pairing invitation rejected: {e}"
-                                            )));
-                                        }
+                            drop(ts);
+                            drop(cfg);
+                        }
+                        GatewayConsentState::Unrecognized
+                        | GatewayConsentState::IdentityVerifiedPendingConsent => {
+                            let admitted = if trust_dec.outcome == AuthOutcome::Allow {
+                                cfg.approve_gateway(remote_id)
+                            } else if let Some(ref token) = hello.invitation_token {
+                                match cfg.redeem_invitation(token, remote_id, pk, Instant::now()) {
+                                    Ok(GatewayConsentState::Approved) => {
+                                        let mut caps = HashSet::new();
+                                        caps.insert(Capability::UseGatewayForForwarding);
+                                        caps.insert(Capability::ReceiveDirectMessage);
+                                        let _ = ts.approve_peer(remote_peer_id, caps, now_secs);
+                                        true
                                     }
-                                } else {
-                                    let _ =
-                                        cfg.record_verified_pending(remote_id, pk, Instant::now());
-                                    let _ = ts.record_identity_verified(remote_peer_id);
-                                    false
-                                };
-                                drop(ts);
-                                drop(cfg);
-
-                                if !admitted {
-                                    self.stats.inc_rejected();
-                                    let _ = (GatewayMessage::Rejected {
-                                        transfer_id: 0,
-                                        reason: RejectReason::Unauthorized,
-                                    })
-                                    .write_framed(&mut s)
-                                    .await;
-                                    return Err(Error::Transport(
-                                        "Identity verified; awaiting explicit host gateway approval"
-                                            .into(),
-                                    ));
+                                    Ok(_) => false,
+                                    Err(e) => {
+                                        drop(ts);
+                                        drop(cfg);
+                                        self.stats.inc_rejected();
+                                        let _ = (GatewayMessage::Rejected {
+                                            transfer_id: 0,
+                                            reason: RejectReason::Unauthorized,
+                                        })
+                                        .write_framed(&mut s)
+                                        .await;
+                                        return Err(Error::Transport(format!(
+                                            "Pairing invitation rejected: {e}"
+                                        )));
+                                    }
                                 }
+                            } else {
+                                let _ = cfg.record_verified_pending(remote_id, pk, Instant::now());
+                                let _ = ts.record_identity_verified(remote_peer_id);
+                                false
+                            };
+                            drop(ts);
+                            drop(cfg);
+
+                            if !admitted {
+                                self.stats.inc_rejected();
+                                let _ = (GatewayMessage::Rejected {
+                                    transfer_id: 0,
+                                    reason: RejectReason::Unauthorized,
+                                })
+                                .write_framed(&mut s)
+                                .await;
+                                return Err(Error::Transport(
+                                    "Identity verified; awaiting explicit host gateway approval"
+                                        .into(),
+                                ));
                             }
                         }
-                        pk
-                    } else {
-                        self.stats.inc_rejected();
-                        return Err(Error::Transport(
-                            "Expected Hello as first gateway frame".into(),
-                        ));
-                    };
+                    }
+                    pk
+                } else {
+                    self.stats.inc_rejected();
+                    return Err(Error::Transport(
+                        "Expected Hello as first gateway frame".into(),
+                    ));
+                };
 
-                    (s, r, pubkey)
-                }
-            };
+                (s, r, pubkey)
+            }
+        };
 
         let (outbound_tx, mut outbound_rx) = mpsc::channel::<GatewayMessage>(64);
 
@@ -997,10 +990,24 @@ mod tests {
         {
             let mut routes = routes_arc.write().await;
             routes
-                .apply_snapshot(gw1_id, 1, 10, vec![target_short], Duration::from_secs(60), now)
+                .apply_snapshot(
+                    gw1_id,
+                    1,
+                    10,
+                    vec![target_short],
+                    Duration::from_secs(60),
+                    now,
+                )
                 .unwrap();
             routes
-                .apply_snapshot(gw2_id, 1, 5, vec![target_short], Duration::from_secs(60), now)
+                .apply_snapshot(
+                    gw2_id,
+                    1,
+                    5,
+                    vec![target_short],
+                    Duration::from_secs(60),
+                    now,
+                )
                 .unwrap();
         }
 
