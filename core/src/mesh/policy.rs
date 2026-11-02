@@ -1,12 +1,26 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use rand::Rng;
 
 use crate::identity::ShortId;
 
-// ponytail: adaptive relay policy with density-scaled jitter, counter-based suppression, and coverage-aware neighborhood tracking.
+// ponytail: adaptive relay policy with seeded deterministic RNG, injected clock, bounded priority quota,
+// and explicit separation of direct packet-observed vs third-party inferred neighborhood coverage.
+
+/// Explicit confidence level of neighborhood coverage evaluation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageConfidence {
+    /// Neighbor discovery is empty or incomplete; cannot prove coverage.
+    UnknownIncomplete,
+    /// At least one local neighbor has neither transmitted a duplicate nor been covered.
+    UncoveredNeighborsRemain,
+    /// All local neighbors are covered, but relies on third-party claimed neighbor lists (inferred, not proven receipt).
+    InferredComplete,
+    /// Every local neighbor (excluding sender) has directly transmitted a duplicate of THIS specific packet.
+    DirectlyObservedComplete,
+}
 
 /// Context provided to relay policies when an envelope arrives for forwarding.
 #[derive(Debug, Clone)]
@@ -14,10 +28,12 @@ pub struct RelayContext {
     pub neighbor_count: usize,
     pub hop_count: u8,
     pub priority: bool,
+    pub is_addressed: bool,
     pub duplicates_heard: u32,
     pub from_peer: Option<ShortId>,
     pub local_neighbors: Vec<ShortId>,
     pub duplicate_peers: Vec<ShortId>,
+    pub now: Option<Instant>,
 }
 
 impl RelayContext {
@@ -31,10 +47,90 @@ impl RelayContext {
             neighbor_count,
             hop_count,
             priority,
+            is_addressed: false,
             duplicates_heard,
             from_peer: None,
             local_neighbors: Vec::new(),
             duplicate_peers: Vec::new(),
+            now: None,
+        }
+    }
+}
+
+/// Deterministic splitmix64 PRNG for reproducible simulation and evaluation.
+#[derive(Debug, Clone)]
+pub struct DeterministicRng {
+    state: u64,
+}
+
+impl DeterministicRng {
+    pub fn new(seed: u64) -> Self {
+        Self {
+            state: seed ^ 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    pub fn gen_range_inclusive(&mut self, max_inclusive: u64) -> u64 {
+        if max_inclusive == 0 {
+            return 0;
+        }
+        self.next_u64() % (max_inclusive.saturating_add(1))
+    }
+}
+
+/// Bounded quota window preventing unauthenticated priority flags from granting unbounded bypass.
+#[derive(Debug, Clone)]
+pub struct PriorityQuotaWindow {
+    window_start: Option<Instant>,
+    window_duration: Duration,
+    used_in_window: u32,
+    max_per_window: u32,
+}
+
+impl PriorityQuotaWindow {
+    pub fn new(max_per_window: u32, window_duration: Duration) -> Self {
+        Self {
+            window_start: None,
+            window_duration,
+            used_in_window: 0,
+            max_per_window,
+        }
+    }
+
+    pub fn try_consume(&mut self, now: Instant) -> bool {
+        if self.max_per_window == 0 {
+            return false;
+        }
+        match self.window_start {
+            Some(start) if now.saturating_duration_since(start) < self.window_duration => {
+                self.used_in_window = self.used_in_window.saturating_add(1);
+                self.used_in_window <= self.max_per_window
+            }
+            _ => {
+                self.window_start = Some(now);
+                self.used_in_window = 1;
+                true
+            }
+        }
+    }
+
+    pub fn is_within_quota(&self, now: Instant) -> bool {
+        if self.max_per_window == 0 {
+            return false;
+        }
+        match self.window_start {
+            Some(start) if now.saturating_duration_since(start) < self.window_duration => {
+                self.used_in_window <= self.max_per_window
+            }
+            _ => true,
         }
     }
 }
@@ -97,8 +193,12 @@ pub struct AdaptiveFloodConfig {
     pub max_delay: Duration,
     /// Number of duplicate packets heard that cancels pending relay (k threshold).
     pub suppression_threshold: u8,
-    /// Delay used for priority messages.
+    /// Delay used for priority messages within quota.
     pub priority_delay: Duration,
+    /// Maximum priority packets permitted to bypass delay/suppression per quota window.
+    pub max_priority_per_window: u32,
+    /// Duration of the priority bypass quota window.
+    pub priority_window: Duration,
 }
 
 impl Default for AdaptiveFloodConfig {
@@ -109,17 +209,18 @@ impl Default for AdaptiveFloodConfig {
             max_delay: Duration::from_millis(300),
             suppression_threshold: 2,
             priority_delay: Duration::ZERO,
+            max_priority_per_window: 8,
+            priority_window: Duration::from_secs(10),
         }
     }
 }
 
 /// Adaptive mesh relay policy combining density-scaled random delays and counter-based suppression.
-///
-/// Reduces broadcast storm contention by spreading transmission bursts in dense topologies,
-/// and cancels redundant rebroadcasts once a neighborhood is already covered by peer transmissions.
 #[derive(Debug, Clone)]
 pub struct AdaptiveFlood {
     config: AdaptiveFloodConfig,
+    seeded_rng: Option<Arc<Mutex<DeterministicRng>>>,
+    priority_quota: Arc<Mutex<PriorityQuotaWindow>>,
 }
 
 impl Default for AdaptiveFlood {
@@ -130,7 +231,21 @@ impl Default for AdaptiveFlood {
 
 impl AdaptiveFlood {
     pub fn new(config: AdaptiveFloodConfig) -> Self {
-        Self { config }
+        let quota = PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
+        Self {
+            config,
+            seeded_rng: None,
+            priority_quota: Arc::new(Mutex::new(quota)),
+        }
+    }
+
+    pub fn with_seed(config: AdaptiveFloodConfig, seed: u64) -> Self {
+        let quota = PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
+        Self {
+            config,
+            seeded_rng: Some(Arc::new(Mutex::new(DeterministicRng::new(seed)))),
+            priority_quota: Arc::new(Mutex::new(quota)),
+        }
     }
 
     pub fn config(&self) -> &AdaptiveFloodConfig {
@@ -146,15 +261,8 @@ impl AdaptiveFlood {
         Duration::from_millis(capped_ms as u64)
     }
 
-    // =========================================================================
-    // EXTENSION POINT (Phase 5): Device-Class-Aware Routing
-    // In Phase 5, nodes will inspect battery levels, power state, and device role
-    // (e.g. mains-powered gateway vs ultra-low-power BLE peripheral) to adjust
-    // relay eligibility, delay windows, and duty cycles.
-    // =========================================================================
     #[inline]
     pub fn is_relay_eligible(&self, _ctx: &RelayContext) -> bool {
-        // Default behavior: all nodes participate in mesh forwarding.
         true
     }
 }
@@ -165,8 +273,13 @@ impl RelayPolicy for AdaptiveFlood {
     }
 
     fn delay(&self, ctx: &RelayContext) -> Duration {
+        let now = ctx.now.unwrap_or_else(Instant::now);
         if ctx.priority {
-            return self.config.priority_delay;
+            if let Ok(mut q) = self.priority_quota.lock() {
+                if q.try_consume(now) {
+                    return self.config.priority_delay;
+                }
+            }
         }
 
         let upper = self.window_upper_bound(ctx.neighbor_count);
@@ -174,6 +287,12 @@ impl RelayPolicy for AdaptiveFlood {
 
         if upper_ms == 0 {
             Duration::ZERO
+        } else if let Some(ref rng_arc) = self.seeded_rng {
+            let jitter_ms = rng_arc
+                .lock()
+                .map(|mut r| r.gen_range_inclusive(upper_ms))
+                .unwrap_or(upper_ms / 2);
+            Duration::from_millis(jitter_ms)
         } else {
             let mut rng = rand::thread_rng();
             let jitter_ms = rng.gen_range(0..=upper_ms);
@@ -182,12 +301,15 @@ impl RelayPolicy for AdaptiveFlood {
     }
 
     fn suppress_after(&self, ctx: &RelayContext) -> u8 {
+        let now = ctx.now.unwrap_or_else(Instant::now);
         if ctx.priority {
-            // Priority bypass: priority messages are NEVER suppressed
-            u8::MAX
-        } else {
-            self.config.suppression_threshold
+            if let Ok(q) = self.priority_quota.lock() {
+                if q.is_within_quota(now) {
+                    return u8::MAX;
+                }
+            }
         }
+        self.config.suppression_threshold
     }
 }
 
@@ -238,7 +360,6 @@ impl NeighborTable {
     pub fn record_observed(&mut self, peer: ShortId, now: Instant) {
         self.cleanup_stale(now);
         if self.entries.len() >= self.max_entries && !self.entries.contains_key(&peer) {
-            // Evict oldest entry
             if let Some((&oldest, _)) = self.entries.iter().min_by_key(|(_, v)| v.last_seen) {
                 self.entries.remove(&oldest);
             }
@@ -286,49 +407,61 @@ impl NeighborTable {
             .retain(|_, obs| now.saturating_duration_since(obs.last_seen) <= ttl);
     }
 
-    /// Check whether a set of local neighbors is fully covered by overheard duplicate transmissions.
-    pub fn is_coverage_complete(
+    /// Evaluate neighborhood coverage with explicit distinction between:
+    /// - `DirectlyObservedComplete`: every non-sender local neighbor directly transmitted a duplicate of THIS packet.
+    /// - `InferredComplete`: remaining local neighbors are only listed in third-party `reported_neighbors` claims.
+    /// - `UnknownIncomplete`: `local_neighbors` is empty (incomplete discovery) or contains only `from_peer` with no other verified peers.
+    /// - `UncoveredNeighborsRemain`: at least one local neighbor is neither directly observed nor inferred covered.
+    pub fn evaluate_coverage(
         &self,
         local_neighbors: &[ShortId],
         duplicate_sources: &[ShortId],
         from_peer: Option<ShortId>,
         now: Instant,
-    ) -> bool {
+    ) -> CoverageConfidence {
+        // Empty neighbor list indicates incomplete or unknown discovery; NEVER auto-prove coverage!
         if local_neighbors.is_empty() {
-            return true;
+            return CoverageConfidence::UnknownIncomplete;
         }
 
-        // Neighbors needing coverage exclude the sender we received this packet from
-        let mut uncovered: HashSet<ShortId> = local_neighbors.iter().copied().collect();
+        let mut direct_uncovered: HashSet<ShortId> = local_neighbors.iter().copied().collect();
         if let Some(p) = from_peer {
-            uncovered.remove(&p);
+            direct_uncovered.remove(&p);
         }
 
-        if uncovered.is_empty() {
-            return true;
+        // If our only neighbor is the sender we received this frame from, there are no other
+        // known downstream neighbors to cover, unless duplicate_sources is also empty (dead-end leaf).
+        if direct_uncovered.is_empty() {
+            return CoverageConfidence::UnknownIncomplete;
         }
 
-        // Each duplicate source can cover itself and its freshly reported neighbors
+        // 1. Subtract only peers that directly transmitted a duplicate of THIS packet
         for src in duplicate_sources {
-            uncovered.remove(src);
+            direct_uncovered.remove(src);
+        }
 
+        if direct_uncovered.is_empty() {
+            return CoverageConfidence::DirectlyObservedComplete;
+        }
+
+        // 2. Check whether third-party reported_neighbors lists infer coverage of the remainder
+        let mut inferred_uncovered = direct_uncovered;
+        for src in duplicate_sources {
             if let Some(obs) = self.entries.get(src) {
-                // Only fresh observations authorize coverage
                 if let Some(rep_at) = obs.reported_at {
                     if now.saturating_duration_since(rep_at) <= self.ttl {
                         for peer in &obs.reported_neighbors {
-                            uncovered.remove(peer);
+                            inferred_uncovered.remove(peer);
                         }
                     }
                 }
             }
-
-            if uncovered.is_empty() {
-                return true;
+            if inferred_uncovered.is_empty() {
+                return CoverageConfidence::InferredComplete;
             }
         }
 
-        false
+        CoverageConfidence::UncoveredNeighborsRemain
     }
 }
 
@@ -342,6 +475,11 @@ pub struct CoverageAwareFloodConfig {
     pub priority_delay: Duration,
     pub neighbor_ttl: Duration,
     pub max_neighbors: usize,
+    /// Whether unaddressed broadcast flood packets may be suppressed via inferred 3rd-party neighbor lists.
+    /// Reliable addressed traffic NEVER suppresses on inferred coverage alone.
+    pub allow_inferred_broadcast_suppression: bool,
+    pub max_priority_per_window: u32,
+    pub priority_window: Duration,
 }
 
 impl Default for CoverageAwareFloodConfig {
@@ -354,19 +492,25 @@ impl Default for CoverageAwareFloodConfig {
             priority_delay: Duration::ZERO,
             neighbor_ttl: Duration::from_secs(30),
             max_neighbors: 64,
+            allow_inferred_broadcast_suppression: true,
+            max_priority_per_window: 8,
+            priority_window: Duration::from_secs(10),
         }
     }
 }
 
 /// Coverage-aware adaptive mesh relay policy.
 ///
-/// Cancels pending redundant rebroadcasts ONLY when overheard duplicate transmissions
-/// cryptographically or observationally confirm that ALL reachable local neighbors have
-/// already been covered. Prevents premature bridge suppression in partitioned or bottleneck topologies.
+/// Distinguishes packet-specific `DirectlyObservedComplete` coverage from third-party
+/// `InferredComplete` neighbor-list coverage. For reliable addressed traffic, suppression
+/// requires direct packet observation from all local neighbors; inferred lists never suppress
+/// addressed frames.
 #[derive(Debug, Clone)]
 pub struct CoverageAwareFlood {
     config: CoverageAwareFloodConfig,
     table: Arc<RwLock<NeighborTable>>,
+    seeded_rng: Option<Arc<Mutex<DeterministicRng>>>,
+    priority_quota: Arc<Mutex<PriorityQuotaWindow>>,
 }
 
 impl Default for CoverageAwareFlood {
@@ -381,7 +525,27 @@ impl CoverageAwareFlood {
             config.max_neighbors,
             config.neighbor_ttl,
         )));
-        Self { config, table }
+        let quota = PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
+        Self {
+            config,
+            table,
+            seeded_rng: None,
+            priority_quota: Arc::new(Mutex::new(quota)),
+        }
+    }
+
+    pub fn with_seed(config: CoverageAwareFloodConfig, seed: u64) -> Self {
+        let table = Arc::new(RwLock::new(NeighborTable::new(
+            config.max_neighbors,
+            config.neighbor_ttl,
+        )));
+        let quota = PriorityQuotaWindow::new(config.max_priority_per_window, config.priority_window);
+        Self {
+            config,
+            table,
+            seeded_rng: Some(Arc::new(Mutex::new(DeterministicRng::new(seed)))),
+            priority_quota: Arc::new(Mutex::new(quota)),
+        }
     }
 
     pub fn table(&self) -> &Arc<RwLock<NeighborTable>> {
@@ -421,8 +585,13 @@ impl RelayPolicy for CoverageAwareFlood {
     }
 
     fn delay(&self, ctx: &RelayContext) -> Duration {
+        let now = ctx.now.unwrap_or_else(Instant::now);
         if ctx.priority {
-            return self.config.priority_delay;
+            if let Ok(mut q) = self.priority_quota.lock() {
+                if q.try_consume(now) {
+                    return self.config.priority_delay;
+                }
+            }
         }
 
         let upper = self.window_upper_bound(ctx.neighbor_count);
@@ -430,6 +599,12 @@ impl RelayPolicy for CoverageAwareFlood {
 
         if upper_ms == 0 {
             Duration::ZERO
+        } else if let Some(ref rng_arc) = self.seeded_rng {
+            let jitter_ms = rng_arc
+                .lock()
+                .map(|mut r| r.gen_range_inclusive(upper_ms))
+                .unwrap_or(upper_ms / 2);
+            Duration::from_millis(jitter_ms)
         } else {
             let mut rng = rand::thread_rng();
             let jitter_ms = rng.gen_range(0..=upper_ms);
@@ -438,11 +613,15 @@ impl RelayPolicy for CoverageAwareFlood {
     }
 
     fn suppress_after(&self, ctx: &RelayContext) -> u8 {
+        let now = ctx.now.unwrap_or_else(Instant::now);
         if ctx.priority {
-            u8::MAX
-        } else {
-            self.config.suppression_threshold
+            if let Ok(q) = self.priority_quota.lock() {
+                if q.is_within_quota(now) {
+                    return u8::MAX;
+                }
+            }
         }
+        self.config.suppression_threshold
     }
 
     fn should_suppress(
@@ -451,8 +630,13 @@ impl RelayPolicy for CoverageAwareFlood {
         duplicate_sources: &[ShortId],
         from_peer: Option<ShortId>,
     ) -> bool {
+        let now = ctx.now.unwrap_or_else(Instant::now);
         if ctx.priority {
-            return false; // Priority never suppressed
+            if let Ok(q) = self.priority_quota.lock() {
+                if q.is_within_quota(now) {
+                    return false;
+                }
+            }
         }
 
         // Must satisfy basic counter threshold first
@@ -460,12 +644,17 @@ impl RelayPolicy for CoverageAwareFlood {
             return false;
         }
 
-        // Check if coverage is complete across all local neighbors
         if let Ok(table) = self.table.read() {
-            let now = Instant::now();
-            table.is_coverage_complete(&ctx.local_neighbors, duplicate_sources, from_peer, now)
+            match table.evaluate_coverage(&ctx.local_neighbors, duplicate_sources, from_peer, now) {
+                CoverageConfidence::DirectlyObservedComplete => true,
+                CoverageConfidence::InferredComplete => {
+                    // Addressed reliable traffic must NEVER be suppressed by 3rd-party inferred neighbor lists
+                    !ctx.is_addressed && self.config.allow_inferred_broadcast_suppression
+                }
+                CoverageConfidence::UnknownIncomplete
+                | CoverageConfidence::UncoveredNeighborsRemain => false,
+            }
         } else {
-            // Lock poisoned or contention: fallback to conservative forwarding
             false
         }
     }
@@ -488,19 +677,122 @@ mod tests {
         // In dense cluster, peer_b reports seeing peer_a, peer_b, peer_c, me
         policy.record_claimed_neighbors(peer_b, vec![peer_a, peer_c, me], now);
 
-        let ctx = RelayContext {
+        // Unaddressed broadcast frame can use inferred coverage in dense cluster
+        let ctx_broadcast = RelayContext {
             neighbor_count: 3,
             hop_count: 1,
             priority: false,
+            is_addressed: false,
             duplicates_heard: 2,
             from_peer: Some(peer_a),
             local_neighbors: vec![peer_a, peer_b, peer_c],
             duplicate_peers: vec![peer_b],
+            now: Some(now),
+        };
+        assert!(policy.should_suppress(&ctx_broadcast, &[peer_b], Some(peer_a)));
+
+        // Reliable addressed traffic is NOT suppressed merely by peer_b's claimed neighbor list!
+        let mut ctx_addressed = ctx_broadcast.clone();
+        ctx_addressed.is_addressed = true;
+        assert!(!policy.should_suppress(&ctx_addressed, &[peer_b], Some(peer_a)));
+
+        // Once BOTH peer_b and peer_c directly transmit duplicates, direct observed coverage is complete -> suppress!
+        assert!(policy.should_suppress(&ctx_addressed, &[peer_b, peer_c], Some(peer_a)));
+    }
+
+    #[test]
+    fn test_empty_or_incomplete_discovery_never_proves_coverage() {
+        let policy = CoverageAwareFlood::default();
+        let now = Instant::now();
+        let peer_a = ShortId([2; 8]);
+        let peer_b = ShortId([3; 8]);
+
+        // Empty local_neighbors (discovery incomplete) must return UnknownIncomplete and NOT suppress
+        let ctx_empty = RelayContext {
+            neighbor_count: 0,
+            hop_count: 1,
+            priority: false,
+            is_addressed: false,
+            duplicates_heard: 5,
+            from_peer: Some(peer_a),
+            local_neighbors: Vec::new(),
+            duplicate_peers: vec![peer_b],
+            now: Some(now),
+        };
+        assert!(!policy.should_suppress(&ctx_empty, &[peer_b], Some(peer_a)));
+    }
+
+    #[test]
+    fn test_asymmetric_links_and_lost_duplicate_do_not_suppress() {
+        let policy = CoverageAwareFlood::default();
+        let now = Instant::now();
+
+        let peer_a = ShortId([2; 8]);
+        let peer_b = ShortId([3; 8]);
+        let peer_c = ShortId([4; 8]); // Asymmetric or lost duplicate from peer_c
+
+        let ctx = RelayContext {
+            neighbor_count: 3,
+            hop_count: 1,
+            priority: false,
+            is_addressed: true,
+            duplicates_heard: 2,
+            from_peer: Some(peer_a),
+            local_neighbors: vec![peer_a, peer_b, peer_c],
+            duplicate_peers: vec![peer_b],
+            now: Some(now),
         };
 
-        // Duplicate from peer_b whose coverage includes peer_c -> full coverage -> suppress
-        let suppress = policy.should_suppress(&ctx, &[peer_b], Some(peer_a));
-        assert!(suppress);
+        // Only peer_b was heard directly; peer_c never transmitted a duplicate -> must NOT suppress
+        assert!(!policy.should_suppress(&ctx, &[peer_b], Some(peer_a)));
+    }
+
+    #[test]
+    fn test_forged_priority_flood_bounded_by_quota() {
+        let cfg = CoverageAwareFloodConfig {
+            max_priority_per_window: 2,
+            priority_window: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let policy = CoverageAwareFlood::with_seed(cfg, 42);
+        let now = Instant::now();
+        let peer_a = ShortId([2; 8]);
+        let peer_b = ShortId([3; 8]);
+
+        let ctx = RelayContext {
+            neighbor_count: 4,
+            hop_count: 1,
+            priority: true,
+            is_addressed: false,
+            duplicates_heard: 3,
+            from_peer: Some(peer_a),
+            local_neighbors: vec![peer_a, peer_b],
+            duplicate_peers: vec![peer_b],
+            now: Some(now),
+        };
+
+        // First 2 priority frames within window get 0 delay and bypass suppression
+        assert_eq!(policy.delay(&ctx), Duration::ZERO);
+        assert!(!policy.should_suppress(&ctx, &[peer_b], Some(peer_a)));
+        assert_eq!(policy.delay(&ctx), Duration::ZERO);
+        assert!(!policy.should_suppress(&ctx, &[peer_b], Some(peer_a)));
+
+        // 3rd priority frame exceeds quota -> falls back to normal jitter delay and normal suppression!
+        assert!(policy.delay(&ctx) > Duration::ZERO);
+        assert!(policy.should_suppress(&ctx, &[peer_b], Some(peer_a)));
+    }
+
+    #[test]
+    fn test_matched_seed_deterministic_reproducibility() {
+        let p1 = CoverageAwareFlood::with_seed(CoverageAwareFloodConfig::default(), 9999);
+        let p2 = CoverageAwareFlood::with_seed(CoverageAwareFloodConfig::default(), 9999);
+        let now = Instant::now();
+        let mut ctx = RelayContext::simple(5, 1, false, 0);
+        ctx.now = Some(now);
+
+        let seq1: Vec<Duration> = (0..20).map(|_| p1.delay(&ctx)).collect();
+        let seq2: Vec<Duration> = (0..20).map(|_| p2.delay(&ctx)).collect();
+        assert_eq!(seq1, seq2);
     }
 
     #[test]
@@ -522,10 +814,12 @@ mod tests {
             neighbor_count: 3,
             hop_count: 1,
             priority: false,
+            is_addressed: false,
             duplicates_heard: 3,
             from_peer: Some(node1),
             local_neighbors: vec![node1, node2, bridge15],
             duplicate_peers: vec![node1, node2],
+            now: Some(now),
         };
 
         // Duplicates heard from node1 and node2 do NOT cover bridge15 -> must NOT suppress!
@@ -549,10 +843,12 @@ mod tests {
             neighbor_count: 3,
             hop_count: 1,
             priority: false,
+            is_addressed: false,
             duplicates_heard: 2,
             from_peer: Some(peer_a),
             local_neighbors: vec![peer_a, peer_b, peer_c],
             duplicate_peers: vec![peer_b],
+            now: Some(now),
         };
 
         // Stale report -> cannot assume peer_c is covered -> do not suppress

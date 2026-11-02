@@ -301,10 +301,12 @@ impl<T: Transport> MeshNode<T> {
                     neighbor_count: self.transport.neighbors().len(),
                     hop_count: pending.envelope.hop_count,
                     priority: pending.envelope.flags.priority,
+                    is_addressed: !pending.envelope.recipient_short_id.is_broadcast(),
                     duplicates_heard: pending.duplicates_heard,
                     from_peer: pending.from_peer,
                     local_neighbors: self.transport.neighbors(),
                     duplicate_peers: pending.duplicate_sources.clone(),
+                    now: Some(now),
                 };
                 if self
                     .policy
@@ -359,10 +361,12 @@ impl<T: Transport> MeshNode<T> {
                     neighbor_count: self.transport.neighbors().len(),
                     hop_count: pending.envelope.hop_count,
                     priority: pending.envelope.flags.priority,
+                    is_addressed: !pending.envelope.recipient_short_id.is_broadcast(),
                     duplicates_heard: pending.duplicates_heard,
                     from_peer: pending.from_peer,
                     local_neighbors: self.transport.neighbors(),
                     duplicate_peers: pending.duplicate_sources.clone(),
+                    now: Some(now),
                 };
                 if self
                     .policy
@@ -420,10 +424,12 @@ impl<T: Transport> MeshNode<T> {
             neighbor_count: self.transport.neighbors().len(),
             hop_count: envelope.hop_count,
             priority: envelope.flags.priority,
+            is_addressed: !envelope.recipient_short_id.is_broadcast(),
             duplicates_heard: 0,
             from_peer: Some(from_peer),
             local_neighbors: self.transport.neighbors(),
             duplicate_peers: Vec::new(),
+            now: Some(now),
         };
 
         if !self.policy.should_relay(&ctx) {
@@ -821,6 +827,7 @@ mod tests {
                             max_delay: Duration::from_millis(50),
                             suppression_threshold: 2,
                             priority_delay: Duration::ZERO,
+                            ..Default::default()
                         },
                     );
                     MeshNode::new(id, t, Box::new(policy))
