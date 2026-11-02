@@ -32,6 +32,35 @@ impl PeerId {
         Self(bytes)
     }
 
+    /// Strictly parse a 64-character hexadecimal string into a `PeerId`.
+    ///
+    /// Permits optional `0x`/`0X` prefix and surrounding whitespace, but strictly rejects:
+    /// - Any non-ASCII-hex character (never strips invalid characters)
+    /// - Wrong or odd lengths
+    /// - All-zero bytes or invalid Ed25519 public key encodings
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        let clean = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+
+        if clean.len() != 64 || !clean.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+
+        let mut bytes = [0u8; 32];
+        for (i, slot) in bytes.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).ok()?;
+        }
+
+        if bytes == [0u8; 32] {
+            return None;
+        }
+        VerifyingKey::from_bytes(&bytes).ok()?;
+        Some(Self(bytes))
+    }
+
     /// Derive the 8-byte ShortId from blake3(peer_id).
     pub fn short_id(&self) -> ShortId {
         let hash = blake3::hash(&self.0);
@@ -67,15 +96,54 @@ impl ShortId {
     }
 
     pub fn from_hex(s: &str) -> Option<Self> {
-        let clean = s.trim().trim_start_matches("0x");
-        if clean.len() != 16 || !clean.is_ascii() {
+        let trimmed = s.trim();
+        let clean = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+        if clean.len() != 16 || !clean.bytes().all(|b| b.is_ascii_hexdigit()) {
             return None;
         }
         let mut bytes = [0u8; 8];
-        for i in 0..8 {
-            bytes[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).ok()?;
+        for (i, slot) in bytes.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16).ok()?;
         }
         Some(Self(bytes))
+    }
+
+    /// Strictly parse a user-supplied ShortId string.
+    ///
+    /// Permits optional `0x`/`0X` prefix and an optional single midpoint `-` or `:` separator
+    /// (`8 hex chars + '-' + 8 hex chars`), while strictly rejecting:
+    /// - Any non-hex characters or placeholder strings (e.g. `"Initializing..."`)
+    /// - Wrong or odd lengths
+    /// - Broadcast / all-zero ShortId (`0000000000000000`)
+    pub fn from_user_input(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        let without_prefix = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+            .unwrap_or(trimmed);
+
+        let normalized: String = if without_prefix.len() == 17 {
+            let bytes = without_prefix.as_bytes();
+            if bytes[8] == b'-' || bytes[8] == b':' {
+                let mut combined = String::with_capacity(16);
+                combined.push_str(&without_prefix[..8]);
+                combined.push_str(&without_prefix[9..]);
+                combined
+            } else {
+                return None;
+            }
+        } else {
+            without_prefix.to_string()
+        };
+
+        let parsed = Self::from_hex(&normalized)?;
+        if parsed.is_broadcast() {
+            return None;
+        }
+        Some(parsed)
     }
 }
 
@@ -347,5 +415,65 @@ mod tests {
         let mem_debug = format!("{mem_store:?}");
         assert!(mem_debug.contains("[REDACTED]"));
         assert!(!mem_debug.contains(&secret_hex));
+    }
+
+    #[test]
+    fn test_strict_short_id_and_peer_id_parsing() {
+        let id = Identity::generate();
+        let valid_short_hex = id.short_id().to_string();
+        let valid_peer_hex = id.peer_id().to_string();
+
+        // 1. Valid inputs (lowercase, uppercase, 0x prefix, single midpoint separator)
+        assert_eq!(ShortId::from_hex(&valid_short_hex), Some(id.short_id()));
+        assert_eq!(
+            ShortId::from_hex(&valid_short_hex.to_uppercase()),
+            Some(id.short_id())
+        );
+        assert_eq!(
+            ShortId::from_hex(&format!("0x{valid_short_hex}")),
+            Some(id.short_id())
+        );
+        assert_eq!(
+            ShortId::from_user_input(&format!(
+                "{}-{}",
+                &valid_short_hex[..8],
+                &valid_short_hex[8..]
+            )),
+            Some(id.short_id())
+        );
+        assert_eq!(
+            ShortId::from_user_input(&format!(
+                "{}:{}",
+                &valid_short_hex[..8],
+                &valid_short_hex[8..]
+            )),
+            Some(id.short_id())
+        );
+        assert_eq!(PeerId::from_hex(&valid_peer_hex), Some(id.peer_id()));
+        assert_eq!(
+            PeerId::from_hex(&format!("0X{}", valid_peer_hex.to_uppercase())),
+            Some(id.peer_id())
+        );
+
+        // 2. Reject placeholder strings and non-hex characters (no character stripping!)
+        assert_eq!(ShortId::from_hex("Initializing..."), None);
+        assert_eq!(ShortId::from_user_input("Initializing..."), None);
+        assert_eq!(
+            ShortId::from_hex("0123456789abcdef_extra_garbage_12"),
+            None
+        );
+        assert_eq!(ShortId::from_user_input("0123-4567-89ab-cdef"), None);
+        assert_eq!(ShortId::from_user_input("0123456789abcdeg"), None);
+
+        // 3. Reject wrong lengths, odd lengths, empty, and Unicode lookalikes
+        assert_eq!(ShortId::from_hex(""), None);
+        assert_eq!(ShortId::from_hex("0123456789abcde"), None); // 15 chars
+        assert_eq!(ShortId::from_hex("0123456789abcdef0"), None); // 17 chars
+        assert_eq!(ShortId::from_user_input("０１２３４５６７８９ａｂｃｄｅｆ"), None); // fullwidth unicode
+        assert_eq!(PeerId::from_hex("012345"), None);
+
+        // 4. Reject all-zero broadcast ShortId in user input and all-zero PeerId
+        assert_eq!(ShortId::from_user_input("0000000000000000"), None);
+        assert_eq!(PeerId::from_hex(&"0".repeat(64)), None);
     }
 }

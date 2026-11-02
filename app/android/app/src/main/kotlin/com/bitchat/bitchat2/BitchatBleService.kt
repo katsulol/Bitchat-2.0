@@ -204,8 +204,13 @@ class BitchatBleService : Service() {
             Log.w(TAG, "Cannot start mesh: missing Bluetooth permissions")
             return
         }
+        val validatedBytes = parseStrictShortIdHex(shortIdHex)
+        if (validatedBytes == null) {
+            Log.e(TAG, "Refusing to start BLE mesh: invalid or unready ShortId '$shortIdHex'")
+            return
+        }
         startServiceInForeground()
-        localShortIdHex = shortIdHex
+        localShortIdHex = byteArrayToHexString(validatedBytes)
 
         // Service-owned hardware Keystore verification: ensure DEK is accessible from background service
         try {
@@ -290,8 +295,11 @@ class BitchatBleService : Service() {
             .build()
 
         val pUuid = ParcelUuid(SERVICE_UUID)
-        val rawBytes = hexStringToByteArray(localShortIdHex)
-        val shortBytes = if (rawBytes.size == 8) rawBytes else ByteArray(8)
+        val shortBytes = parseStrictShortIdHex(localShortIdHex)
+        if (shortBytes == null) {
+            Log.e(TAG, "Refusing to start BLE advertising: invalid local ShortId '$localShortIdHex'")
+            return
+        }
 
         // Primary packet: Service UUID only (<21 bytes)
         val data = AdvertiseData.Builder()
@@ -728,8 +736,7 @@ class BitchatBleService : Service() {
     @SuppressLint("MissingPermission")
     private fun sendCentralLinkHello(gatt: BluetoothGatt) {
         val addr = gatt.device.address
-        val localShortBytes = hexStringToByteArray(localShortIdHex.ifEmpty { return })
-        if (localShortBytes.size != 8) return
+        val localShortBytes = parseStrictShortIdHex(localShortIdHex) ?: return
 
         val helloPacket = ByteArray(10)
         helloPacket[0] = PKT_TYPE_LINK_HELLO
@@ -750,8 +757,7 @@ class BitchatBleService : Service() {
         val service = gattServer?.getService(SERVICE_UUID) ?: return
         val notifyChar = service.getCharacteristic(CHAR_NOTIFY_UUID) ?: return
 
-        val localShortBytes = hexStringToByteArray(localShortIdHex.ifEmpty { return })
-        if (localShortBytes.size != 8) return
+        val localShortBytes = parseStrictShortIdHex(localShortIdHex) ?: return
 
         val helloPacket = ByteArray(10)
         helloPacket[0] = PKT_TYPE_LINK_HELLO
@@ -1029,20 +1035,51 @@ class BitchatBleService : Service() {
         return result
     }
 
-    private fun hexStringToByteArray(s: String): ByteArray {
-        val clean = s.trim().filter { it in "0123456789abcdefABCDEF" }
-        val len = clean.length - (clean.length % 2)
-        if (len == 0) return ByteArray(8)
-        val data = ByteArray(len / 2)
-        var i = 0
-        while (i < len) {
-            val high = Character.digit(clean[i], 16)
-            val low = Character.digit(clean[i + 1], 16)
-            if (high == -1 || low == -1) break
-            data[i / 2] = ((high shl 4) + low).toByte()
-            i += 2
+    /**
+     * Strictly parses a 16-hex-character (8-byte) ShortId string.
+     *
+     * Never strips non-hex characters or falls back to all-zeros. Rejects:
+     * - Placeholder strings (e.g. "Initializing...")
+     * - Any non-ASCII-hex character (except optional 0x prefix or single midpoint '-' / ':' separator)
+     * - Wrong or odd lengths
+     * - Broadcast all-zero ShortId (0000000000000000)
+     */
+    internal fun parseStrictShortIdHex(s: String): ByteArray? {
+        val trimmed = s.trim()
+        val withoutPrefix = when {
+            trimmed.startsWith("0x") || trimmed.startsWith("0X") -> trimmed.substring(2)
+            else -> trimmed
         }
+        val normalized = if (withoutPrefix.length == 17 && (withoutPrefix[8] == '-' || withoutPrefix[8] == ':')) {
+            withoutPrefix.substring(0, 8) + withoutPrefix.substring(9)
+        } else {
+            withoutPrefix
+        }
+        if (normalized.length != 16) return null
+
+        val data = ByteArray(8)
+        var allZero = true
+        for (i in 0 until 8) {
+            val highChar = normalized[i * 2]
+            val lowChar = normalized[i * 2 + 1]
+            val high = hexCharToNibble(highChar)
+            val low = hexCharToNibble(lowChar)
+            if (high == -1 || low == -1) return null
+            val byteVal = ((high shl 4) or low).toByte()
+            if (byteVal != 0.toByte()) {
+                allZero = false
+            }
+            data[i] = byteVal
+        }
+        if (allZero) return null
         return data
+    }
+
+    private fun hexCharToNibble(c: Char): Int = when (c) {
+        in '0'..'9' -> c - '0'
+        in 'a'..'f' -> c - 'a' + 10
+        in 'A'..'F' -> c - 'A' + 10
+        else -> -1
     }
 
     private fun byteArrayToHexString(bytes: ByteArray): String {
