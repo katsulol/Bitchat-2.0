@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -41,7 +42,14 @@ use crate::trust::{
     TrustPolicy, TrustProvenance, TrustQuotaConfig, TrustStore, DEFAULT_MAX_PENDING_REQUESTS,
 };
 
-pub const CORE_BUILD_VERSION: &str = "v2.0.5-phase5";
+pub const CORE_BUILD_VERSION: &str = "v2.0.6-phase6";
+pub const CORE_ABI_VERSION: u32 = 2;
+pub const CORE_GIT_COMMIT: &str = env!("BITCHAT_GIT_COMMIT");
+pub const CORE_BUILD_DIRTY: bool = match option_env!("BITCHAT_BUILD_DIRTY") {
+    Some(s) => matches!(s.as_bytes(), b"true"),
+    None => false,
+};
+pub const CORE_BUILD_TARGET: &str = env!("BITCHAT_BUILD_TARGET");
 
 /// Status transition event emitted to Flutter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +98,22 @@ pub struct DiagnosticsSnapshot {
     pub relay_contribution_mode: String,
     #[serde(default)]
     pub key_security_level: String,
+    #[serde(default)]
+    pub gateway_relay_mode: String,
+    #[serde(default)]
+    pub gateway_observed_path: String,
+    #[serde(default)]
+    pub gateway_path_observed_at_unix: u64,
+    #[serde(default)]
+    pub abi_version: u32,
+    #[serde(default)]
+    pub git_commit: String,
+    #[serde(default)]
+    pub build_dirty: bool,
+    #[serde(default)]
+    pub runtime_generation: u64,
+    #[serde(default)]
+    pub ui_attached: bool,
 }
 
 /// High-level routing metrics snapshot for mobile UI.
@@ -152,9 +176,75 @@ pub struct BitchatCoreService {
 }
 
 static SERVICE: OnceLock<RwLock<Option<BitchatCoreService>>> = OnceLock::new();
+static RUNTIME_GENERATION: AtomicU64 = AtomicU64::new(0);
+static UI_ATTACHED: AtomicBool = AtomicBool::new(false);
+static LAST_ERROR: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
 
 fn get_service() -> &'static RwLock<Option<BitchatCoreService>> {
     SERVICE.get_or_init(|| RwLock::new(None))
+}
+
+fn get_last_error_slot() -> &'static std::sync::Mutex<Option<String>> {
+    LAST_ERROR.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Record the latest typed runtime or FFI error message for inspectable callers.
+pub fn record_last_error(err: impl Into<String>) {
+    if let Ok(mut guard) = get_last_error_slot().lock() {
+        *guard = Some(err.into());
+    }
+}
+
+/// Clear the stored last-error slot.
+pub fn clear_last_error() {
+    if let Ok(mut guard) = get_last_error_slot().lock() {
+        *guard = None;
+    }
+}
+
+/// Return the most recent recorded error string, if any.
+pub fn last_error() -> Option<String> {
+    get_last_error_slot().lock().ok().and_then(|g| g.clone())
+}
+
+/// Return the current monotonic runtime lifecycle generation token (`0` before first init).
+pub fn runtime_generation() -> u64 {
+    RUNTIME_GENERATION.load(Ordering::SeqCst)
+}
+
+/// Mark UI attached to the core runtime and return the current lifecycle generation token.
+pub fn attach_ui() -> u64 {
+    UI_ATTACHED.store(true, Ordering::SeqCst);
+    RUNTIME_GENERATION.load(Ordering::SeqCst)
+}
+
+/// Mark UI detached from the core runtime while keeping service ownership intact.
+pub fn detach_ui() {
+    UI_ATTACHED.store(false, Ordering::SeqCst);
+}
+
+/// JSON-serialized build provenance and ABI metadata.
+pub fn build_info_json() -> String {
+    serde_json::json!({
+        "build_version": CORE_BUILD_VERSION,
+        "abi_version": CORE_ABI_VERSION,
+        "git_commit": CORE_GIT_COMMIT,
+        "build_dirty": CORE_BUILD_DIRTY,
+        "build_target": CORE_BUILD_TARGET,
+    })
+    .to_string()
+}
+
+/// Verify caller-expected C-ABI version matches compiled `CORE_ABI_VERSION`.
+pub fn check_abi_compatibility(expected: u32) -> Result<String, String> {
+    if expected != CORE_ABI_VERSION {
+        let msg = format!(
+            "ABI_MISMATCH: host expects ABI v{expected}, native library provides ABI v{CORE_ABI_VERSION} (build {CORE_BUILD_VERSION}, commit {CORE_GIT_COMMIT})"
+        );
+        record_last_error(&msg);
+        return Err(msg);
+    }
+    Ok(build_info_json())
 }
 
 fn hex_to_short_id(hex_str: &str) -> Result<ShortId, String> {
@@ -557,8 +647,13 @@ impl BitchatCoreService {
         deadline_secs: Option<u64>,
     ) -> Result<String, String> {
         let mode = match mode_u8 {
+            0 => MessageMode::Normal,
             1 => MessageMode::Privacy,
-            _ => MessageMode::Normal,
+            other => {
+                return Err(format!(
+                    "INVALID_MODE: unsupported mode {other}; expected 0 (Normal) or 1 (Privacy)"
+                ))
+            }
         };
 
         let resolved = self.resolve_verified_peer_id(&recipient_hex).await?;
@@ -1028,11 +1123,23 @@ impl BitchatCoreService {
             (0, 0)
         };
         let active_vouchers = self.trust_store.read().await.active_voucher_count();
-        let relay_disabled = self
-            .gateway_bridge
-            .as_ref()
-            .map(|b| b.relay_disabled())
-            .unwrap_or(true);
+        let (relay_disabled, gateway_relay_mode, obs_path, obs_ts) =
+            if let Some(ref b) = self.gateway_bridge {
+                let (path, ts) = b.observed_path_snapshot().await;
+                (
+                    b.relay_disabled(),
+                    b.configured_relay_mode_label().to_string(),
+                    path,
+                    ts,
+                )
+            } else {
+                (
+                    false,
+                    "Inactive".to_string(),
+                    crate::mesh::router::IrohPathObservation::Unknown,
+                    0,
+                )
+            };
         let node_stats = self.node.stats();
         let active_profile = if let Ok(mgr) = self.resource_mgr.lock() {
             mgr.active_profile()
@@ -1063,6 +1170,14 @@ impl BitchatCoreService {
             transit_packets_dropped_policy: node_stats.transit_packets_dropped_policy,
             relay_contribution_mode: self.relay_contribution_mode.clone(),
             key_security_level: self.key_security_level.clone(),
+            gateway_relay_mode,
+            gateway_observed_path: format!("{obs_path:?}"),
+            gateway_path_observed_at_unix: obs_ts,
+            abi_version: CORE_ABI_VERSION,
+            git_commit: CORE_GIT_COMMIT.to_string(),
+            build_dirty: CORE_BUILD_DIRTY,
+            runtime_generation: runtime_generation(),
+            ui_attached: UI_ATTACHED.load(Ordering::Relaxed),
         }
     }
 
@@ -1183,12 +1298,57 @@ pub async fn init_with_key(
 ) -> Result<String, String> {
     let mut lock = get_service().write().await;
     if let Some(svc) = lock.as_ref() {
+        clear_last_error();
+        if RUNTIME_GENERATION.load(Ordering::SeqCst) == 0 {
+            RUNTIME_GENERATION.store(1, Ordering::SeqCst);
+        }
         return Ok(svc.my_short_id().to_string());
     }
-    let service = BitchatCoreService::new_with_key(storage_path, dek, key_version).await?;
-    let short_hex = service.my_short_id().to_string();
-    *lock = Some(service);
-    Ok(short_hex)
+    match BitchatCoreService::new_with_key(storage_path, dek, key_version).await {
+        Ok(service) => {
+            clear_last_error();
+            let short_hex = service.my_short_id().to_string();
+            *lock = Some(service);
+            RUNTIME_GENERATION.fetch_add(1, Ordering::SeqCst);
+            Ok(short_hex)
+        }
+        Err(e) => {
+            record_last_error(&e);
+            Err(e)
+        }
+    }
+}
+
+/// Gracefully shut down the active service runtime, stop any gateway bridge, and invalidate
+/// prior lifecycle generation tokens. Idempotent when already shut down.
+pub async fn shutdown() -> Result<(), String> {
+    let svc_opt = {
+        let mut lock = get_service().write().await;
+        lock.take()
+    };
+    if let Some(mut svc) = svc_opt {
+        if svc.gateway_bridge.is_some() {
+            let _ = svc.gateway_stop().await;
+        }
+        RUNTIME_GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+    UI_ATTACHED.store(false, Ordering::SeqCst);
+    clear_last_error();
+    Ok(())
+}
+
+/// Explicitly wipe root identity and encrypted storage ONLY after confirmation,
+/// shutting down any active global service instance first so SQLite locks release cleanly.
+pub async fn destructive_reset_storage(storage_path: String, confirm: bool) -> Result<(), String> {
+    if !confirm {
+        let msg = "Destructive reset refused without explicit confirmation".to_string();
+        record_last_error(&msg);
+        return Err(msg);
+    }
+    shutdown().await?;
+    BitchatCoreService::destructive_reset_storage(&storage_path, true).inspect_err(|e| {
+        record_last_error(e);
+    })
 }
 
 /// Query our 32-byte Ed25519 PeerId public key hex string.
@@ -2664,11 +2824,29 @@ impl BitchatCoreService {
     }
 }
 
+fn verify_generation(generation: u64) -> Result<(), String> {
+    let active = runtime_generation();
+    if active == 0 || generation != active {
+        let msg = format!(
+            "STALE_GENERATION: Callback dropped for generation {generation} (active {active})"
+        );
+        record_last_error(&msg);
+        return Err(msg);
+    }
+    Ok(())
+}
+
 /// Notify Rust that a BLE peer connected.
 pub async fn on_peer_connected(short_id: String) -> Result<(), String> {
     let mut lock = get_service().write().await;
     let svc = lock.as_mut().ok_or("Service not initialized")?;
     svc.on_peer_connected(short_id).await
+}
+
+/// Notify Rust that a BLE peer connected if `generation` matches the active runtime generation.
+pub async fn on_peer_connected_gen(generation: u64, short_id: String) -> Result<(), String> {
+    verify_generation(generation)?;
+    on_peer_connected(short_id).await
 }
 
 /// Notify Rust that a BLE peer disconnected.
@@ -2678,11 +2856,27 @@ pub async fn on_peer_disconnected(short_id: String) -> Result<(), String> {
     svc.on_peer_disconnected(short_id).await
 }
 
+/// Notify Rust that a BLE peer disconnected if `generation` matches the active runtime generation.
+pub async fn on_peer_disconnected_gen(generation: u64, short_id: String) -> Result<(), String> {
+    verify_generation(generation)?;
+    on_peer_disconnected(short_id).await
+}
+
 /// Deliver an incoming BLE frame payload from a connected peer into Rust.
 pub async fn on_frame_received(short_id: String, bytes: Vec<u8>) -> Result<(), String> {
     let lock = get_service().read().await;
     let svc = lock.as_ref().ok_or("Service not initialized")?;
     svc.on_frame_received(short_id, bytes)
+}
+
+/// Deliver an incoming BLE frame payload if `generation` matches the active runtime generation.
+pub async fn on_frame_received_gen(
+    generation: u64,
+    short_id: String,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    verify_generation(generation)?;
+    on_frame_received(short_id, bytes).await
 }
 
 /// Poll next outbound frame from Rust to be transmitted across mobile BLE.
@@ -2893,6 +3087,22 @@ pub async fn get_volatile_state(recipient_short_id: String) -> Result<String, St
     svc.get_volatile_state(recipient_short_id).await
 }
 
+/// Drain queued inbound authorization events as JSON array.
+pub async fn poll_auth_events_json() -> Result<String, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    let events = svc.poll_auth_events();
+    serde_json::to_string(&events).map_err(|e| format!("Serialization error: {e}"))
+}
+
+/// Return queued pending message requests awaiting explicit user consent as JSON array.
+pub async fn pending_message_requests_json() -> Result<String, String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+    let reqs = svc.pending_message_requests();
+    serde_json::to_string(&reqs).map_err(|e| format!("Serialization error: {e}"))
+}
+
 mod hex {
     pub fn encode<T: AsRef<[u8]>>(data: T) -> String {
         data.as_ref().iter().map(|b| format!("{b:02x}")).collect()
@@ -3008,7 +3218,7 @@ mod tests {
 
         let diag_json = get_diagnostics().await.expect("Get diagnostics");
         assert!(diag_json.contains("\"my_short_id\""));
-        assert!(diag_json.contains("\"build_version\":\"v2.0.5-phase5\""));
+        assert!(diag_json.contains(&format!("\"build_version\":\"{}\"", CORE_BUILD_VERSION)));
 
         // Test Phase 5 Resource, Proximity, Voucher & Volatile APIs
         let prof = update_resource_state(15, 0, 1, 0, false)
@@ -3047,6 +3257,7 @@ mod tests {
         let pumped = pump_outbox().await.expect("Pump outbox");
         let _ = pumped;
 
+        let _ = shutdown().await;
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

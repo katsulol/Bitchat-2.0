@@ -33,6 +33,7 @@ pub struct ActiveGatewaySession {
     pub next_sequence: AtomicU64,
     pub outbound_tx: mpsc::Sender<GatewayMessage>,
     writer_abort: tokio::task::AbortHandle,
+    pub connection: Connection,
 }
 
 /// Core Internet Gateway Bridge coordinating mesh forwarding across authenticated Iroh QUIC streams.
@@ -49,6 +50,7 @@ pub struct GatewayBridge {
     active_sessions: Arc<RwLock<HashMap<EndpointId, ActiveGatewaySession>>>,
     last_session_epoch: AtomicU64,
     transfer_counter: AtomicU64,
+    last_path_observed_unix: AtomicU64,
     inbound_mesh_tx: mpsc::Sender<Vec<u8>>,
     inbound_mesh_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
@@ -114,6 +116,7 @@ impl GatewayBridge {
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             last_session_epoch: AtomicU64::new(0),
             transfer_counter: AtomicU64::new(1),
+            last_path_observed_unix: AtomicU64::new(0),
             inbound_mesh_tx: inbound_tx,
             inbound_mesh_rx: Arc::new(tokio::sync::Mutex::new(inbound_rx)),
         })
@@ -124,13 +127,105 @@ impl GatewayBridge {
         matches!(self.relay_mode, RelayMode::Disabled)
     }
 
-    /// Observed Iroh path classification based on real endpoint relay configuration.
-    pub fn observed_path(&self) -> crate::mesh::router::IrohPathObservation {
+    /// Human-readable configured Iroh relay policy label (`"Disabled"` or `"Default"`).
+    pub fn configured_relay_mode_label(&self) -> &'static str {
         if self.relay_disabled() {
-            crate::mesh::router::IrohPathObservation::Direct
+            "Disabled"
         } else {
-            crate::mesh::router::IrohPathObservation::Unknown
+            "Default"
         }
+    }
+
+    /// Classify a live `iroh::endpoint::Connection` transport path using open QUIC paths.
+    pub fn classify_connection_path(conn: &Connection) -> crate::mesh::router::IrohPathObservation {
+        use crate::mesh::router::IrohPathObservation;
+        let path_list = conn.paths();
+        let mut any_ip = false;
+        let mut any_relay = false;
+        let mut selected_ip = false;
+        let mut selected_relay = false;
+        for p in path_list.iter() {
+            let is_sel = p.is_selected();
+            if p.is_ip() {
+                any_ip = true;
+                if is_sel {
+                    selected_ip = true;
+                }
+            } else if p.is_relay() {
+                any_relay = true;
+                if is_sel {
+                    selected_relay = true;
+                }
+            }
+        }
+        if any_ip && any_relay {
+            IrohPathObservation::Mixed
+        } else if selected_ip || (any_ip && !any_relay) {
+            IrohPathObservation::Direct
+        } else if selected_relay || (any_relay && !any_ip) {
+            IrohPathObservation::Relay
+        } else {
+            IrohPathObservation::Unknown
+        }
+    }
+
+    fn record_path_observation_if_known(
+        &self,
+        obs: crate::mesh::router::IrohPathObservation,
+    ) -> u64 {
+        if obs != crate::mesh::router::IrohPathObservation::Unknown {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            self.last_path_observed_unix
+                .store(now_secs, Ordering::Relaxed);
+            now_secs
+        } else {
+            self.last_path_observed_unix.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Observe live Iroh transport path aggregated across active sessions, plus last observation unix timestamp.
+    pub async fn observed_path_snapshot(&self) -> (crate::mesh::router::IrohPathObservation, u64) {
+        use crate::mesh::router::IrohPathObservation;
+        let sessions = self.active_sessions.read().await;
+        if sessions.is_empty() {
+            return (
+                IrohPathObservation::Unknown,
+                self.last_path_observed_unix.load(Ordering::Relaxed),
+            );
+        }
+
+        let mut saw_direct = false;
+        let mut saw_relay = false;
+        let mut saw_mixed = false;
+        for s in sessions.values() {
+            match Self::classify_connection_path(&s.connection) {
+                IrohPathObservation::Direct => saw_direct = true,
+                IrohPathObservation::Relay => saw_relay = true,
+                IrohPathObservation::Mixed => saw_mixed = true,
+                IrohPathObservation::Unknown => {}
+            }
+        }
+        drop(sessions);
+
+        let agg = if saw_mixed || (saw_direct && saw_relay) {
+            IrohPathObservation::Mixed
+        } else if saw_direct {
+            IrohPathObservation::Direct
+        } else if saw_relay {
+            IrohPathObservation::Relay
+        } else {
+            IrohPathObservation::Unknown
+        };
+        let ts = self.record_path_observation_if_known(agg);
+        (agg, ts)
+    }
+
+    /// Observed Iroh path classification across live active sessions.
+    pub async fn observed_path(&self) -> crate::mesh::router::IrohPathObservation {
+        self.observed_path_snapshot().await.0
     }
 
     pub fn trust_store(&self) -> Arc<RwLock<TrustStore>> {
@@ -701,6 +796,9 @@ impl GatewayBridge {
             let _ = send_stream.finish();
         });
 
+        let initial_obs = Self::classify_connection_path(&conn);
+        let _ = self.record_path_observation_if_known(initial_obs);
+
         let session = ActiveGatewaySession {
             remote_endpoint_id: remote_id,
             remote_bitchat_pubkey,
@@ -708,6 +806,7 @@ impl GatewayBridge {
             next_sequence: AtomicU64::new(2),
             outbound_tx: outbound_tx.clone(),
             writer_abort: writer_handle.abort_handle(),
+            connection: conn,
         };
 
         self.active_sessions
@@ -923,7 +1022,6 @@ impl GatewayBridge {
         }
         let ts_guard = self.trust_store.read().await;
         let sessions = self.active_sessions.read().await;
-        let path = self.observed_path();
 
         let gws =
             self.routes
@@ -945,9 +1043,11 @@ impl GatewayBridge {
 
         gws.into_iter()
             .filter_map(|gw_id| {
-                sessions
-                    .get(&gw_id)
-                    .map(|s| (gw_id, PeerId(s.remote_bitchat_pubkey), path))
+                sessions.get(&gw_id).map(|s| {
+                    let obs = Self::classify_connection_path(&s.connection);
+                    let _ = self.record_path_observation_if_known(obs);
+                    (gw_id, PeerId(s.remote_bitchat_pubkey), obs)
+                })
             })
             .collect()
     }

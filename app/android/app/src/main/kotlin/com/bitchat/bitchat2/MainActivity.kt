@@ -26,6 +26,8 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
     private var bleService: BitchatBleService? = null
     private var isBound = false
     private var pendingShortIdHex: String? = null
+    private val uiGeneration = java.util.concurrent.atomic.AtomicLong(0)
+    private var activeEngineGen: Long = 0
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -48,6 +50,7 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        activeEngineGen = uiGeneration.incrementAndGet()
 
         methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, BLE_CHANNEL).apply {
             setMethodCallHandler { call, result ->
@@ -119,6 +122,23 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
                             }
                         }
                         result.success(true)
+                    }
+                    "destructiveResetKeystore" -> {
+                        val confirm = call.argument<Boolean>("confirm") ?: false
+                        if (!confirm) {
+                            result.error(
+                                "RESET_NOT_CONFIRMED",
+                                "Destructive keystore reset requires confirm=true",
+                                null
+                            )
+                        } else {
+                            try {
+                                AndroidKeystoreProvider.destructiveReset(applicationContext)
+                                result.success(true)
+                            } catch (e: Exception) {
+                                result.error("RESET_ERROR", e.message, null)
+                            }
+                        }
                     }
                     else -> result.notImplemented()
                 }
@@ -219,44 +239,62 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
     }
 
     override fun onPeerConnected(shortId: String) {
+        val gen = activeEngineGen
         runOnUiThread {
-            methodChannel?.invokeMethod("onPeerConnected", mapOf("shortId" to shortId))
+            if (gen == uiGeneration.get()) {
+                methodChannel?.invokeMethod("onPeerConnected", mapOf("shortId" to shortId))
+            }
         }
     }
 
     override fun onPeerDisconnected(shortId: String) {
+        val gen = activeEngineGen
         runOnUiThread {
-            methodChannel?.invokeMethod("onPeerDisconnected", mapOf("shortId" to shortId))
+            if (gen == uiGeneration.get()) {
+                methodChannel?.invokeMethod("onPeerDisconnected", mapOf("shortId" to shortId))
+            }
         }
     }
 
     override fun onFrameReceived(senderShortId: String, data: ByteArray) {
+        val gen = activeEngineGen
         runOnUiThread {
-            methodChannel?.invokeMethod("onFrameReceived", mapOf("sender" to senderShortId, "data" to data))
+            if (gen == uiGeneration.get()) {
+                methodChannel?.invokeMethod("onFrameReceived", mapOf("sender" to senderShortId, "data" to data))
+            }
         }
     }
 
     override fun onPeerRssi(shortId: String, rssi: Int) {
+        val gen = activeEngineGen
         runOnUiThread {
-            methodChannel?.invokeMethod("onPeerRssi", mapOf("shortId" to shortId, "rssi" to rssi))
+            if (gen == uiGeneration.get()) {
+                methodChannel?.invokeMethod("onPeerRssi", mapOf("shortId" to shortId, "rssi" to rssi))
+            }
         }
     }
 
     override fun onResourceStateChanged(batteryPct: Int, charging: Int, powerSave: Int, thermal: Int) {
+        val gen = activeEngineGen
         runOnUiThread {
-            methodChannel?.invokeMethod(
-                "onResourceStateChanged",
-                mapOf(
-                    "batteryPct" to batteryPct,
-                    "charging" to charging,
-                    "powerSave" to powerSave,
-                    "thermal" to thermal
+            if (gen == uiGeneration.get()) {
+                methodChannel?.invokeMethod(
+                    "onResourceStateChanged",
+                    mapOf(
+                        "batteryPct" to batteryPct,
+                        "charging" to charging,
+                        "powerSave" to powerSave,
+                        "thermal" to thermal
+                    )
                 )
-            )
+            }
         }
     }
 
     override fun onDestroy() {
+        uiGeneration.incrementAndGet()
+        bleService?.listener = null
+        methodChannel = null
         stopBleService()
         super.onDestroy()
     }
