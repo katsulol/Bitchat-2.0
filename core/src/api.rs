@@ -459,6 +459,14 @@ impl BitchatCoreService {
         self.ack_timeout = timeout.max(Duration::from_millis(20));
     }
 
+    pub fn set_ble_mtu(&mut self, mtu: usize) -> Result<(), String> {
+        self.node.set_mtu(mtu).map_err(|e| e.to_string())
+    }
+
+    pub fn set_local_supports_volatile(&mut self, supported: bool) {
+        self.volatile_mgr = VolatileSessionManager::new(supported);
+    }
+
     pub fn register_verified_peer_id(&mut self, peer_id: PeerId) {
         self.known_peer_ids.insert(peer_id.short_id(), peer_id);
     }
@@ -646,7 +654,7 @@ impl BitchatCoreService {
         mode_u8: u8,
         deadline_secs: Option<u64>,
     ) -> Result<String, String> {
-        let mode = match mode_u8 {
+        let requested_mode = match mode_u8 {
             0 => MessageMode::Normal,
             1 => MessageMode::Privacy,
             other => {
@@ -685,13 +693,51 @@ impl BitchatCoreService {
             return Err("Recipient is locally blocked".to_string());
         }
 
+        let (mode, ttl_override, track_volatile_send) = match self
+            .volatile_mgr
+            .session_state(&recipient_peer_id)
+        {
+            VolatileSessionState::PendingNegotiation { .. } => {
+                return Err(
+                        "VOLATILE_PENDING_NEGOTIATION: Volatile session negotiation incomplete; refusing send or downgrade"
+                            .to_string(),
+                    );
+            }
+            VolatileSessionState::UnsupportedByPeer => {
+                return Err(
+                        "VOLATILE_UNSUPPORTED_BY_PEER: Peer does not support volatile retention; refusing persistent fallback"
+                            .to_string(),
+                    );
+            }
+            VolatileSessionState::Active {
+                effective_retention,
+                ..
+            } => {
+                let clamped_ttl = match deadline_secs {
+                    Some(req) => Duration::from_secs(
+                        req.min(
+                            effective_retention
+                                .as_secs()
+                                .max(crate::storage::MIN_DEADLINE_SECS),
+                        ),
+                    ),
+                    None => effective_retention,
+                };
+                (MessageMode::Privacy, Some(clamped_ttl), true)
+            }
+            VolatileSessionState::NotRequested => (
+                requested_mode,
+                deadline_secs.map(Duration::from_secs),
+                false,
+            ),
+        };
+
         let now_instant = Instant::now();
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        let ttl_override = deadline_secs.map(Duration::from_secs);
         let send_res = self.outbox_mgr.send_to(
             recipient_peer_id,
             text.as_bytes().to_vec(),
@@ -704,6 +750,10 @@ impl BitchatCoreService {
             SendResult::Accepted { logical_id, state } => (logical_id, state),
             SendResult::Rejected(e) => return Err(format!("Send rejected: {e:?}")),
         };
+        if track_volatile_send {
+            self.volatile_mgr
+                .register_pending_volatile_send(recipient_peer_id, logical_id);
+        }
 
         let actual_ttl = ttl_override.unwrap_or_else(|| mode.default_ttl());
         let expires_at_unix = self
@@ -1564,7 +1614,7 @@ impl BitchatCoreService {
 
     pub async fn poll_inbound(&mut self) -> Result<Option<BridgeMessage>, String> {
         let mut steps = 0;
-        while steps < 10 {
+        while steps < 64 {
             match self.node.poll_step(Instant::now()).await {
                 Ok(true) => steps += 1,
                 Ok(false) => break,

@@ -452,6 +452,11 @@ impl Session {
                 send_nonce,
                 ..
             } => {
+                if *send_nonce == u64::MAX {
+                    return Err(Error::Crypto(
+                        "Send nonce exhausted; session rekey required".into(),
+                    ));
+                }
                 let nonce = *send_nonce;
                 let mut out = vec![0u8; NONCE_LEN + plaintext.len() + TAG_LEN];
                 out[0..NONCE_LEN].copy_from_slice(&nonce.to_be_bytes());
@@ -461,15 +466,23 @@ impl Session {
                     .map_err(|e| Error::Crypto(format!("Stateless encryption failed: {e}")))?;
                 out.truncate(NONCE_LEN + len);
 
-                *send_nonce = send_nonce
-                    .checked_add(1)
-                    .ok_or_else(|| Error::Crypto("Send nonce counter overflowed".into()))?;
+                *send_nonce = send_nonce.checked_add(1).ok_or_else(|| {
+                    Error::Crypto("Send nonce exhausted; session rekey required".into())
+                })?;
 
                 Ok(out)
             }
             _ => Err(Error::Crypto(
                 "Cannot encrypt: session not in transport mode".into(),
             )),
+        }
+    }
+
+    /// Return current outgoing nonce counter if session is in transport mode.
+    pub fn send_nonce(&self) -> Option<u64> {
+        match &self.state {
+            SessionState::Transport { send_nonce, .. } => Some(*send_nonce),
+            _ => None,
         }
     }
 
@@ -819,5 +832,31 @@ mod tests {
 
         // Truncated buffer rejected
         assert!(HandshakeFrame::decode(&encoded[..10]).is_err());
+    }
+
+    #[test]
+    fn test_send_nonce_exhaustion_refuses_wrap_and_reserved_max() {
+        let alice_id = Identity::generate();
+        let bob_id = Identity::generate();
+        let mut alice = Session::initiator(&alice_id).unwrap();
+        let mut bob = Session::responder(&bob_id).unwrap();
+        establish_handshake(&mut alice, &mut bob).unwrap();
+
+        if let SessionState::Transport { send_nonce, .. } = &mut alice.state {
+            *send_nonce = u64::MAX - 1;
+        } else {
+            panic!("Expected transport state");
+        }
+
+        // Nonce u64::MAX - 1 is the last usable nonce; encrypt succeeds and advances to u64::MAX
+        let last_ok = alice.encrypt(b"last-before-rekey").unwrap();
+        assert_eq!(alice.send_nonce(), Some(u64::MAX));
+        assert_eq!(bob.decrypt(&last_ok).unwrap(), b"last-before-rekey");
+
+        // At u64::MAX, encrypt must refuse before calling Noise transport or wrapping
+        let exhausted = alice.encrypt(b"must-fail");
+        assert!(exhausted.is_err());
+        assert!(exhausted.unwrap_err().to_string().contains("exhausted"));
+        assert_eq!(alice.send_nonce(), Some(u64::MAX));
     }
 }

@@ -182,6 +182,18 @@ impl<T: Transport> MeshNode<T> {
         self
     }
 
+    /// Dynamically update link-layer MTU (must exceed `FRAGMENT_HEADER_LEN = 4`).
+    pub fn set_mtu(&mut self, mtu: usize) -> Result<()> {
+        if mtu <= crate::mesh::fragment::FRAGMENT_HEADER_LEN {
+            return Err(crate::error::Error::Transport(format!(
+                "MTU {mtu} must exceed fragment header length ({})",
+                crate::mesh::fragment::FRAGMENT_HEADER_LEN
+            )));
+        }
+        self.mtu = mtu;
+        Ok(())
+    }
+
     /// Set relay policy dynamically.
     pub fn set_policy(&mut self, policy: Box<dyn RelayPolicy>) {
         self.policy = policy;
