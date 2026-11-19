@@ -7,10 +7,10 @@ pub mod voucher;
 
 pub use model::{
     ActiveVoucherGrant, AuthOutcome, AuthReason, AuthorizationContext, AuthorizationDecision,
-    Capability, PeerTrustState,
+    Capability, InboundAuthEvent, PeerLinkIdentityState, PeerTrustState, PendingMessageRequest,
 };
 pub use policy::TrustPolicy;
-pub use store::{TrustQuotaConfig, TrustStore};
+pub use store::{TrustQuotaConfig, TrustStore, DEFAULT_MAX_PENDING_REQUESTS};
 pub use voucher::{
     SignedVoucher, SignedVoucherRevocation, MAX_FUTURE_ISSUED_SKEW_SECS, MAX_IMPORT_REQUEST_BYTES,
     MAX_VOUCHER_LIFETIME_SECS, SIGNED_REVOCATION_WIRE_LEN, SIGNED_VOUCHER_WIRE_LEN, VOUCH_DOMAIN,

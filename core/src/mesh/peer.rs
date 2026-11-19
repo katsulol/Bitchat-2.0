@@ -774,6 +774,7 @@ mod tests {
             msg_id: [1u8; 8],
             hop_count: 0,
             payload: stale_frame.encode(),
+            immediate_relay: None,
         };
 
         let handled = mgr_a
@@ -846,6 +847,7 @@ mod tests {
             msg_id: [2u8; 8],
             hop_count: 0,
             payload: eve_frame2.encode(),
+            immediate_relay: None,
         };
 
         // Alice processes the spoofed message
@@ -880,6 +882,7 @@ mod tests {
             msg_id: [3u8; 8],
             hop_count: 0,
             payload: vec![0xFF, 0x00], // Truncated / invalid version
+            immediate_relay: None,
         };
 
         let res = mgr_a.handle_handshake(&mut node_a, &malformed_msg).await;

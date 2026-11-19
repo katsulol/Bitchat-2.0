@@ -379,9 +379,10 @@ pub unsafe extern "C" fn bitchat_poll_inbound(out_json: *mut *mut c_char) -> i32
                 .replace('\\', "\\\\")
                 .replace('\"', "\\\"")
                 .replace('\n', "\\n");
+            let escaped_auth = msg.auth_status.replace('\\', "\\\\").replace('\"', "\\\"");
             let json = format!(
-                "{{\"msg_id\":\"{}\",\"sender\":\"{}\",\"recipient\":{},\"text\":\"{}\",\"hop_count\":{},\"is_broadcast\":{}}}",
-                msg.msg_id, msg.sender, recip_json, escaped_text, msg.hop_count, msg.is_broadcast
+                "{{\"msg_id\":\"{}\",\"sender\":\"{}\",\"recipient\":{},\"text\":\"{}\",\"hop_count\":{},\"is_broadcast\":{},\"auth_status\":\"{}\"}}",
+                msg.msg_id, msg.sender, recip_json, escaped_text, msg.hop_count, msg.is_broadcast, escaped_auth
             );
             *out_json = string_to_c_char(json);
             1 // Message available

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -15,14 +15,15 @@ use crate::mesh::delivery::{
 };
 use crate::mesh::peer::PeerSessionManager;
 use crate::mesh::policy::CoverageAwareFlood;
-use crate::mesh::proximity::ProximityTracker;
+use crate::mesh::proximity::{ProximityCategory, ProximityTracker};
 use crate::mesh::relay::{MeshNode, SendTarget};
 use crate::mesh::resource::{
     BatteryBand, NetworkMetering, RelayResourceProfile, ResourceBudgetManager, ResourceSnapshot,
     ThermalState, TriState,
 };
 use crate::mesh::router::{
-    GatewayCandidate, ObservedTransport, RouteCandidateMulti, RouteContextMulti, Router,
+    GatewayCandidate, ObservedTransport, RouteCandidateMulti, RouteContextMulti, RouteReason,
+    Router,
 };
 use crate::storage::volatile::{
     VolatileNegotiationFrame, VolatileSessionManager, VolatileSessionState, VOLATILE_MAGIC,
@@ -34,8 +35,9 @@ use crate::storage::{
 use crate::transport::bridge::{BridgeHandle, BridgeTransport};
 use crate::transport::Transport;
 use crate::trust::{
-    AuthOutcome, AuthorizationContext, Capability, SignedVoucher, TrustPolicy, TrustQuotaConfig,
-    TrustStore,
+    AuthOutcome, AuthReason, AuthorizationContext, Capability, InboundAuthEvent,
+    PeerLinkIdentityState, PeerTrustState, PendingMessageRequest, SignedVoucher, TrustPolicy,
+    TrustQuotaConfig, TrustStore, DEFAULT_MAX_PENDING_REQUESTS,
 };
 
 pub const CORE_BUILD_VERSION: &str = "v2.0.5-phase5";
@@ -105,6 +107,7 @@ pub struct BridgeMessage {
     pub text: String,
     pub hop_count: u8,
     pub is_broadcast: bool,
+    pub auth_status: String,
 }
 
 /// Outbound BLE radio frame emitted by Rust core to be written to peripheral/central GATT.
@@ -113,6 +116,8 @@ pub struct BridgeOutbound {
     pub to: Option<String>,
     pub bytes: Vec<u8>,
 }
+
+const MAX_AUTH_EVENT_QUEUE: usize = 128;
 
 /// Core service managing the node runtime, outbox, trust, and gateway bridge.
 pub struct BitchatCoreService {
@@ -126,6 +131,9 @@ pub struct BitchatCoreService {
     gateway_bridge: Option<Arc<GatewayBridge>>,
     last_route_candidate: Option<String>,
     trust_store: Arc<RwLock<TrustStore>>,
+    link_identities: HashMap<String, PeerLinkIdentityState>,
+    auth_events: VecDeque<InboundAuthEvent>,
+    pending_message_requests: VecDeque<PendingMessageRequest>,
     resource_mgr: Arc<std::sync::Mutex<ResourceBudgetManager>>,
     resource_snapshot: ResourceSnapshot,
     relay_contribution_mode: String,
@@ -256,6 +264,9 @@ impl BitchatCoreService {
                 peer_id,
                 TrustQuotaConfig::default(),
             ))),
+            link_identities: HashMap::new(),
+            auth_events: VecDeque::with_capacity(MAX_AUTH_EVENT_QUEUE),
+            pending_message_requests: VecDeque::with_capacity(DEFAULT_MAX_PENDING_REQUESTS),
             resource_mgr,
             resource_snapshot: ResourceSnapshot::default_at(now_instant),
             relay_contribution_mode: "balanced".to_string(),
@@ -290,6 +301,81 @@ impl BitchatCoreService {
 
     pub fn register_verified_peer_id(&mut self, peer_id: PeerId) {
         self.known_peer_ids.insert(peer_id.short_id(), peer_id);
+    }
+
+    pub fn trust_store_arc(&self) -> Arc<RwLock<TrustStore>> {
+        Arc::clone(&self.trust_store)
+    }
+
+    pub fn on_unbound_link_connected(&mut self, link_id: String) {
+        self.link_identities
+            .entry(link_id.clone())
+            .or_insert(PeerLinkIdentityState::UnboundLink { link_id });
+    }
+
+    pub fn record_link_rssi(&mut self, link_id: &str, rssi_dbm: i8) -> ProximityCategory {
+        let now_inst = Instant::now();
+        self.link_identities
+            .entry(link_id.to_string())
+            .or_insert_with(|| PeerLinkIdentityState::UnboundLink {
+                link_id: link_id.to_string(),
+            });
+        self.proximity_tracker
+            .record_direct_link_rssi(link_id, rssi_dbm, 1, now_inst);
+
+        match self.link_identities.get(link_id) {
+            Some(PeerLinkIdentityState::VerifiedPeer { peer_id, .. }) => {
+                self.proximity_tracker.peer_proximity(peer_id, now_inst)
+            }
+            _ => ProximityCategory::Unknown,
+        }
+    }
+
+    pub fn link_identity_state(&self, link_id: &str) -> Option<&PeerLinkIdentityState> {
+        self.link_identities.get(link_id)
+    }
+
+    pub fn disallow_immediate_relay(&mut self, peer: ShortId) {
+        self.node.disallow_immediate_relay(peer);
+    }
+
+    pub fn allow_immediate_relay(&mut self, peer: ShortId) {
+        self.node.allow_immediate_relay(peer);
+    }
+
+    pub fn poll_auth_events(&mut self) -> Vec<InboundAuthEvent> {
+        self.auth_events.drain(..).collect()
+    }
+
+    pub fn pending_message_requests(&self) -> Vec<PendingMessageRequest> {
+        self.pending_message_requests.iter().cloned().collect()
+    }
+
+    fn push_auth_event(&mut self, ev: InboundAuthEvent) {
+        if self.auth_events.len() >= MAX_AUTH_EVENT_QUEUE {
+            self.auth_events.pop_front();
+        }
+        self.auth_events.push_back(ev);
+    }
+
+    fn push_pending_request(&mut self, req: PendingMessageRequest) {
+        if self
+            .pending_message_requests
+            .iter()
+            .any(|existing| existing.logical_id == req.logical_id)
+        {
+            return;
+        }
+        if self.pending_message_requests.len() >= DEFAULT_MAX_PENDING_REQUESTS {
+            self.pending_message_requests.pop_front();
+        }
+        self.pending_message_requests.push_back(req);
+    }
+
+    pub fn clear_pending_requests_for(&mut self, peer: &PeerId) {
+        let peer_hex = peer.to_string();
+        self.pending_message_requests
+            .retain(|req| req.sender_peer_id != peer_hex);
     }
 
     pub async fn set_gateway_opted_in(&mut self, opted_in: bool) {
@@ -341,12 +427,30 @@ impl BitchatCoreService {
         let target = hex_to_short_id(&recipient_short_id)?;
         if let Some(session) = self.peer_mgr.get_session(&target) {
             if session.is_handshake_finished() {
-                let msg_id = self
-                    .peer_mgr
-                    .send_encrypted(&mut self.node, target, text.as_bytes())
-                    .await
-                    .map_err(|e| format!("E2E encrypted send failed: {e}"))?;
-                return Ok(hex::encode(msg_id));
+                if let Some(pid) = self.peer_mgr.verified_peer_id(&target) {
+                    let now_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    let mut logical_id = [0u8; 16];
+                    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut logical_id);
+                    let frame = ApplicationFrame::new_message(
+                        logical_id,
+                        self.node.identity().peer_id(),
+                        pid,
+                        text.into_bytes(),
+                        Duration::from_secs(900),
+                        now_secs,
+                    );
+                    let padded = pad_inner_payload(&frame.encode(), true)
+                        .map_err(|e| format!("Padding failed: {e}"))?;
+                    let msg_id = self
+                        .peer_mgr
+                        .send_encrypted(&mut self.node, target, &padded)
+                        .await
+                        .map_err(|e| format!("E2E encrypted send failed: {e}"))?;
+                    return Ok(hex::encode(msg_id));
+                }
             } else if session.is_failed() {
                 let _ = self
                     .peer_mgr
@@ -408,6 +512,13 @@ impl BitchatCoreService {
         };
 
         self.known_peer_ids.insert(target, recipient_peer_id);
+
+        if matches!(
+            self.trust_store.read().await.peer_state(&recipient_peer_id),
+            PeerTrustState::Blocked { .. }
+        ) {
+            return Err("Recipient is locally blocked".to_string());
+        }
 
         let now_instant = Instant::now();
         let now_secs = std::time::SystemTime::now()
@@ -493,6 +604,37 @@ impl BitchatCoreService {
 
         if now_instant >= initial_rec.expires_at {
             let _ = self.delivery_coord.check_timeouts(now_instant);
+            return false;
+        }
+
+        // Re-check recipient trust state before admitting/resuming outbound work
+        let recip_trust = self
+            .trust_store
+            .read()
+            .await
+            .peer_state(&initial_rec.recipient_peer_id);
+        if matches!(
+            recip_trust,
+            PeerTrustState::Blocked { .. } | PeerTrustState::Revoked { .. }
+        ) {
+            let reason_label = if matches!(recip_trust, PeerTrustState::Blocked { .. }) {
+                "RecipientBlocked"
+            } else {
+                "RecipientRevoked"
+            };
+            self.delivery_coord
+                .fail(&logical_id, RouteReason::ExhaustedAttemptsQueue);
+            let _ = self.outbox_mgr.mark_failed(&logical_id);
+            self.delivery_events.push(DeliveryEventRecord {
+                logical_id: hex::encode(logical_id),
+                state: "Failed".to_string(),
+                recipient: initial_rec.recipient_peer_id.to_string(),
+                timestamp: now_secs,
+                reason: reason_label.to_string(),
+                transport: "Unknown".to_string(),
+                attempt_count: initial_rec.attempts,
+                expires_at: initial_rec.expires_at_unix,
+            });
             return false;
         }
 
@@ -1123,9 +1265,26 @@ impl BitchatCoreService {
             .peer_mgr
             .verified_peer_id(&peer)
             .or_else(|| self.known_peer_ids.get(&peer).copied());
+        let link_key = peer.to_string();
         if let Some(pid) = verified_pid {
+            self.link_identities.insert(
+                link_key.clone(),
+                PeerLinkIdentityState::VerifiedPeer {
+                    link_id: link_key.clone(),
+                    short_id: peer,
+                    peer_id: pid,
+                },
+            );
             self.proximity_tracker
-                .bind_verified_peer(&peer.to_string(), pid, Instant::now());
+                .bind_verified_peer(&link_key, pid, Instant::now());
+        } else {
+            self.link_identities.insert(
+                link_key,
+                PeerLinkIdentityState::ClaimedShortId {
+                    link_id: peer.to_string(),
+                    short_id: peer,
+                },
+            );
         }
         self.delivery_coord.reset_backoff_for_verified_peer(
             &peer,
@@ -1147,9 +1306,10 @@ impl BitchatCoreService {
 
     pub async fn on_peer_disconnected(&mut self, short_id: String) -> Result<(), String> {
         let peer = hex_to_short_id(&short_id)?;
+        let link_key = peer.to_string();
         self.handle.on_peer_disconnected(peer);
-        self.proximity_tracker
-            .on_link_disconnected(&peer.to_string());
+        self.link_identities.remove(&link_key);
+        self.proximity_tracker.on_link_disconnected(&link_key);
         self.spawn_announce_local_peers();
         Ok(())
     }
@@ -1185,10 +1345,15 @@ impl BitchatCoreService {
         }
 
         if let Some(msg) = self.node.recv_inbound() {
+            let now_inst = Instant::now();
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
             if msg.msg_type == MsgType::Handshake {
                 let _ = self.peer_mgr.handle_handshake(&mut self.node, &msg).await;
                 if self.peer_mgr.is_session_ready(&msg.origin_sender) {
-                    let now_inst = Instant::now();
                     self.delivery_coord.reset_backoff_for_verified_peer(
                         &msg.origin_sender,
                         true,
@@ -1198,197 +1363,281 @@ impl BitchatCoreService {
                         .clear_attempted_gateways_for_peer(&msg.origin_sender);
                     if let Some(pid) = self.peer_mgr.verified_peer_id(&msg.origin_sender) {
                         self.known_peer_ids.insert(msg.origin_sender, pid);
-                        self.proximity_tracker.bind_verified_peer(
-                            &msg.origin_sender.to_string(),
-                            pid,
-                            now_inst,
-                        );
+                        let _ = self.trust_store.write().await.record_identity_verified(pid);
+
+                        // Bind direct-link RSSI and link identity ONLY on single-hop direct link
+                        let is_direct_single_hop = msg.hop_count == 0
+                            && msg.immediate_relay == Some(msg.origin_sender)
+                            && self.handle.connected_peers().contains(&msg.origin_sender);
+                        if is_direct_single_hop {
+                            let link_key = msg.origin_sender.to_string();
+                            self.link_identities.insert(
+                                link_key.clone(),
+                                PeerLinkIdentityState::VerifiedPeer {
+                                    link_id: link_key.clone(),
+                                    short_id: msg.origin_sender,
+                                    peer_id: pid,
+                                },
+                            );
+                            self.proximity_tracker
+                                .bind_verified_peer(&link_key, pid, now_inst);
+                        }
                         self.spawn_announce_local_peers();
                     }
                 }
                 return Ok(None);
             }
 
-            if let Ok(decrypted) = self.peer_mgr.decrypt_inbound(&msg) {
+            if !msg.recipient.is_broadcast() {
+                let decrypted = match self.peer_mgr.decrypt_inbound(&msg) {
+                    Ok(d) => d,
+                    Err(_) => {
+                        self.push_auth_event(InboundAuthEvent {
+                            peer_id: String::new(),
+                            short_id: msg.origin_sender.to_string(),
+                            logical_id: None,
+                            outcome: AuthOutcome::Deny,
+                            reason: AuthReason::CapabilityNotGranted,
+                            capability: "ReceiveDirectMessage".to_string(),
+                            timestamp: now_secs,
+                        });
+                        return Ok(None);
+                    }
+                };
+
                 let auth_sender = decrypted.remote_peer_id;
                 self.known_peer_ids
                     .insert(decrypted.origin_sender, auth_sender);
 
-                let now_inst = Instant::now();
-                let now_secs = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let Ok(unpadded) = unpad_bucket(&decrypted.plaintext) else {
+                    self.push_auth_event(InboundAuthEvent {
+                        peer_id: auth_sender.to_string(),
+                        short_id: decrypted.origin_sender.to_string(),
+                        logical_id: None,
+                        outcome: AuthOutcome::Deny,
+                        reason: AuthReason::CapabilityNotGranted,
+                        capability: "ReceiveDirectMessage".to_string(),
+                        timestamp: now_secs,
+                    });
+                    return Ok(None);
+                };
 
-                let unpadded = unpad_bucket(&decrypted.plaintext)
-                    .unwrap_or_else(|_| decrypted.plaintext.clone());
+                let Ok(app_frame) = ApplicationFrame::decode(&unpadded) else {
+                    self.push_auth_event(InboundAuthEvent {
+                        peer_id: auth_sender.to_string(),
+                        short_id: decrypted.origin_sender.to_string(),
+                        logical_id: None,
+                        outcome: AuthOutcome::Deny,
+                        reason: AuthReason::CapabilityNotGranted,
+                        capability: "ReceiveDirectMessage".to_string(),
+                        timestamp: now_secs,
+                    });
+                    return Ok(None);
+                };
 
-                if let Ok(app_frame) = ApplicationFrame::decode(&unpadded) {
-                    match app_frame.kind {
-                        ApplicationFrameKind::Message => {
-                            if app_frame.sender_peer_id != auth_sender
-                                || app_frame.recipient_peer_id != self.node.identity().peer_id()
-                            {
-                                return Ok(None);
-                            }
+                match app_frame.kind {
+                    ApplicationFrameKind::Message => {
+                        if app_frame.sender_peer_id != auth_sender
+                            || app_frame.recipient_peer_id != self.node.identity().peer_id()
+                        {
+                            self.push_auth_event(InboundAuthEvent {
+                                peer_id: auth_sender.to_string(),
+                                short_id: decrypted.origin_sender.to_string(),
+                                logical_id: Some(hex::encode(app_frame.logical_id)),
+                                outcome: AuthOutcome::Deny,
+                                reason: AuthReason::CapabilityNotGranted,
+                                capability: "ReceiveDirectMessage".to_string(),
+                                timestamp: now_secs,
+                            });
+                            return Ok(None);
+                        }
 
-                            let auth_ctx = AuthorizationContext {
-                                now_monotonic: now_inst,
-                                now_unix: Some(now_secs),
-                                gateway_opted_in: self.gateway_opted_in,
-                                allow_vouched_gateway_forwarding: false,
-                            };
-                            let trust_dec = {
-                                let mut ts = self.trust_store.write().await;
-                                TrustPolicy::authorize(
-                                    &mut ts,
-                                    &auth_sender,
-                                    Capability::ReceiveDirectMessage,
-                                    &auth_ctx,
-                                )
-                            };
-                            if trust_dec.outcome == AuthOutcome::Deny {
-                                return Ok(None);
-                            }
+                        let auth_ctx = AuthorizationContext {
+                            now_monotonic: now_inst,
+                            now_unix: Some(now_secs),
+                            gateway_opted_in: self.gateway_opted_in,
+                            allow_vouched_gateway_forwarding: false,
+                        };
+                        let trust_dec = {
+                            let mut ts = self.trust_store.write().await;
+                            TrustPolicy::authorize(
+                                &mut ts,
+                                &auth_sender,
+                                Capability::ReceiveDirectMessage,
+                                &auth_ctx,
+                            )
+                        };
+                        if trust_dec.outcome == AuthOutcome::Deny {
+                            self.push_auth_event(InboundAuthEvent {
+                                peer_id: auth_sender.to_string(),
+                                short_id: decrypted.origin_sender.to_string(),
+                                logical_id: Some(hex::encode(app_frame.logical_id)),
+                                outcome: AuthOutcome::Deny,
+                                reason: trust_dec.reason,
+                                capability: "ReceiveDirectMessage".to_string(),
+                                timestamp: now_secs,
+                            });
+                            return Ok(None);
+                        }
 
-                            if app_frame.body.starts_with(VOLATILE_MAGIC) {
-                                if let Ok(vframe) =
-                                    VolatileNegotiationFrame::decode(&app_frame.body)
+                        if app_frame.body.starts_with(VOLATILE_MAGIC) {
+                            if let Ok(vframe) = VolatileNegotiationFrame::decode(&app_frame.body) {
+                                if let Ok(Some(resp_frame)) =
+                                    self.volatile_mgr.handle_negotiation_frame(
+                                        auth_sender,
+                                        &vframe,
+                                        &mut self.outbox_mgr,
+                                        &mut self.delivery_coord,
+                                    )
                                 {
-                                    if let Ok(Some(resp_frame)) =
-                                        self.volatile_mgr.handle_negotiation_frame(
-                                            auth_sender,
-                                            &vframe,
-                                            &mut self.outbox_mgr,
-                                            &mut self.delivery_coord,
-                                        )
+                                    let mut resp_logical_id = [0u8; 16];
+                                    rand::RngCore::fill_bytes(
+                                        &mut rand::rngs::OsRng,
+                                        &mut resp_logical_id,
+                                    );
+                                    let resp_app = ApplicationFrame::new_message(
+                                        resp_logical_id,
+                                        self.node.identity().peer_id(),
+                                        auth_sender,
+                                        resp_frame.encode().to_vec(),
+                                        Duration::from_secs(60),
+                                        now_secs,
+                                    );
+                                    if let Ok(padded_resp) =
+                                        pad_inner_payload(&resp_app.encode(), true)
                                     {
-                                        let mut resp_logical_id = [0u8; 16];
-                                        rand::RngCore::fill_bytes(
-                                            &mut rand::rngs::OsRng,
-                                            &mut resp_logical_id,
-                                        );
-                                        let resp_app = ApplicationFrame::new_message(
-                                            resp_logical_id,
-                                            self.node.identity().peer_id(),
-                                            auth_sender,
-                                            resp_frame.encode().to_vec(),
-                                            Duration::from_secs(60),
-                                            now_secs,
-                                        );
-                                        if let Ok(padded_resp) =
-                                            pad_inner_payload(&resp_app.encode(), true)
-                                        {
-                                            let _ = self
-                                                .peer_mgr
-                                                .send_encrypted(
-                                                    &mut self.node,
-                                                    decrypted.origin_sender,
-                                                    &padded_resp,
-                                                )
-                                                .await;
-                                        }
+                                        let _ = self
+                                            .peer_mgr
+                                            .send_encrypted(
+                                                &mut self.node,
+                                                decrypted.origin_sender,
+                                                &padded_resp,
+                                            )
+                                            .await;
                                     }
                                 }
+                            }
+                            return Ok(None);
+                        }
+
+                        let auth_status = if trust_dec.outcome == AuthOutcome::Pending {
+                            let reg_ok = {
+                                let mut ts = self.trust_store.write().await;
+                                ts.record_identity_verified(auth_sender).is_ok()
+                            };
+                            if !reg_ok {
+                                self.push_auth_event(InboundAuthEvent {
+                                    peer_id: auth_sender.to_string(),
+                                    short_id: decrypted.origin_sender.to_string(),
+                                    logical_id: Some(hex::encode(app_frame.logical_id)),
+                                    outcome: AuthOutcome::Deny,
+                                    reason: AuthReason::MessageRequestQuotaExceeded,
+                                    capability: "ReceiveDirectMessage".to_string(),
+                                    timestamp: now_secs,
+                                });
                                 return Ok(None);
                             }
+                            let is_vol = !matches!(
+                                self.volatile_mgr.session_state(&auth_sender),
+                                VolatileSessionState::NotRequested
+                            );
+                            self.push_pending_request(PendingMessageRequest {
+                                sender_peer_id: auth_sender.to_string(),
+                                sender_short_id: decrypted.origin_sender.to_string(),
+                                logical_id: hex::encode(app_frame.logical_id),
+                                reason: trust_dec.reason,
+                                received_at_unix: now_secs,
+                                is_volatile: is_vol,
+                            });
+                            self.push_auth_event(InboundAuthEvent {
+                                peer_id: auth_sender.to_string(),
+                                short_id: decrypted.origin_sender.to_string(),
+                                logical_id: Some(hex::encode(app_frame.logical_id)),
+                                outcome: AuthOutcome::Pending,
+                                reason: trust_dec.reason,
+                                capability: "ReceiveDirectMessage".to_string(),
+                                timestamp: now_secs,
+                            });
+                            "PendingRequest".to_string()
+                        } else {
+                            self.push_auth_event(InboundAuthEvent {
+                                peer_id: auth_sender.to_string(),
+                                short_id: decrypted.origin_sender.to_string(),
+                                logical_id: Some(hex::encode(app_frame.logical_id)),
+                                outcome: AuthOutcome::Allow,
+                                reason: trust_dec.reason,
+                                capability: "ReceiveDirectMessage".to_string(),
+                                timestamp: now_secs,
+                            });
+                            "Allowed".to_string()
+                        };
 
-                            let dedup_status = self.dedup.check_or_insert(
-                                &auth_sender,
-                                &app_frame.logical_id,
+                        let dedup_status = self.dedup.check_or_insert(
+                            &auth_sender,
+                            &app_frame.logical_id,
+                            now_inst,
+                        );
+
+                        let ack = ApplicationFrame::new_ack(
+                            app_frame.logical_id,
+                            self.node.identity().peer_id(),
+                            auth_sender,
+                            now_secs,
+                        );
+                        if let Ok(padded_ack) = pad_inner_payload(&ack.encode(), true) {
+                            let _ = self
+                                .peer_mgr
+                                .send_encrypted(
+                                    &mut self.node,
+                                    decrypted.origin_sender,
+                                    &padded_ack,
+                                )
+                                .await;
+                        }
+
+                        if dedup_status == DedupStatus::New {
+                            let _ = self.volatile_mgr.record_volatile_message(
+                                auth_sender,
+                                app_frame.logical_id,
+                                auth_sender,
+                                app_frame.body.clone(),
                                 now_inst,
                             );
-
-                            let ack = ApplicationFrame::new_ack(
-                                app_frame.logical_id,
-                                self.node.identity().peer_id(),
-                                auth_sender,
-                                now_secs,
-                            );
-                            if let Ok(padded_ack) = pad_inner_payload(&ack.encode(), true) {
-                                let _ = self
-                                    .peer_mgr
-                                    .send_encrypted(
-                                        &mut self.node,
-                                        decrypted.origin_sender,
-                                        &padded_ack,
-                                    )
-                                    .await;
-                            }
-
-                            if dedup_status == DedupStatus::New {
-                                let _ = self.volatile_mgr.record_volatile_message(
-                                    auth_sender,
-                                    app_frame.logical_id,
-                                    auth_sender,
-                                    app_frame.body.clone(),
-                                    now_inst,
-                                );
-                                let text = String::from_utf8_lossy(&app_frame.body).to_string();
-                                return Ok(Some(BridgeMessage {
-                                    msg_id: hex::encode(app_frame.logical_id),
-                                    sender: decrypted.origin_sender.to_string(),
-                                    recipient: Some(self.node.short_id().to_string()),
-                                    text,
-                                    hop_count: decrypted.hop_count,
-                                    is_broadcast: false,
-                                }));
-                            }
-                            return Ok(None);
+                            let text = String::from_utf8_lossy(&app_frame.body).to_string();
+                            return Ok(Some(BridgeMessage {
+                                msg_id: hex::encode(app_frame.logical_id),
+                                sender: decrypted.origin_sender.to_string(),
+                                recipient: Some(self.node.short_id().to_string()),
+                                text,
+                                hop_count: decrypted.hop_count,
+                                is_broadcast: false,
+                                auth_status,
+                            }));
                         }
-                        ApplicationFrameKind::Ack => {
-                            if let Ok(true) =
-                                self.delivery_coord.handle_ack(&app_frame, &auth_sender)
-                            {
-                                let _ = self.outbox_mgr.mark_delivered(&app_frame.logical_id);
-                                let meta = self.delivery_coord.get_record(&app_frame.logical_id);
-                                let transport = meta
-                                    .map(|r| format!("{:?}", r.last_transport))
-                                    .unwrap_or_else(|| "Unknown".to_string());
-                                let attempt_count = meta.map(|r| r.attempts).unwrap_or(0);
-                                let expires_at = meta.map(|r| r.expires_at_unix).unwrap_or(0);
-                                self.delivery_events.push(DeliveryEventRecord {
-                                    logical_id: hex::encode(app_frame.logical_id),
-                                    state: "Delivered".to_string(),
-                                    recipient: auth_sender.to_string(),
-                                    timestamp: now_secs,
-                                    reason: "Delivered".to_string(),
-                                    transport,
-                                    attempt_count,
-                                    expires_at,
-                                });
-                            }
-                            return Ok(None);
-                        }
-                    }
-                } else {
-                    let auth_ctx = AuthorizationContext {
-                        now_monotonic: now_inst,
-                        now_unix: Some(now_secs),
-                        gateway_opted_in: self.gateway_opted_in,
-                        allow_vouched_gateway_forwarding: false,
-                    };
-                    let trust_dec = {
-                        let mut ts = self.trust_store.write().await;
-                        TrustPolicy::authorize(
-                            &mut ts,
-                            &auth_sender,
-                            Capability::ReceiveDirectMessage,
-                            &auth_ctx,
-                        )
-                    };
-                    if trust_dec.outcome == AuthOutcome::Deny {
                         return Ok(None);
                     }
-                    let text = String::from_utf8_lossy(&decrypted.plaintext).to_string();
-                    return Ok(Some(BridgeMessage {
-                        msg_id: hex::encode(msg.msg_id),
-                        sender: decrypted.origin_sender.to_string(),
-                        recipient: Some(self.node.short_id().to_string()),
-                        text,
-                        hop_count: decrypted.hop_count,
-                        is_broadcast: false,
-                    }));
+                    ApplicationFrameKind::Ack => {
+                        if let Ok(true) = self.delivery_coord.handle_ack(&app_frame, &auth_sender) {
+                            let _ = self.outbox_mgr.mark_delivered(&app_frame.logical_id);
+                            let meta = self.delivery_coord.get_record(&app_frame.logical_id);
+                            let transport = meta
+                                .map(|r| format!("{:?}", r.last_transport))
+                                .unwrap_or_else(|| "Unknown".to_string());
+                            let attempt_count = meta.map(|r| r.attempts).unwrap_or(0);
+                            let expires_at = meta.map(|r| r.expires_at_unix).unwrap_or(0);
+                            self.delivery_events.push(DeliveryEventRecord {
+                                logical_id: hex::encode(app_frame.logical_id),
+                                state: "Delivered".to_string(),
+                                recipient: auth_sender.to_string(),
+                                timestamp: now_secs,
+                                reason: "Delivered".to_string(),
+                                transport,
+                                attempt_count,
+                                expires_at,
+                            });
+                        }
+                        return Ok(None);
+                    }
                 }
             }
 
@@ -1401,6 +1650,7 @@ impl BitchatCoreService {
                     text,
                     hop_count: msg.hop_count,
                     is_broadcast: true,
+                    auth_status: "Broadcast".to_string(),
                 }));
             }
 
@@ -1722,6 +1972,30 @@ impl BitchatCoreService {
         if let Some((bridge, block)) = bridge_to_revoke {
             bridge.revoke_or_block_by_peer_id(&pid, block).await;
         }
+        if action == "revoke" || action == "block" {
+            let reason_label = if action == "block" {
+                "RecipientBlocked"
+            } else {
+                "RecipientRevoked"
+            };
+            let failed_lids = self
+                .delivery_coord
+                .fail_for_recipient(&pid, RouteReason::ExhaustedAttemptsQueue);
+            for (lid, attempts, expires_at) in failed_lids {
+                let _ = self.outbox_mgr.mark_failed(&lid);
+                self.delivery_events.push(DeliveryEventRecord {
+                    logical_id: hex::encode(lid),
+                    state: "Failed".to_string(),
+                    recipient: pid.to_string(),
+                    timestamp: now_secs,
+                    reason: reason_label.to_string(),
+                    transport: "Unknown".to_string(),
+                    attempt_count: attempts,
+                    expires_at,
+                });
+            }
+        }
+        self.clear_pending_requests_for(&pid);
 
         Ok(())
     }

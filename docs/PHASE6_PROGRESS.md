@@ -10,8 +10,8 @@
 
 | Task | Scope / Deliverable | Priority | Status | Commit | Evidence / Notes |
 |---|---|---|---|---|---|
-| **Task 0** | Freeze baseline, map live code, reconcile gaps & ownership | Baseline | **PASS** | *pending commit* | `docs/PHASE6_BASELINE.md`, `docs/DECISIONS.md` (ADR-0017), `170/170` Rust tests + `5/5` Flutter tests verified at `6638a79` |
-| **Task 1** | Live authorization & explicit link identity states (`UnboundLink`/`ClaimedShortId`/`VerifiedPeer`) | P0 | Pending | — | Planned next |
+| **Task 0** | Freeze baseline, map live code, reconcile gaps & ownership | Baseline | **PASS** | `d71dba8` | `docs/PHASE6_BASELINE.md`, `docs/DECISIONS.md` (ADR-0017), `170/170` Rust tests + `5/5` Flutter tests verified at `6638a79` |
+| **Task 1** | Live authorization & explicit link identity states (`UnboundLink`/`ClaimedShortId`/`VerifiedPeer`) | P0 | **PASS** | *pending commit* | `relay.rs`, `trust/model.rs`, `api.rs`, `ffi.rs`, 6 new public-runtime tests in `core/tests/test_phase6_auth_e2e.rs` (`176/176` Cargo tests pass) |
 | **Task 2** | Encrypted SQLite trust persistence & fail-closed gateway startup wiring | P0 | Pending | — | Depends on Task 1 |
 | **Task 3** | Live resource metering (fragmented wire bytes, control cap, stale telemetry) | P0 | Pending | — | Depends on Task 0 + 1 |
 | **Task 4** | Protected root identity (`BCID` v1) & crash-safe atomic migration | P0 | Pending | — | Depends on Task 0 |

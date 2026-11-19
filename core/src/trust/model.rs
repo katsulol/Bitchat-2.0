@@ -4,7 +4,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::identity::PeerId;
+use crate::identity::{PeerId, ShortId};
 
 /// Scoped authorization capabilities in Bitchat 2.0.
 ///
@@ -131,4 +131,45 @@ pub struct AuthorizationContext {
     pub gateway_opted_in: bool,
     /// Whether local policy allows vouchers to grant `UseGatewayForForwarding`.
     pub allow_vouched_gateway_forwarding: bool,
+}
+
+/// Explicit identity resolution state for an observed link/peer handle.
+///
+/// Prevents unverified link addresses or claimed 8-byte `ShortId`s from ever being promoted into
+/// synthetic full 32-byte `PeerId` identities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerLinkIdentityState {
+    /// Physical or transport link with no claimed `ShortId` or verified `PeerId` yet.
+    UnboundLink { link_id: String },
+    /// Link advertising an unverified 8-byte `ShortId` claim.
+    ClaimedShortId { link_id: String, short_id: ShortId },
+    /// Cryptographically verified 32-byte `PeerId` authenticated over direct transport.
+    VerifiedPeer {
+        link_id: String,
+        short_id: ShortId,
+        peer_id: PeerId,
+    },
+}
+
+/// Bounded structured event emitted on inbound authorization evaluation (never leaks secrets or raw payloads).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundAuthEvent {
+    pub peer_id: String,
+    pub short_id: String,
+    pub logical_id: Option<String>,
+    pub outcome: AuthOutcome,
+    pub reason: AuthReason,
+    pub capability: String,
+    pub timestamp: u64,
+}
+
+/// Bounded pending message-request record for unrecognized/unapproved authenticated senders.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingMessageRequest {
+    pub sender_peer_id: String,
+    pub sender_short_id: String,
+    pub logical_id: String,
+    pub reason: AuthReason,
+    pub received_at_unix: u64,
+    pub is_volatile: bool,
 }

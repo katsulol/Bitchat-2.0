@@ -643,6 +643,35 @@ impl DeliveryCoordinator {
         false
     }
 
+    /// Transition a non-terminal message directly to terminal `Failed` (e.g., recipient blocked).
+    pub fn fail(&mut self, logical_id: &LogicalMessageId, reason: RouteReason) -> bool {
+        if let Some(record) = self.records.get_mut(logical_id) {
+            if !record.state.is_terminal() {
+                record.last_reason = reason;
+                record.state = DeliveryState::Failed;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Immediately fail all non-terminal messages queued/in-flight for a blocked/revoked recipient.
+    pub fn fail_for_recipient(
+        &mut self,
+        recipient: &PeerId,
+        reason: RouteReason,
+    ) -> Vec<(LogicalMessageId, u32, u64)> {
+        let mut failed = Vec::new();
+        for record in self.records.values_mut() {
+            if record.recipient_peer_id == *recipient && !record.state.is_terminal() {
+                record.last_reason = reason;
+                record.state = DeliveryState::Failed;
+                failed.push((record.logical_id, record.attempts, record.expires_at_unix));
+            }
+        }
+        failed
+    }
+
     /// Wake up any non-terminal messages queued for a verified peer, coalesced by cooldown.
     ///
     /// Gate 0.5 invariants:

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,8 @@ pub struct InboundMessage {
     pub msg_id: MsgId,
     pub hop_count: u8,
     pub payload: Vec<u8>,
+    /// Immediate link neighbor that forwarded this frame, or `None` if imported via gateway.
+    pub immediate_relay: Option<ShortId>,
 }
 
 /// Tracking metadata for a pending relay waiting for its scheduled transmission time.
@@ -64,6 +66,7 @@ pub struct MeshNode<T: Transport> {
     inbound_queue: VecDeque<InboundMessage>,
     gateway_bridge: Option<Arc<crate::gateway::GatewayBridge>>,
     resource_budget: Option<Arc<std::sync::Mutex<crate::mesh::resource::ResourceBudgetManager>>>,
+    disallowed_relays: HashSet<ShortId>,
 }
 
 impl<T: Transport> MeshNode<T> {
@@ -86,7 +89,23 @@ impl<T: Transport> MeshNode<T> {
             inbound_queue: VecDeque::new(),
             gateway_bridge: None,
             resource_budget: None,
+            disallowed_relays: HashSet::new(),
         }
+    }
+
+    /// Disallow `peer` as an immediate relay for transit/forwarded traffic without blocking it as an end user.
+    pub fn disallow_immediate_relay(&mut self, peer: ShortId) {
+        self.disallowed_relays.insert(peer);
+    }
+
+    /// Re-allow `peer` to act as an immediate relay.
+    pub fn allow_immediate_relay(&mut self, peer: ShortId) {
+        self.disallowed_relays.remove(&peer);
+    }
+
+    /// Returns true if `peer` is disallowed as an immediate transit relay.
+    pub fn is_relay_disallowed(&self, peer: &ShortId) -> bool {
+        self.disallowed_relays.contains(peer)
     }
 
     /// Attach a shared `ResourceBudgetManager` to gate third-party transit forwarding.
@@ -474,6 +493,13 @@ impl<T: Transport> MeshNode<T> {
             return Ok(());
         }
 
+        // Reject third-party relayed frames from a disallowed immediate relay BEFORE seen_cache
+        // insertion so the disallowed relay cannot poison deduplication for alternate paths.
+        if self.disallowed_relays.contains(&from_peer) && envelope.sender_short_id != from_peer {
+            self.stats.inc_transit_dropped_policy();
+            return Ok(());
+        }
+
         // 4. Seen cache deduplication
         let already_seen = self.seen_cache.check_and_insert(envelope.msg_id, now);
         if already_seen {
@@ -521,12 +547,18 @@ impl<T: Transport> MeshNode<T> {
                 msg_id: envelope.msg_id,
                 hop_count: envelope.hop_count,
                 payload: envelope.payload.clone(),
+                immediate_relay: Some(from_peer),
             });
         }
 
         // 6. Relay decision (third-party transit only)
         // If it was a unicast addressed to us, destination reached: do not relay further
         if envelope.recipient_short_id == self.identity.short_id() {
+            return Ok(());
+        }
+
+        if self.disallowed_relays.contains(&from_peer) {
+            self.stats.inc_transit_dropped_policy();
             return Ok(());
         }
 
@@ -659,6 +691,7 @@ impl<T: Transport> MeshNode<T> {
                     flags: env.flags,
                     hop_count: env.hop_count,
                     payload: env.payload,
+                    immediate_relay: None,
                 });
                 self.stats.inc_deliveries();
             } else if !env.recipient_short_id.is_broadcast() {
