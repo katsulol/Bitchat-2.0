@@ -1,47 +1,36 @@
-# Threat Model & Security Posture
+# Bitchat 2.0 — Threat Model & Security Posture (`Phase 6 Reconciled`)
 
-## 1. Adversary Capabilities & Defenses
+## 1. Adversary Capabilities, Defenses & Explicit Boundaries
 
-| Adversary Capability | Phase 2 Status | Defended? | Mitigation Mechanism |
+| Adversary Capability | Phase 6 Status | Defended? | Mechanism & Explicit Boundary |
 |---|---|---|---|
-| **Eavesdrop packet content** | **Defended** | Yes | End-to-end ChaCha20-Poly1305 AEAD payload encryption established via Noise_XX handshake (`core::crypto`). Relays observe only encrypted ciphertext. |
-| **Impersonate sender identity** | **Defended** | Yes | Noise static keys are explicitly signed by the sender's long-term Ed25519 identity (`core::identity`). The handshake payload delivers `(PeerId, Signature)`, verified before session acceptance. |
-| **Tamper with wire header fields** | **Defended** | Yes | Strict hand-written decode validator (`core::envelope`) rejects invalid versions, malformed lengths, oversized envelopes (>512 bytes), and hop counts exceeding TTL limits. |
-| **Tamper with encrypted payload** | **Defended** | Yes | Poly1305 authentication tag failure immediately rejects altered or truncated payload buffers. |
-| **Replay encrypted messages** | **Defended** | Yes | Stateless Noise transport with 128-packet bitmask sliding replay window (`SlidingReplayWindow`). Replays and packets older than the window horizon are rejected. |
-| **Relay hop count manipulation** | **Defended** | Yes | Signatures and authentication tags computed over envelopes explicitly exclude relay-mutable `hop_count` (ADR-0002). Relays decrement TTL up to hard cutoff `MAX_HOPS = 7`. |
-| **Passive BLE observer (traffic metadata)** | **Partial** | Partial | `ShortId` exposes only 8-byte BLAKE3 prefixes on the wire. Size bucketing (`pad_to_bucket` to 64, 128, 256, 512 bytes) prevents size-based fingerprinting. Active cover traffic scheduled in Phase 6. |
-| **Relay observer (hop tracking)** | **Partial** | Partial | Intermediate nodes observe sender and recipient ShortIds to forward packets. In Privacy Mode (Phase 4), ephemeral aliases and onion-like multi-hop encapsulation reduce relay observability. |
-| **Timing correlation attack** | **Partial** | Partial | `AdaptiveFlood` injects density-scaled randomized retransmission delays $[0, D(N)]$, disrupting strict temporal correlation across relay hops. |
-| **Compromised Gateway / Eavesdropper** | **Defended** (Content) / **Planned** (Routing) | Partial | Content remains protected by end-to-end Noise AEAD even when traversed through internet gateways. Gateway routing trust verification scheduled in Phase 3. |
-| **Sybil Flood / DoS Flooding** | **Partial** | Partial | Deduplication caches (`LruSeenCache`, `BloomSeenCache`) drop repeated broadcast storms. `Reassembler` strictly caps concurrent fragments (128 slots, 4KB limit) to defend against memory exhaustion. Rate-limiting and Web-of-Trust prioritization scheduled in Phase 5. |
-| **Forged Vouch / Reputation Poisoning** | **Planned** | Not yet | Web-of-Trust cryptographic vouch chains scheduled in Phase 5. |
-| **BLE Physical Presence Leakage** | **Known Limitation** | No | Advertising service UUID `0xFD6F` openly discloses Bitchat presence to any BLE scanner in radio range. |
+| **Eavesdrop direct/unicast message content** | **Defended** | Yes | End-to-end ChaCha20-Poly1305 AEAD established via mutually authenticated Noise_XX (`core/src/crypto.rs`, `core/src/mesh/peer.rs`). Intermediate BLE relays and Iroh internet gateways observe only opaque encrypted envelopes. *(Note: Public broadcasts `MsgType::Chat` to `ShortId::BROADCAST` are intentionally unencrypted public announcements.)* |
+| **Impersonate sender identity or forge ACKs** | **Defended** | Yes | Noise static X25519 keys are bound to the peer's long-term Ed25519 `PeerId` via signed handshake payloads (`bitchat2-handshake-v2`). Inner `ApplicationFrame` binds `sender_peer_id` and `recipient_peer_id` inside AEAD; delivery state transitions to `Delivered` only upon a cryptographically verified end-to-end `ApplicationFrameKind::Ack` from the intended recipient (`core/src/mesh/delivery.rs`). |
+| **Relay / Origin identity confusion** | **Defended** | Yes | `PeerLinkIdentityState` (`UnboundLink` / `ClaimedShortId` / `VerifiedPeer`) separates the immediate BLE link neighbor (`immediate_relay`) from `Envelope.sender` (`origin_sender`). Direct-link RSSI and link state bind exclusively to single-hop (`hop_count == 0`) verified links (`core/src/api.rs`). |
+| **Tamper with wire headers or encrypted payloads** | **Defended** | Yes | Hand-written validator (`core/src/envelope.rs`) rejects unknown versions, oversized frames (`> 512` bytes), and hop counts `> MAX_HOPS (7)`. Poly1305 MAC failure rejects any altered ciphertext before application or dedup processing. |
+| **Replay encrypted messages or exhaust nonces** | **Defended** | Yes | 128-packet sliding replay window (`SlidingReplayWindow`) rejects duplicate or stale nonces; sender refuses wraparound and reserves `u64::MAX` (`NonceExhausted` in `core/src/crypto.rs`), requiring re-handshake before counter exhaustion. |
+| **Malicious or replayed gateway route announcements** | **Defended** | Yes | Gateway `PeerConnected` announcements carry Ed25519 signatures over `("bitchat2-route-v1", gateway_endpoint_id, peer_short_id, route_epoch, issued_at_unix, expires_at_unix)` (`core/src/gateway/protocol.rs`). Spoilers, expired epochs, and non-monotonic `route_epoch` replays are rejected. |
+| **Unauthorized gateway forwarding or silent relay consent** | **Defended** | Yes | Gateways require explicit user opt-in and per-peer approval (`bitchat_trust.db`). Unapproved gateway peers cannot export local BLE broadcasts or auto-bridge traffic; `Privacy` mode (`MessageMode::Privacy`) blocks relay gateways (`RelayMode::Disabled`) and refuses silent downgrade. |
+| **Forged or transitive voucher introductions** | **Defended** | Yes | `SignedVoucher` (`bitchat2/voucher/v1`) and `SignedVoucherRevocation` (`bitchat2/voucher-revoke/v1`) are Ed25519-signed, audience-bound, capability-scoped, and strictly **1-hop only** (never transitive). Blocking an introducer or importing a revocation immediately invalidates derived introductions (`core/src/trust/model.rs`). |
+| **At-rest SQLite or root identity theft from app storage** | **Defended (Keystore-bound)** | Yes | Root identity (`identity.enc`, `BCID` v1), outbox (`bitchat_outbox.db`), trust store (`bitchat_trust.db`), and optional sync store (`bitchat_sync.db`) are encrypted with domain-separated `blake3::derive_key` subkeys derived from a 256-bit DEK wrapped by Android Keystore (`AES/GCM/NoPadding`, `BC2K` v2 AAD). Missing or locked Keystore fails closed without silently regenerating keys. Android cloud backup and device-transfer extraction are disabled (`backup_rules.xml`, `data_extraction_rules.xml`). |
+| **History replay authorship spoofing & deletion resurrection** | **Defended (Pending Human Crypto Review)** | Partial | Opt-in Normal-mode sync (`BC2S` v1, Default OFF) verifies original author Ed25519 signatures (`bitchat2/sync-record/v1`) on every `SyncRecord`, enforces `Tombstone` dominance over `Message`, never extends TTL, and rejects records older than `horizon_unix` after tombstone compaction (`core/src/sync/`). |
+| **Memory / CPU / battery exhaustion via floods or slow fragments** | **Defended** | Yes | Bounded fragment reassembler (`128` slots, `4 KiB` max message, `15s` TTL), bounded pending message-request queue (`64` global, `4` per sender), bounded sync sessions (`256 KiB`, `256` Merkle nodes, `30s` deadline), and resource-aware relay budgets (`estimate_fragmented_wire_bytes` with `20%` control reserve) drop excess transit load while preserving local endpoints. |
+| **Passive link observer (packet size & timing metadata)** | **Partial (Experimental)** | Partial | Inner payloads pad to `[64, 128, 256, 512]` buckets (`311 B` standard encrypted envelope for frames `<= 152 B`). Experimental direct-link cover traffic (`BC2C` v1, Default OFF) emits bounded dummy frames (`[32, 96, 224]` buckets) over negotiated direct peers, but **does not conceal online presence, BLE advertisements, handshake setup, or multi-hop traffic patterns**. |
 
 ---
 
-## 2. Security Invariants Enforced in Code
+## 2. Mandatory Threat-Model Limits & Non-Claims (`Task 14`)
 
-1. **Zero Secret Key Leakage**:
-   - `Identity`, `Session`, and `KeyStore` implementations implement custom `Debug` formatters outputting `[REDACTED]`.
-   - Secret key buffers implement `ZeroizeOnDrop` via `zeroize`.
-2. **Strict Cryptographic Crates**:
-   - No home-grown cryptographic algorithms. All primitives rely on audited community implementations: `ed25519-dalek`, `snow`, `blake3`.
-3. **No Panic in Core Code**:
-   - Zero `unwrap()`, `expect()`, or `panic!` calls in non-test production code. All errors propagate via `bitchat2_core::error::Error`.
-
----
-
-## 3. BLE Advertising & Physical Presence Disclosure
-
-> [!WARNING]
-> **Open Radio Presence**: In accordance with the project's honest threat modeling standard, users and integrators must be aware of physical link-layer leakage.
-
-1. **Service UUID Disclosure**:
-   - To discover neighboring mesh nodes without internet infrastructure, Bitchat 2.0 peripherals must broadcast BLE advertisements containing the 16-bit Service UUID `0xFD6F`.
-   - Any commodity BLE sniffer (or smartphone with an app like nRF Connect) within 10–50 meters can detect that a Bitchat node is active in the vicinity.
-2. **Device Address Randomization vs. Static Signatures**:
-   - Android operating systems periodically rotate the device's Resolvable Private Address (RPA) at the link layer to reduce long-term device tracking across physical locations.
-   - However, because the advertised Service UUID (`0xFD6F`) and GATT service characteristic (`0x2A06`) remain constant, an observer cannot track a *specific* user indefinitely via MAC address, but *can* detect the real-time presence and density of active Bitchat mesh participants in a given physical space.
-3. **Operational Recommendation**:
-   - If operating in hostile environments where RF detection poses physical peril, users must disable mesh participation or enable device Airplane Mode. Phase 4 will introduce "Passive Sniff Mode" (scanning without advertising) as an additional mitigation.
+1. **No Guarantee of Unique Humans (No Sybil Proof)**:
+   - Cryptographic `PeerId`s and 1-hop `SignedVoucher`s prove possession of an Ed25519 private key and an explicit introduction from an approved introducer. They do **not** verify unique human identity or prevent a single operator from generating multiple keypairs.
+2. **Dishonest Approved Gateways Can Drop or Delay Traffic**:
+   - While an approved gateway cannot read, modify, or forge end-to-end Noise XX `ApplicationFrame` messages or `Ack`s, a dishonest or compromised gateway can selectively drop, delay, or refuse to forward packets traversing it. Multi-gateway fallback (`RetryingAlternateGateway`) mitigates availability failure only when an alternate approved gateway exists.
+3. **BLE Signal Categories Are Not Secure Distance**:
+   - `ProximityCategory` (`Immediate`, `Near`, `Far`, `Unknown`) is a coarse UI hint computed from exponential moving averages of direct single-hop BLE RSSI (`core/src/mesh/proximity.rs`). An attacker with a high-gain antenna or amplifier can manipulate RSSI; RSSI categories must never be used for security authorization or physical distance authentication.
+4. **Remote Recipients Can Retain Content**:
+   - Volatile chat mode (`BC2V` v1) enforces application-controlled RAM-only retention on the local device (zero rows in `bitchat_outbox.db` and `bitchat_sync.db`, Android `FLAG_SECURE`, `VISIBILITY_SECRET` notification, keyboard suggestions disabled). However, once plaintext is decrypted by the remote recipient, Bitchat cannot prevent a modified remote client, external camera, or compromised remote OS from copying or retaining the content.
+5. **Transport Metadata Remains Exposed to Link & Network Observers**:
+   - BLE advertisements disclose Service UUID `0xFD6F` to nearby RF scanners (`10–50 m`).
+   - Outer mesh `Envelope` headers expose 8-byte `ShortId` sender/recipient prefixes, `msg_id`, `hop_count`, and packet timing to local BLE neighbors and relays.
+   - Internet gateway connections expose QUIC endpoint IDs and IP addresses to the Iroh relay / network path observer.
+   - Bitchat 2.0 does **not** implement onion routing or mixnet anonymity.
