@@ -1,3 +1,4 @@
+pub mod cover;
 pub mod delivery;
 pub mod fragment;
 pub mod peer;

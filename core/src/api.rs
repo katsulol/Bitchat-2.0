@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::envelope::{pad_inner_payload, unpad_bucket, MsgType};
 use crate::gateway::GatewayBridge;
 use crate::identity::{Identity, PeerId, ProtectedIdentityStore, ShortId};
+use crate::mesh::cover::{CoverFrame, CoverFrameKind, CoverTrafficManager, COVER_MAGIC};
 use crate::mesh::delivery::{
     ApplicationFrame, ApplicationFrameKind, DedupStatus, DeliveryAction, DeliveryCoordinator,
     DeliveryState, EnqueueMessage, InboxDeduplicator, DEFAULT_ACK_TIMEOUT,
@@ -168,6 +169,7 @@ pub struct BitchatCoreService {
     relay_contribution_mode: String,
     proximity_tracker: ProximityTracker,
     volatile_mgr: VolatileSessionManager,
+    cover_mgr: CoverTrafficManager,
     known_peer_ids: HashMap<ShortId, PeerId>,
     ack_timeout: Duration,
     gateway_opted_in: bool,
@@ -431,6 +433,7 @@ impl BitchatCoreService {
             relay_contribution_mode: "balanced".to_string(),
             proximity_tracker: ProximityTracker::default(),
             volatile_mgr: VolatileSessionManager::new(true),
+            cover_mgr: CoverTrafficManager::default(),
             known_peer_ids: HashMap::new(),
             ack_timeout,
             gateway_opted_in: false,
@@ -1305,7 +1308,90 @@ impl BitchatCoreService {
             }
         }
 
+        if self.cover_mgr.is_enabled() {
+            let active_profile = if let Ok(mgr) = self.resource_mgr.lock() {
+                mgr.active_profile()
+            } else {
+                RelayResourceProfile::Balanced
+            };
+            let has_real_pending =
+                self.delivery_coord.queued_count() > 0 || self.delivery_coord.in_flight_count() > 0;
+            let connected = self.handle.connected_peers();
+            let mut eligible_peers = Vec::new();
+            let auth_ctx = AuthorizationContext {
+                now_monotonic: now_instant,
+                now_unix: Some(now_secs),
+                gateway_opted_in: self.gateway_opted_in,
+                allow_vouched_gateway_forwarding: false,
+            };
+            {
+                let mut ts = self.trust_store.write().await;
+                for sid in connected {
+                    if self.peer_mgr.is_session_ready(&sid) {
+                        if let Some(pid) = self.peer_mgr.verified_peer_id(&sid) {
+                            let dec = TrustPolicy::authorize(
+                                &mut ts,
+                                &pid,
+                                Capability::ReceiveDirectMessage,
+                                &auth_ctx,
+                            );
+                            if dec.outcome == AuthOutcome::Allow {
+                                eligible_peers.push(pid);
+                            }
+                        }
+                    }
+                }
+            }
+            let due = self.cover_mgr.poll_due_dummies(
+                now_instant,
+                &eligible_peers,
+                active_profile,
+                self.resource_snapshot.thermal_state,
+                has_real_pending,
+            );
+            for (peer_pid, dummy) in due {
+                self.send_direct_control_frame(peer_pid, peer_pid.short_id(), dummy.encode())
+                    .await;
+            }
+        }
+
         Ok(handled)
+    }
+
+    async fn send_direct_control_frame(
+        &mut self,
+        recipient_peer_id: PeerId,
+        target_short_id: ShortId,
+        payload: Vec<u8>,
+    ) {
+        if !self.peer_mgr.is_session_ready(&target_short_id) {
+            return;
+        }
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut lid = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut lid);
+        let app_frame = ApplicationFrame::new_message(
+            lid,
+            self.node.identity().peer_id(),
+            recipient_peer_id,
+            payload,
+            Duration::from_secs(30),
+            now_secs,
+        );
+        if let Ok(padded) = pad_inner_payload(&app_frame.encode(), true) {
+            let _ = self
+                .peer_mgr
+                .send_encrypted_via(
+                    &mut self.node,
+                    target_short_id,
+                    &padded,
+                    SendTarget::DirectBle,
+                )
+                .await;
+        }
     }
 
     pub async fn initiate_handshake(&mut self, recipient_short_id: String) -> Result<(), String> {
@@ -1588,6 +1674,13 @@ impl BitchatCoreService {
     pub async fn on_peer_disconnected(&mut self, short_id: String) -> Result<(), String> {
         let peer = hex_to_short_id(&short_id)?;
         let link_key = peer.to_string();
+        if let Some(pid) = self
+            .peer_mgr
+            .verified_peer_id(&peer)
+            .or_else(|| self.known_peer_ids.get(&peer).copied())
+        {
+            self.cover_mgr.remove_peer(&pid);
+        }
         self.handle.on_peer_disconnected(peer);
         self.link_identities.remove(&link_key);
         self.proximity_tracker.on_link_disconnected(&link_key);
@@ -1662,6 +1755,35 @@ impl BitchatCoreService {
                             );
                             self.proximity_tracker
                                 .bind_verified_peer(&link_key, pid, now_inst);
+                            if self.cover_mgr.is_enabled() {
+                                let auth_ctx = AuthorizationContext {
+                                    now_monotonic: now_inst,
+                                    now_unix: Some(now_secs),
+                                    gateway_opted_in: self.gateway_opted_in,
+                                    allow_vouched_gateway_forwarding: false,
+                                };
+                                let allowed = {
+                                    let mut ts = self.trust_store.write().await;
+                                    TrustPolicy::authorize(
+                                        &mut ts,
+                                        &pid,
+                                        Capability::ReceiveDirectMessage,
+                                        &auth_ctx,
+                                    )
+                                    .outcome
+                                        == AuthOutcome::Allow
+                                };
+                                if allowed {
+                                    if let Some(offer) = self.cover_mgr.offer_peer(pid) {
+                                        self.send_direct_control_frame(
+                                            pid,
+                                            msg.origin_sender,
+                                            offer.encode(),
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
                         }
                         self.spawn_announce_local_peers();
                     }
@@ -1795,6 +1917,28 @@ impl BitchatCoreService {
                                                 &padded_resp,
                                             )
                                             .await;
+                                    }
+                                }
+                            }
+                            return Ok(None);
+                        }
+
+                        if app_frame.body.starts_with(COVER_MAGIC) {
+                            if trust_dec.outcome == AuthOutcome::Allow {
+                                if let Ok(cframe) = CoverFrame::decode(&app_frame.body) {
+                                    if cframe.kind == CoverFrameKind::Dummy {
+                                        self.cover_mgr.record_discarded();
+                                    } else if let Some(resp) = self.cover_mgr.handle_control(
+                                        auth_sender,
+                                        &cframe,
+                                        now_inst,
+                                    ) {
+                                        self.send_direct_control_frame(
+                                            auth_sender,
+                                            decrypted.origin_sender,
+                                            resp.encode(),
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -2502,6 +2646,7 @@ impl BitchatCoreService {
                     expires_at,
                 });
             }
+            self.cover_mgr.remove_peer(&pid);
         }
         self.clear_pending_requests_for(&pid);
 
@@ -2872,6 +3017,83 @@ impl BitchatCoreService {
         });
         serde_json::to_string(&json).map_err(|e| format!("Serialization error: {e}"))
     }
+
+    /// Enable or disable experimental direct-link cover traffic (Default OFF).
+    pub async fn set_cover_traffic_enabled(&mut self, enabled: bool) -> Result<bool, String> {
+        let now_inst = Instant::now();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let notices = self.cover_mgr.set_enabled(enabled, now_inst);
+        for (peer_pid, disable_frame) in notices {
+            self.send_direct_control_frame(peer_pid, peer_pid.short_id(), disable_frame.encode())
+                .await;
+        }
+        if enabled {
+            let connected = self.handle.connected_peers();
+            let auth_ctx = AuthorizationContext {
+                now_monotonic: now_inst,
+                now_unix: Some(now_secs),
+                gateway_opted_in: self.gateway_opted_in,
+                allow_vouched_gateway_forwarding: false,
+            };
+            let mut to_offer = Vec::new();
+            {
+                let mut ts = self.trust_store.write().await;
+                for sid in connected {
+                    if self.peer_mgr.is_session_ready(&sid) {
+                        if let Some(pid) = self.peer_mgr.verified_peer_id(&sid) {
+                            if TrustPolicy::authorize(
+                                &mut ts,
+                                &pid,
+                                Capability::ReceiveDirectMessage,
+                                &auth_ctx,
+                            )
+                            .outcome
+                                == AuthOutcome::Allow
+                            {
+                                to_offer.push((pid, sid));
+                            }
+                        }
+                    }
+                }
+            }
+            for (pid, sid) in to_offer {
+                if let Some(offer) = self.cover_mgr.offer_peer(pid) {
+                    self.send_direct_control_frame(pid, sid, offer.encode())
+                        .await;
+                }
+            }
+        }
+        Ok(self.cover_mgr.is_enabled())
+    }
+
+    /// Adjust cover traffic timing/rate bounds (clamped to safe operational limits).
+    pub fn configure_cover_policy(
+        &mut self,
+        min_interval_ms: u64,
+        max_interval_ms: u64,
+        max_bytes_per_minute: usize,
+    ) {
+        self.cover_mgr
+            .configure_policy(min_interval_ms, max_interval_ms, max_bytes_per_minute);
+    }
+
+    /// Query experimental cover traffic configuration & counters as JSON.
+    pub fn get_cover_status(&self) -> String {
+        let now_inst = Instant::now();
+        serde_json::json!({
+            "enabled": self.cover_mgr.is_enabled(),
+            "experimental": true,
+            "negotiated_peers": self.cover_mgr.negotiated_peer_count(now_inst),
+            "dummy_frames_sent": self.cover_mgr.dummy_frames_sent,
+            "dummy_bytes_sent": self.cover_mgr.dummy_bytes_sent,
+            "dummy_frames_discarded": self.cover_mgr.dummy_frames_discarded,
+            "max_bytes_per_minute": self.cover_mgr.max_bytes_per_minute(),
+        })
+        .to_string()
+    }
 }
 
 fn verify_generation(generation: u64) -> Result<(), String> {
@@ -3151,6 +3373,20 @@ pub async fn pending_message_requests_json() -> Result<String, String> {
     let svc = lock.as_ref().ok_or("Service not initialized")?;
     let reqs = svc.pending_message_requests();
     serde_json::to_string(&reqs).map_err(|e| format!("Serialization error: {e}"))
+}
+
+/// Enable or disable experimental direct-link cover traffic (Default OFF).
+pub async fn set_cover_traffic_enabled(enabled: bool) -> Result<bool, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    svc.set_cover_traffic_enabled(enabled).await
+}
+
+/// Query experimental cover traffic status & bounded counters as JSON string.
+pub async fn get_cover_status() -> Result<String, String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+    Ok(svc.get_cover_status())
 }
 
 mod hex {

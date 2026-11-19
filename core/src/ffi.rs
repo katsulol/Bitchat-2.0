@@ -1500,6 +1500,45 @@ pub unsafe extern "C" fn bitchat_get_peer_id(short_id: *const c_char) -> *mut c_
     })
 }
 
+/// Enable (`enabled != 0`) or disable (`enabled == 0`) experimental direct-link cover traffic (Default OFF).
+///
+/// # Safety
+///
+/// Returns `1` if enabled, `0` if disabled, or `-1` on error.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_set_cover_traffic(enabled: u8) -> i32 {
+    ffi_guard_i32(|| {
+        let rt = match require_rt() {
+            Ok(r) => r,
+            Err(e) => return record_and_err_code(e),
+        };
+        match rt.block_on(api::set_cover_traffic_enabled(enabled != 0)) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(e) => record_and_err_code(e),
+        }
+    })
+}
+
+/// Query experimental cover traffic state and bounded emission counters as JSON.
+///
+/// # Safety
+///
+/// Returned JSON string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_get_cover_status() -> *mut c_char {
+    ffi_guard_ptr(|| {
+        let rt = match require_rt() {
+            Ok(r) => r,
+            Err(e) => return record_and_null(e),
+        };
+        match rt.block_on(api::get_cover_status()) {
+            Ok(json) => string_to_c_char(json),
+            Err(e) => record_and_null(e),
+        }
+    })
+}
+
 /// Free a C string allocated by Bitchat core.
 ///
 /// # Safety
