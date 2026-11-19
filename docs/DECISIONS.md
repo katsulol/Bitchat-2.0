@@ -81,4 +81,10 @@
 - **Decision**: Classify BLE RSSI into four coarse local categories (`Immediate`, `Near`, `Far`, `Unknown`) using a 5-sample median window, 5–6 dB hysteresis, and 30s staleness decay. Implement `VolatileSessionManager` requiring mutual authenticated negotiation (`VolatileChat`) and `ZeroizeOnDrop` in-memory retention while documenting that a modified recipient cannot be forced to delete received plaintext.
 - **Consequences**: Eliminates false spatial precision and aligns volatile chat security claims with verifiable local enforcement.
 
+## ADR-0017: Phase 6 Baseline Reconciliation & Bounded Starting Policies
+- **Context**: `PHASE_6.md` targeted commit `603b5f4`, whereas the workspace HEAD moved to `6638a79` (`adaptive-delivery`) containing alternate-gateway retry, bounded `3:1` EDF deadlines, delivery UI explanations, live `ResourceBudgetManager` wiring, `GatewayRateLimiter`, fail-closed DEK error gating in Dart, and rebuilt ARM64 native libraries (`170/170` Rust tests, `5/5` Flutter tests). Also reconciled historical constant drift: wire fragmentation uses `FRAGMENT_HEADER_LEN = 4` bytes, coarse proximity exposes `Unknown`/`Further`/`Nearby` (`core/src/mesh/proximity.rs`), and resource profiles expose `Paused`/`Minimal`/`Balanced`/`Assisted` with `1:4:8` transit byte ratios (`8/32/64 KiB/s`) plus 25% control-plane reserve.
+- **Decision**: Freeze `6638a79` on branch `phase-6` as the reconciled Phase 6 baseline (`docs/PHASE6_BASELINE.md`), keep existing verified adaptive-delivery fixes intact, and execute P0/P1/P2/P3 tasks incrementally against live code. Bounded starting policies (300s telemetry staleness fallback, 128 pending auth event buffer, 1024-record sync cap / 256 KiB sync transfer / 30s deadline) remain explicitly documented as bounded engineering defaults rather than measured SLA guarantees.
+- **Consequences**: Prevents regressions in adaptive-delivery features while tracking exact remaining Phase 6 security and platform deliverables cleanly.
+
+
 
