@@ -127,6 +127,10 @@ class RustDiagnostics {
   final int pendingGatewayCount;
   final int approvedGatewayCount;
   final int activeVouchersCount;
+  final int transitPacketsForwarded;
+  final int transitBytesForwarded;
+  final int transitPacketsDroppedPolicy;
+  final String relayContributionMode;
 
   RustDiagnostics({
     required this.myShortId,
@@ -146,6 +150,10 @@ class RustDiagnostics {
     this.pendingGatewayCount = 0,
     this.approvedGatewayCount = 0,
     this.activeVouchersCount = 0,
+    this.transitPacketsForwarded = 0,
+    this.transitBytesForwarded = 0,
+    this.transitPacketsDroppedPolicy = 0,
+    this.relayContributionMode = 'balanced',
   });
 
   factory RustDiagnostics.fromJson(Map<String, dynamic> json) {
@@ -167,6 +175,10 @@ class RustDiagnostics {
       pendingGatewayCount: json['pending_gateway_count'] as int? ?? 0,
       approvedGatewayCount: json['approved_gateway_count'] as int? ?? 0,
       activeVouchersCount: json['active_vouchers_count'] as int? ?? 0,
+      transitPacketsForwarded: json['transit_packets_forwarded'] as int? ?? 0,
+      transitBytesForwarded: json['transit_bytes_forwarded'] as int? ?? 0,
+      transitPacketsDroppedPolicy: json['transit_packets_dropped_policy'] as int? ?? 0,
+      relayContributionMode: json['relay_contribution_mode'] as String? ?? 'balanced',
     );
   }
 }
@@ -243,6 +255,7 @@ class CoreFfi {
   late final BitchatTrustIssueVoucherDart _trustIssueVoucher;
   late final BitchatGatewayImportDart _trustImportVoucher;
   late final BitchatUpdateResourceStateDart _updateResourceState;
+  late final BitchatGatewayImportDart _setRelayContributionProfile;
   late final BitchatRecordBleRssiDart _recordBleRssi;
   late final BitchatGetDeliveryStateDart _getPeerProximity;
   late final BitchatSetVolatileSessionDart _setVolatileSession;
@@ -295,6 +308,7 @@ class CoreFfi {
       _trustIssueVoucher = _lib!.lookupFunction<BitchatTrustIssueVoucherC, BitchatTrustIssueVoucherDart>('bitchat_trust_issue_voucher');
       _trustImportVoucher = _lib!.lookupFunction<BitchatGatewayImportC, BitchatGatewayImportDart>('bitchat_trust_import_voucher');
       _updateResourceState = _lib!.lookupFunction<BitchatUpdateResourceStateC, BitchatUpdateResourceStateDart>('bitchat_update_resource_state');
+      _setRelayContributionProfile = _lib!.lookupFunction<BitchatGatewayImportC, BitchatGatewayImportDart>('bitchat_set_relay_contribution_profile');
       _recordBleRssi = _lib!.lookupFunction<BitchatRecordBleRssiC, BitchatRecordBleRssiDart>('bitchat_record_ble_rssi');
       _getPeerProximity = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_peer_proximity');
       _setVolatileSession = _lib!.lookupFunction<BitchatSetVolatileSessionC, BitchatSetVolatileSessionDart>('bitchat_set_volatile_session');
@@ -775,6 +789,20 @@ class CoreFfi {
     final prof = ptr.toDartString();
     _freeString(ptr);
     return prof;
+  }
+
+  String? setRelayContributionProfile(String mode) {
+    if (!_initialized) return null;
+    final modePtr = mode.toNativeUtf8();
+    try {
+      final ptr = _setRelayContributionProfile(modePtr);
+      if (ptr == nullptr) return null;
+      final prof = ptr.toDartString();
+      _freeString(ptr);
+      return prof;
+    } finally {
+      calloc.free(modePtr);
+    }
   }
 
   String recordBleRssi(String shortIdHex, int rssiDbm) {

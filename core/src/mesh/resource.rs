@@ -268,6 +268,17 @@ impl ResourceBudgetManager {
     /// - Upgrades (less restrictive profiles) require `min_upgrade_dwell` to have elapsed since
     ///   the last profile change, preventing rapid oscillation near thresholds.
     pub fn update_snapshot(&mut self, snapshot: &ResourceSnapshot) -> RelayResourceProfile {
+        self.update_snapshot_with_control(snapshot, false)
+    }
+
+    /// Update the active profile with explicit control over whether an upgrade was requested
+    /// interactively by the user (`user_initiated`). Safety downgrades always apply immediately;
+    /// safety caps in `compute_raw_profile` still restrict explicit user upgrades.
+    pub fn update_snapshot_with_control(
+        &mut self,
+        snapshot: &ResourceSnapshot,
+        user_initiated: bool,
+    ) -> RelayResourceProfile {
         let target = snapshot.compute_raw_profile();
         let now = snapshot.timestamp;
 
@@ -276,7 +287,9 @@ impl ResourceBudgetManager {
             self.active_profile = target;
             self.last_profile_change = now;
         } else if target > self.active_profile
-            && now.saturating_duration_since(self.last_profile_change) >= self.min_upgrade_dwell
+            && (user_initiated
+                || now.saturating_duration_since(self.last_profile_change)
+                    >= self.min_upgrade_dwell)
         {
             self.active_profile = target;
             self.last_profile_change = now;

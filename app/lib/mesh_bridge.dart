@@ -67,6 +67,7 @@ class MeshBridge {
   int relaysSuppressed = 0;
 
   bool userPausedRelaying = false;
+  String relayContributionMode = 'balanced';
   int _lastBatteryPct = -1;
   int _lastCharging = -1;
   int _lastPowerSave = -1;
@@ -166,6 +167,11 @@ class MeshBridge {
 
   void setUserPausedRelaying(bool paused) {
     userPausedRelaying = paused;
+    if (paused) {
+      relayContributionMode = 'receive_only';
+    } else if (relayContributionMode == 'receive_only') {
+      relayContributionMode = 'balanced';
+    }
     CoreFfi.instance.updateResourceState(
       batteryPct: _lastBatteryPct,
       charging: _lastCharging,
@@ -173,6 +179,12 @@ class MeshBridge {
       thermal: _lastThermal,
       userPaused: userPausedRelaying,
     );
+  }
+
+  String? setRelayContributionMode(String mode) {
+    relayContributionMode = mode;
+    userPausedRelaying = mode == 'receive_only' || mode == 'paused';
+    return CoreFfi.instance.setRelayContributionProfile(mode);
   }
 
   Future<void> setSecureScreen(bool enabled) async {

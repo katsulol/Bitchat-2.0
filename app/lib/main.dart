@@ -923,24 +923,39 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     const Text('Resource-Budgeted Relaying Policy', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.amberAccent)),
                     const SizedBox(height: 6),
                     Text(
-                      'Active Profile: ${diag?.resourceProfile ?? "Normal"} | Battery: ${diag?.batteryBand ?? "Normal"} (${diag?.chargingState ?? "Discharging"}) | OS Power Save: ${diag?.powerSaveMode ?? "Disabled"}',
+                      'Active Profile: ${diag?.resourceProfile ?? "Balanced"} | Battery: ${diag?.batteryBand ?? "Unknown"} (${diag?.chargingState ?? "Unknown"}) | OS Power Save: ${diag?.powerSaveMode ?? "False"}',
                       style: const TextStyle(fontSize: 12),
                     ),
                     const SizedBox(height: 6),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      title: const Text('Pause Third-Party Relaying', style: TextStyle(fontSize: 12)),
-                      subtitle: const Text(
-                        'Suppresses opportunistic third-party relays while keeping self-authored messages & ACKs active.',
-                        style: TextStyle(fontSize: 10, color: Colors.grey),
-                      ),
-                      value: _bridge.userPausedRelaying,
-                      onChanged: (paused) {
-                        _bridge.setUserPausedRelaying(paused);
-                        setModalState(() {});
-                        setState(() {});
-                      },
+                    Text(
+                      'Transit Forwarded: ${diag?.transitPacketsForwarded ?? 0} pkts (${diag?.transitBytesForwarded ?? 0} B) | Dropped by policy: ${diag?.transitPacketsDroppedPolicy ?? 0}',
+                      style: const TextStyle(fontSize: 11, color: Colors.white70, fontFamily: 'monospace'),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final entry in const [
+                          ('receive_only', 'Receive only'),
+                          ('balanced', 'Balanced'),
+                          ('help_network', 'Help the network'),
+                        ])
+                          ChoiceChip(
+                            label: Text(entry.$2, style: const TextStyle(fontSize: 11)),
+                            selected: (diag?.relayContributionMode ?? _bridge.relayContributionMode) == entry.$1,
+                            onSelected: (_) {
+                              _bridge.setRelayContributionMode(entry.$1);
+                              setModalState(() {});
+                              setState(() {});
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Pausing stops new optional transit only (cannot recall already sent bytes and may partition BLE-only chains). Charging or Wi-Fi never auto-grants relay permission over your setting or thermal limits.',
+                      style: TextStyle(fontSize: 10, color: Colors.grey),
                     ),
                     const Divider(height: 24),
                     const Text('Transport, Trust & Privacy Layer', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.tealAccent)),

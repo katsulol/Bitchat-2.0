@@ -12,6 +12,9 @@ pub struct MeshStatsSnapshot {
     pub relays_suppressed: u64,
     pub deliveries: u64,
     pub hop_count_exceeded: u64,
+    pub transit_packets_forwarded: u64,
+    pub transit_bytes_forwarded: u64,
+    pub transit_packets_dropped_policy: u64,
     pub latencies: Vec<Duration>,
 }
 
@@ -23,6 +26,9 @@ pub struct MeshStats {
     relays_suppressed: AtomicU64,
     deliveries: AtomicU64,
     hop_count_exceeded: AtomicU64,
+    transit_packets_forwarded: AtomicU64,
+    transit_bytes_forwarded: AtomicU64,
+    transit_packets_dropped_policy: AtomicU64,
     latencies: Mutex<Vec<Duration>>,
 }
 
@@ -51,6 +57,18 @@ impl MeshStats {
         self.hop_count_exceeded.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_transit_forwarded(&self, bytes: usize) {
+        self.transit_packets_forwarded
+            .fetch_add(1, Ordering::Relaxed);
+        self.transit_bytes_forwarded
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn inc_transit_dropped_policy(&self) {
+        self.transit_packets_dropped_policy
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_latency(&self, latency: Duration) {
         if let Ok(mut lock) = self.latencies.lock() {
             lock.push(latency);
@@ -66,6 +84,11 @@ impl MeshStats {
             relays_suppressed: self.relays_suppressed.load(Ordering::Relaxed),
             deliveries: self.deliveries.load(Ordering::Relaxed),
             hop_count_exceeded: self.hop_count_exceeded.load(Ordering::Relaxed),
+            transit_packets_forwarded: self.transit_packets_forwarded.load(Ordering::Relaxed),
+            transit_bytes_forwarded: self.transit_bytes_forwarded.load(Ordering::Relaxed),
+            transit_packets_dropped_policy: self
+                .transit_packets_dropped_policy
+                .load(Ordering::Relaxed),
             latencies,
         }
     }

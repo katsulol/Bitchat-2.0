@@ -43,6 +43,7 @@ pub struct GatewayBridge {
     trust_store: Arc<RwLock<TrustStore>>,
     routes: Arc<RwLock<GatewayRouteTable>>,
     stats: Arc<GatewayStats>,
+    rate_limiter: Arc<std::sync::Mutex<crate::gateway::fairness::GatewayRateLimiter>>,
     active_sessions: Arc<RwLock<HashMap<EndpointId, ActiveGatewaySession>>>,
     last_session_epoch: AtomicU64,
     transfer_counter: AtomicU64,
@@ -86,6 +87,9 @@ impl GatewayBridge {
             trust_store,
             routes: Arc::new(RwLock::new(GatewayRouteTable::new())),
             stats: Arc::new(GatewayStats::new()),
+            rate_limiter: Arc::new(std::sync::Mutex::new(
+                crate::gateway::fairness::GatewayRateLimiter::new(128),
+            )),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
             last_session_epoch: AtomicU64::new(0),
             transfer_counter: AtomicU64::new(1),
@@ -634,6 +638,7 @@ impl GatewayBridge {
         // Reader task
         let inbound_mesh_tx = self.inbound_mesh_tx.clone();
         let stats_reader = Arc::clone(&self.stats);
+        let rate_limiter_reader = Arc::clone(&self.rate_limiter);
         let sessions = Arc::clone(&self.active_sessions);
         let routes_reader = Arc::clone(&self.routes);
         let config_reader = Arc::clone(&self.config);
@@ -669,10 +674,34 @@ impl GatewayBridge {
                             continue;
                         }
 
+                        // Enforce fair gateway rate limiter & 25% control reservation
+                        let msg_type = Envelope::decode(&fwd.mesh_packet)
+                            .map(|e| e.msg_type)
+                            .unwrap_or(crate::envelope::MsgType::Chat);
+                        let rate_ok = if let Ok(mut rl) = rate_limiter_reader.lock() {
+                            rl.check_and_record(
+                                &remote_peer_id,
+                                msg_type,
+                                fwd.mesh_packet.len(),
+                                Instant::now(),
+                            )
+                            .is_ok()
+                        } else {
+                            true
+                        };
+                        if !rate_ok {
+                            stats_reader.inc_rejected();
+                            continue;
+                        }
+
                         stats_reader.inc_imported();
 
                         // Deliver raw mesh packet into local mesh queue
-                        if let Err(e) = inbound_mesh_tx.send(fwd.mesh_packet).await {
+                        let send_res = inbound_mesh_tx.send(fwd.mesh_packet).await;
+                        if let Ok(mut rl) = rate_limiter_reader.lock() {
+                            rl.release();
+                        }
+                        if let Err(e) = send_res {
                             stats_reader.record_error(format!("Failed to queue mesh packet: {e}"));
                             break;
                         }

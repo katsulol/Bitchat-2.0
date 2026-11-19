@@ -77,6 +77,14 @@ pub struct DiagnosticsSnapshot {
     pub pending_gateway_count: usize,
     pub approved_gateway_count: usize,
     pub active_vouchers_count: usize,
+    #[serde(default)]
+    pub transit_packets_forwarded: u64,
+    #[serde(default)]
+    pub transit_bytes_forwarded: u64,
+    #[serde(default)]
+    pub transit_packets_dropped_policy: u64,
+    #[serde(default)]
+    pub relay_contribution_mode: String,
 }
 
 /// High-level routing metrics snapshot for mobile UI.
@@ -118,8 +126,9 @@ pub struct BitchatCoreService {
     gateway_bridge: Option<Arc<GatewayBridge>>,
     last_route_candidate: Option<String>,
     trust_store: Arc<RwLock<TrustStore>>,
-    resource_mgr: ResourceBudgetManager,
+    resource_mgr: Arc<std::sync::Mutex<ResourceBudgetManager>>,
     resource_snapshot: ResourceSnapshot,
+    relay_contribution_mode: String,
     proximity_tracker: ProximityTracker,
     volatile_mgr: VolatileSessionManager,
     known_peer_ids: HashMap<ShortId, PeerId>,
@@ -182,7 +191,14 @@ impl BitchatCoreService {
         let short_id = identity.short_id();
         let peer_id = identity.peer_id();
         let (transport, handle) = BridgeTransport::new(short_id);
-        let node = MeshNode::new(identity, transport, Box::new(CoverageAwareFlood::default()));
+        let mut node = MeshNode::new(identity, transport, Box::new(CoverageAwareFlood::default()));
+        let now_instant = Instant::now();
+        let resource_mgr = Arc::new(std::sync::Mutex::new(ResourceBudgetManager::new(
+            RelayResourceProfile::Balanced,
+            Duration::from_secs(10),
+            now_instant,
+        )));
+        node.set_resource_budget(Arc::clone(&resource_mgr));
 
         let db_path = PathBuf::from(&storage_path).join("bitchat_outbox.db");
         let key_provider: Arc<dyn KeyProvider> = match dek {
@@ -196,7 +212,6 @@ impl BitchatCoreService {
         let mut outbox_mgr = OutboxManager::new(peer_id, sqlite_store, memory_store, limits);
         let mut delivery_coord = DeliveryCoordinator::new(peer_id);
         let dedup = InboxDeduplicator::new(10_000, Duration::from_secs(86400));
-        let now_instant = Instant::now();
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -241,12 +256,9 @@ impl BitchatCoreService {
                 peer_id,
                 TrustQuotaConfig::default(),
             ))),
-            resource_mgr: ResourceBudgetManager::new(
-                RelayResourceProfile::Balanced,
-                Duration::from_secs(10),
-                now_instant,
-            ),
+            resource_mgr,
             resource_snapshot: ResourceSnapshot::default_at(now_instant),
+            relay_contribution_mode: "balanced".to_string(),
             proximity_tracker: ProximityTracker::default(),
             volatile_mgr: VolatileSessionManager::new(true),
             known_peer_ids: HashMap::new(),
@@ -809,6 +821,12 @@ impl BitchatCoreService {
             .as_ref()
             .map(|b| b.relay_disabled())
             .unwrap_or(true);
+        let node_stats = self.node.stats();
+        let active_profile = if let Ok(mgr) = self.resource_mgr.lock() {
+            mgr.active_profile()
+        } else {
+            RelayResourceProfile::Balanced
+        };
 
         DiagnosticsSnapshot {
             my_short_id: self.node.identity().short_id().to_string(),
@@ -816,18 +834,22 @@ impl BitchatCoreService {
             connected_peers_count: self.handle.connected_peers().len(),
             outbox_queued_count: self.delivery_coord.queued_count(),
             outbox_inflight_count: self.delivery_coord.in_flight_count(),
-            deliveries_count: self.node.stats().deliveries,
+            deliveries_count: node_stats.deliveries,
             gateway_active: self.gateway_bridge.is_some(),
             gateway_relay_disabled: relay_disabled,
             last_route_candidate: self.last_route_candidate.clone(),
             build_version: CORE_BUILD_VERSION.to_string(),
-            resource_profile: format!("{:?}", self.resource_mgr.active_profile()),
+            resource_profile: format!("{active_profile:?}"),
             battery_band: format!("{:?}", self.resource_snapshot.battery_band),
             charging_state: format!("{:?}", self.resource_snapshot.charging),
             power_save_mode: format!("{:?}", self.resource_snapshot.power_save_mode),
             pending_gateway_count: pending_gw,
             approved_gateway_count: approved_gw,
             active_vouchers_count: active_vouchers,
+            transit_packets_forwarded: node_stats.transit_packets_forwarded,
+            transit_bytes_forwarded: node_stats.transit_bytes_forwarded,
+            transit_packets_dropped_policy: node_stats.transit_packets_dropped_policy,
+            relay_contribution_mode: self.relay_contribution_mode.clone(),
         }
     }
 
@@ -1843,13 +1865,48 @@ impl BitchatCoreService {
             ble_ready: true,
             is_foreground: true,
             user_paused_relaying: user_paused,
-            user_profile_override: None,
+            user_profile_override: self.resource_snapshot.user_profile_override,
             timestamp: now_inst,
         };
 
-        let profile = self.resource_mgr.update_snapshot(&snap);
+        if user_paused {
+            self.relay_contribution_mode = "receive_only".to_string();
+        } else if self.relay_contribution_mode == "receive_only" {
+            self.relay_contribution_mode = "balanced".to_string();
+        }
+
+        let profile = if let Ok(mut mgr) = self.resource_mgr.lock() {
+            mgr.update_snapshot_with_control(&snap, false)
+        } else {
+            RelayResourceProfile::Balanced
+        };
         self.resource_snapshot = snap;
         format!("{profile:?}")
+    }
+
+    pub fn set_relay_contribution_profile(&mut self, mode: &str) -> Result<String, String> {
+        let now_inst = Instant::now();
+        let (paused, override_prof, normalized_mode) = match mode.trim() {
+            "receive_only" | "paused" => (true, None, "receive_only"),
+            "balanced" => (false, Some(RelayResourceProfile::Balanced), "balanced"),
+            "help_network" | "assisted" => {
+                (false, Some(RelayResourceProfile::Assisted), "help_network")
+            }
+            "auto" => (false, None, "auto"),
+            other => return Err(format!("Unsupported relay contribution mode: {other}")),
+        };
+
+        self.resource_snapshot.user_paused_relaying = paused;
+        self.resource_snapshot.user_profile_override = override_prof;
+        self.resource_snapshot.timestamp = now_inst;
+        self.relay_contribution_mode = normalized_mode.to_string();
+
+        let profile = if let Ok(mut mgr) = self.resource_mgr.lock() {
+            mgr.update_snapshot_with_control(&self.resource_snapshot, true)
+        } else {
+            RelayResourceProfile::Balanced
+        };
+        Ok(format!("{profile:?}"))
     }
 
     pub async fn record_ble_rssi(
@@ -2193,6 +2250,13 @@ pub async fn update_resource_state(
     let mut lock = get_service().write().await;
     let svc = lock.as_mut().ok_or("Service not initialized")?;
     Ok(svc.update_resource_state(battery_pct, charging, power_save, thermal, user_paused))
+}
+
+/// Set user relay contribution mode (`"receive_only"`, `"balanced"`, `"help_network"`, or `"auto"`).
+pub async fn set_relay_contribution_profile(mode: String) -> Result<String, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    svc.set_relay_contribution_profile(&mode)
 }
 
 /// Record a direct-link BLE RSSI sample (`rssi_dbm`) for `short_id_hex` and return its coarse proximity category.

@@ -112,6 +112,19 @@ void main() {
     expect(ev.transport, 'IrohRelay');
     expect(ev.attemptCount, 2);
     expect(ev.expiresAt, 1700000900);
+
+    final diag = RustDiagnostics.fromJson({
+      'my_short_id': '0102030405060708',
+      'my_peer_id': 'aa' * 32,
+      'transit_packets_forwarded': 7,
+      'transit_bytes_forwarded': 896,
+      'transit_packets_dropped_policy': 2,
+      'relay_contribution_mode': 'help_network',
+    });
+    expect(diag.transitPacketsForwarded, 7);
+    expect(diag.transitBytesForwarded, 896);
+    expect(diag.transitPacketsDroppedPolicy, 2);
+    expect(diag.relayContributionMode, 'help_network');
   });
 
   testWidgets(

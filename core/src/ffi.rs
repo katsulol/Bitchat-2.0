@@ -933,6 +933,31 @@ pub unsafe extern "C" fn bitchat_update_resource_state(
     }
 }
 
+/// Set user relay contribution profile (`"receive_only"`, `"balanced"`, `"help_network"`, or `"auto"`).
+///
+/// # Safety
+///
+/// `mode` must be a valid null-terminated C string.
+/// Returned effective profile string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_set_relay_contribution_profile(
+    mode: *const c_char,
+) -> *mut c_char {
+    let mode_str = match c_str_to_string(mode) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    match rt.block_on(api::set_relay_contribution_profile(mode_str)) {
+        Ok(prof) => string_to_c_char(prof),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 /// Record a direct-link BLE RSSI sample and return its coarse proximity category.
 ///
 /// # Safety

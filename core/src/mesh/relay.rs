@@ -46,6 +46,7 @@ struct PendingRelay {
     duplicates_heard: u32,
     duplicate_sources: Vec<ShortId>,
     from_peer: Option<ShortId>,
+    budget_reserved: bool,
 }
 
 /// Decentralized mesh node coordinating identity, transport, deduplication, and forwarding.
@@ -62,6 +63,7 @@ pub struct MeshNode<T: Transport> {
     pending_relays: HashMap<MsgId, PendingRelay>,
     inbound_queue: VecDeque<InboundMessage>,
     gateway_bridge: Option<Arc<crate::gateway::GatewayBridge>>,
+    resource_budget: Option<Arc<std::sync::Mutex<crate::mesh::resource::ResourceBudgetManager>>>,
 }
 
 impl<T: Transport> MeshNode<T> {
@@ -83,6 +85,54 @@ impl<T: Transport> MeshNode<T> {
             pending_relays: HashMap::new(),
             inbound_queue: VecDeque::new(),
             gateway_bridge: None,
+            resource_budget: None,
+        }
+    }
+
+    /// Attach a shared `ResourceBudgetManager` to gate third-party transit forwarding.
+    pub fn set_resource_budget(
+        &mut self,
+        budget: Arc<std::sync::Mutex<crate::mesh::resource::ResourceBudgetManager>>,
+    ) {
+        self.resource_budget = Some(budget);
+    }
+
+    fn check_transit_budget(
+        &self,
+        neighbor: ShortId,
+        msg_type: MsgType,
+        wire_bytes: usize,
+        now: Instant,
+    ) -> std::result::Result<(bool, u64), ()> {
+        let Some(ref mgr_arc) = self.resource_budget else {
+            return Ok((false, 10_000));
+        };
+        if let Ok(mut mgr) = mgr_arc.lock() {
+            match mgr.check_and_record(
+                crate::mesh::resource::TrafficOrigin::TransitRelay { neighbor },
+                msg_type,
+                wire_bytes,
+                now,
+            ) {
+                crate::mesh::resource::ResourceAdmission::Admitted {
+                    delay_multiplier_bps,
+                    ..
+                } => Ok((true, delay_multiplier_bps)),
+                _ => Err(()),
+            }
+        } else {
+            Ok((false, 10_000))
+        }
+    }
+
+    fn release_transit_reservation(&self, reserved: bool) {
+        if !reserved {
+            return;
+        }
+        if let Some(ref mgr_arc) = self.resource_budget {
+            if let Ok(mut mgr) = mgr_arc.lock() {
+                mgr.release_queued_item();
+            }
         }
     }
 
@@ -386,9 +436,11 @@ impl<T: Transport> MeshNode<T> {
                     .policy
                     .should_suppress(&ctx, &pending.duplicate_sources, pending.from_peer)
                 {
+                    self.release_transit_reservation(pending.budget_reserved);
                     self.stats.inc_relays_suppressed();
                 } else {
-                    self.do_relay(pending.envelope).await?;
+                    self.do_relay(pending.envelope, pending.budget_reserved)
+                        .await?;
                 }
             }
         }
@@ -446,7 +498,9 @@ impl<T: Transport> MeshNode<T> {
                     .policy
                     .should_suppress(&ctx, &pending.duplicate_sources, pending.from_peer)
                 {
+                    let reserved = pending.budget_reserved;
                     self.pending_relays.remove(&envelope.msg_id);
+                    self.release_transit_reservation(reserved);
                     self.stats.inc_relays_suppressed();
                 }
             }
@@ -470,11 +524,21 @@ impl<T: Transport> MeshNode<T> {
             });
         }
 
-        // 6. Relay decision
+        // 6. Relay decision (third-party transit only)
         // If it was a unicast addressed to us, destination reached: do not relay further
         if envelope.recipient_short_id == self.identity.short_id() {
             return Ok(());
         }
+
+        // Gate third-party transit forwarding through local ResourceBudgetManager
+        let (budget_reserved, delay_mult_bps) =
+            match self.check_transit_budget(from_peer, envelope.msg_type, assembled.len(), now) {
+                Ok(v) => v,
+                Err(()) => {
+                    self.stats.inc_transit_dropped_policy();
+                    return Ok(());
+                }
+            };
 
         // Forward to internet gateway if remote route configured
         if let Some(bridge) = &self.gateway_bridge {
@@ -483,6 +547,8 @@ impl<T: Transport> MeshNode<T> {
                     .forward_mesh_packet(&envelope, assembled.clone())
                     .await
                 {
+                    self.release_transit_reservation(budget_reserved);
+                    self.stats.record_transit_forwarded(assembled.len());
                     return Ok(());
                 }
             }
@@ -490,6 +556,7 @@ impl<T: Transport> MeshNode<T> {
 
         // Check hop limit
         if envelope.hop_count >= envelope.ttl_max {
+            self.release_transit_reservation(budget_reserved);
             self.stats.inc_hop_count_exceeded();
             return Ok(());
         }
@@ -507,13 +574,16 @@ impl<T: Transport> MeshNode<T> {
         };
 
         if !self.policy.should_relay(&ctx) {
+            self.release_transit_reservation(budget_reserved);
             return Ok(());
         }
 
-        let delay = self.policy.delay(&ctx);
+        let base_delay = self.policy.delay(&ctx);
+        let scaled_ms = (base_delay.as_millis() as u64).saturating_mul(delay_mult_bps) / 10_000;
+        let delay = Duration::from_millis(scaled_ms);
 
         if delay.is_zero() {
-            self.do_relay(envelope).await?;
+            self.do_relay(envelope, budget_reserved).await?;
         } else {
             let fire_at = now.checked_add(delay).unwrap_or(now);
             self.pending_relays.insert(
@@ -524,6 +594,7 @@ impl<T: Transport> MeshNode<T> {
                     duplicates_heard: 0,
                     duplicate_sources: Vec::new(),
                     from_peer: Some(from_peer),
+                    budget_reserved,
                 },
             );
         }
@@ -531,20 +602,43 @@ impl<T: Transport> MeshNode<T> {
         Ok(())
     }
 
-    async fn do_relay(&mut self, mut envelope: Envelope) -> Result<()> {
+    async fn do_relay(&mut self, mut envelope: Envelope, budget_reserved: bool) -> Result<()> {
         if envelope.increment_hop().is_err() {
+            self.release_transit_reservation(budget_reserved);
             self.stats.inc_hop_count_exceeded();
             return Ok(());
         }
 
-        let encoded = envelope.encode()?;
-        let fragments = self.fragmenter.split(&encoded, self.mtu)?;
+        let encoded = match envelope.encode() {
+            Ok(e) => e,
+            Err(e) => {
+                self.release_transit_reservation(budget_reserved);
+                return Err(e);
+            }
+        };
+        let fragments = match self.fragmenter.split(&encoded, self.mtu) {
+            Ok(f) => f,
+            Err(e) => {
+                self.release_transit_reservation(budget_reserved);
+                return Err(e);
+            }
+        };
 
+        let mut forwarded_bytes = 0usize;
         for frag in fragments {
-            self.transport.broadcast(frag).await?;
+            let frag_len = frag.len();
+            if let Err(e) = self.transport.broadcast(frag).await {
+                self.release_transit_reservation(budget_reserved);
+                return Err(e);
+            }
             self.stats.inc_transmissions();
+            forwarded_bytes = forwarded_bytes.saturating_add(frag_len);
         }
 
+        if forwarded_bytes > 0 {
+            self.stats.record_transit_forwarded(forwarded_bytes);
+        }
+        self.release_transit_reservation(budget_reserved);
         Ok(())
     }
 
@@ -568,11 +662,39 @@ impl<T: Transport> MeshNode<T> {
                 });
                 self.stats.inc_deliveries();
             } else if !env.recipient_short_id.is_broadcast() {
-                let fragments = self.fragmenter.split(&imported, self.mtu)?;
+                let (budget_reserved, _) = match self.check_transit_budget(
+                    env.sender_short_id,
+                    env.msg_type,
+                    imported.len(),
+                    now,
+                ) {
+                    Ok(v) => v,
+                    Err(()) => {
+                        self.stats.inc_transit_dropped_policy();
+                        return Ok(());
+                    }
+                };
+                let fragments = match self.fragmenter.split(&imported, self.mtu) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        self.release_transit_reservation(budget_reserved);
+                        return Err(e);
+                    }
+                };
+                let mut forwarded_bytes = 0usize;
                 for frag in fragments {
-                    self.transport.broadcast(frag).await?;
+                    let frag_len = frag.len();
+                    if let Err(e) = self.transport.broadcast(frag).await {
+                        self.release_transit_reservation(budget_reserved);
+                        return Err(e);
+                    }
                     self.stats.inc_transmissions();
+                    forwarded_bytes = forwarded_bytes.saturating_add(frag_len);
                 }
+                if forwarded_bytes > 0 {
+                    self.stats.record_transit_forwarded(forwarded_bytes);
+                }
+                self.release_transit_reservation(budget_reserved);
             }
         }
         Ok(())
