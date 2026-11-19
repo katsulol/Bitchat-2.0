@@ -134,5 +134,25 @@ When recipient receives an encrypted `ApplicationFrame::Message`:
 
 Attempts are scheduled with bounded exponential backoff and randomized jitter to avoid collision storms:
 $$\Delta t = \min\left(t_{\max},\; t_{\text{base}} \times 2^{\text{attempt}} + \text{rand}(0, J)\right)$$
-- Normal Mode: $t_{\text{base}} = 2.0\text{ s}$, $t_{\max} = 60.0\text{ s}$, $J = 1.0\text{ s}$, max attempts = 10, default TTL = 24 hours.
-- Privacy Mode: $t_{\text{base}} = 1.5\text{ s}$, $t_{\max} = 15.0\text{ s}$, $J = 0.5\text{ s}$, max attempts = 5, default TTL = 15 minutes.
+- Normal Mode: $t_{\text{base}} = 2.0\text{ s}$, $t_{\max} = 60.0\text{ s}$, $J = 1.0\text{ s}$, max attempts = 10, default TTL = 24 hours, max TTL = 7 days.
+- Privacy Mode: $t_{\text{base}} = 1.5\text{ s}$, $t_{\max} = 15.0\text{ s}$, $J = 0.5\text{ s}$, max attempts = 5, default TTL = 15 minutes, max TTL = 1 hour.
+
+---
+
+## 6. Adaptive Delivery Extensions (Tasks 1–3)
+
+1. **Multi-Gateway Candidate Ranking & Sequential Fallback (`core/src/gateway/routes.rs`, `core/src/mesh/router.rs`)**:
+   - `GatewayRouteTable` indexes routes by both `ShortId` (`routes`) and full verified 32-byte `PeerId` (`peer_routes`), verifying `pid.short_id() == sid` during `RouteSync` ingestion.
+   - `Router::decide_multi` enumerates fresh, approved, non-revoked/non-blocked `GatewayCandidate`s and tries one candidate sequentially per attempt (`attempted_gateways` tracks per-round exclusions). Immediate transport/writer failure fails over sequentially to the next gateway in the same dispatch pass; ACK timeout triggers backoff and alternate-gateway selection on the next `pump_outbox` cycle.
+   - At most **1 active `InFlight` attempt per recipient `PeerId`** is permitted concurrently (`DeliveryCoordinator::has_active_in_flight_for`), and `DEFAULT_ACK_TIMEOUT` defaults to `4 s` (clamping dynamic remaining frame TTL in `ApplicationFrame`).
+   - Gateway acceptance never marks `Delivered`; `api::poll_inbound` passes the Noise-authenticated `decrypted.remote_peer_id` into `DeliveryCoordinator::handle_ack` and transitions `OutboxManager` + emits `"Delivered"` only on `Ok(true)`.
+
+2. **Strict Deadline Presets & Bounded 3:1 EDF Scheduling (`core/src/storage/mod.rs`, `core/src/mesh/delivery.rs`)**:
+   - Optional delivery deadline presets: `2m` (`120 s`), `15m` (`900 s`), and `1h` (`3600 s`), with hard lower bound `MIN_DEADLINE_SECS = 1 s`. Out-of-bounds deadlines are **strictly rejected** with `SendRejection::InvalidDeadline` (never silently clamped or mode-downgraded).
+   - Pending `Normal`-mode records from encrypted SQLite are rehydrated on startup (`BitchatCoreService::new_with_key`), using `remaining = min(expires_at - now_secs, expires_at - created_at)` so clock rollbacks never extend TTL.
+   - SQLite terminal state updates (`mark_delivered`, `mark_failed`, `mark_cancelled`, `mark_expired`) enforce `WHERE state NOT IN (2, 3, 4, 5)` so late ACKs cannot alter terminal records.
+   - `DeliveryCoordinator::check_timeouts` applies bounded **3:1 Earliest-Deadline-First** interleaving: at most `MAX_CONSECUTIVE_URGENT_DISPATCHES = 3` urgent messages (`remaining_ttl <= 120 s`) dispatch before promoting an awaiting ordinary message (`> 120 s`).
+
+3. **Authoritative Enriched Delivery Events (`core/src/api.rs`, `app/lib/delivery_explanation.dart`)**:
+   - `DeliveryEventRecord` streams `{ logical_id, state, recipient, timestamp, reason, transport, attempt_count, expires_at }` directly from Rust; Flutter maintains no parallel retry timer or state machine.
+   - `DeliveryExplanation` maps typed `RouteReason` codes (`WaitingForApprovedGateway`, `SessionHandshakeRequired`, `RetryingAlternateGateway`, `ResourcePolicyPaused`, `PrivacyRelayRestricted`, etc.) and never asserts a peer is offline solely from missing ACKs. Failed sends preserve composer drafts cleanly.

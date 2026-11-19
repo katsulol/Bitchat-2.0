@@ -99,6 +99,27 @@
 
 ### Known Baseline Limitations
 1. **Unverified Multi-Gateway Physical Topology**: Full offline-sender → Gateway 1 + Gateway 2 → offline-receiver path requires 4 physical Android BLE devices; current hardware verification covered 2–3 devices under Phase 4/5 single-path tests only.
-2. **Prebuilt ARM64 Native Binary Lag**: `libbitchat2_core.so` must be recompiled for `aarch64-linux-android` before subsequent Android hardware validation.
-3. **Companion Plan Reference**: `ADAPTIVE_DELIVERY_FEATURES.md` §Purpose references `PHASE_6.md` alongside this plan, which is not yet present in the workspace; Task 0–5 sequencing proceeds strictly per `ADAPTIVE_DELIVERY_FEATURES.md` ("one numbered task at a time").
+2. **Prebuilt ARM64 Native Binary Lag**: Resolved in Task 5 by rebuilding `libbitchat2_core.so` (`aarch64-linux-android` release).
+3. **Companion Plan Reference**: `ADAPTIVE_DELIVERY_FEATURES.md` §Purpose references `PHASE_6.md` alongside this plan, which is not yet present in the workspace.
 4. **Desktop/Simulation Boundary**: Existing 400-run `SimNetwork` and Tokio desktop E2E tests do not model Android OS Activity lifecycle suspension, BLE GATT congestion, or live Iroh DERP vs direct path migration.
+
+---
+
+## 6. Post-Implementation Status Matrix & Task 5 Handoff
+
+| Feature / Subsystem | Implemented | Integrated (Public Runtime) | Simulator-Tested | Desktop-Tested | Physical-Tested | Commit | Notes |
+|---|:---:|:---:|:---:|:---:|:---:|---|---|
+| **Task 0: Source Audit & Baseline Checklist** | **Yes** | N/A | N/A | N/A | N/A | `b5d36a8` | Blockers `B1`–`B9` documented and addressed. |
+| **Task 1 + B1–B4: Alternate-Gateway Retry & P0 Fixes** | **Yes** | **Yes** | N/A | **Yes** (8 E2E tests) | **No** (pending 4-device RF run) | `ab0ae7f` | `PeerId`-keyed routes, sequential failover, 1 active attempt/peer, unified `TrustStore`, B1–B4 closed. |
+| **Task 2: Deadline Messages & Bounded 3:1 EDF** | **Yes** | **Yes** | **Yes** (unit) | **Yes** (4 E2E + unit) | **No** (pending device run) | `8ce4951` | Strict presets (`2m`/`15m`/`1h`), clock-rollback clamped rehydration, SQLite terminal immutability, 3:1 EDF. |
+| **Task 3: Explain Delivery Progress & Cancel UI** | **Yes** | **Yes** | N/A | **Yes** (`flutter test`: 5/5) | **No** (APK built; awaiting phone) | `a926115` | `DeliveryExplanation` + deadline picker + cancel + draft preservation + `320x640` / `1.8x` text scale verified. |
+| **Task 4: Live Resource Budgets & Gateway Rate Limiter** | **Yes** | **Yes** | **Yes** (`ResourceBudget`) | **Yes** (3 E2E tests) | **No** (pending device run) | `0eaac54` | `ResourceBudgetManager` wired in `MeshNode`; `GatewayRateLimiter` wired in `GatewayBridge`; 3-tier UI controls. |
+| **Task 5: Combined E2E, Ablations, Docs & ARM64 Build** | **Yes** | **Yes** | **Yes** (EDF/Resource) | **Yes** (2 tests) | **APK Ready** (4-phone pending) | *this commit* | See `docs/EVALUATION.md` §5 and artifact hashes below. |
+
+### Mode/Deadline Policy, Sequential Fallback Bounds & Remaining Limitations
+- **Modes & Presets**: `Normal` (ChaCha20-Poly1305 SQLite + DEK, default 24h, max 7d, max 10 attempts), `Privacy` (volatile RAM only, zero disk writes, default 15m, max 1h, max 5 attempts, relay gateways blocked). Optional presets `2m` (`120 s`), `15m` (`900 s`), `1h` (`3600 s`), min `1 s`; incompatible presets rejected strictly (`InvalidDeadline`), never silently clamped.
+- **Fallback Bounds**: Enumerates fresh, approved, non-revoked `GatewayCandidate`s for recipient `PeerId`; tries one candidate sequentially per attempt; tracks `attempted_gateways` per cycle; max 1 active `InFlight` attempt per recipient; `DEFAULT_ACK_TIMEOUT = 4 s` with bounded backoff/jitter and hard monotonic stop at `expires_at`.
+- **Android Build Hashes**:
+  - `app/android/app/src/main/jniLibs/arm64-v8a/libbitchat2_core.so`: `24,610,000` bytes — SHA-256 `4D82299C00E763E2A16412DC9CB9EA04D89651781B15F7C111746622CA8F92F4`
+  - `app/build/app/outputs/flutter-apk/app-release.apk` *(gitignored build output)*: `82,951,605` bytes — SHA-256 `0901BE28E11086E2A140975067198E27C4D6152E59B4C247FD0BEF417244B549`
+- **Known Limitations**: (1) `InboxDeduplicator` (`capacity = 10,000`, `ttl = 24h`) is in-memory per process, so duplicates re-transmitted after receiver app kill/restart are treated as new; (2) Rust `BitchatCoreService` pump (`50 ms` timer) runs in the Flutter isolate rather than `BitchatBleService.kt`; (3) Physical 4-device RF + thermal/battery validation remains unexecuted until deployed to Android hardware.

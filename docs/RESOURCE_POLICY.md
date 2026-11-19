@@ -39,3 +39,19 @@
   - `TrafficOrigin::LocalOriginated` packets are **never** dropped by `ResourceBudgetManager::check_and_record`, even when `active_profile == RelayResourceProfile::Paused`. Local accepted messages are never sacrificed to fund or conserve transit forwarding.
 - **Control-Plane Reservation (`25%`)**:
   - Aligned with `core/src/gateway/fairness.rs` (`CONTROL_PLANE_RESERVATION_RATIO = 0.25`), non-control `MsgType::Chat` transit traffic may consume at most `75%` of the active profile's queue depth and byte budget (`6 KiB/s` in `Minimal`), reserving the remaining `25%` (`2 KiB/s` in `Minimal`) for `MsgType::Handshake` and `MsgType::Ack` frames so E2E session setup and delivery receipts cannot be starved by transit chat bursts.
+
+---
+
+## 5. Live Enforcement Wiring & UI Contribution Controls (Task 4)
+
+- **Mesh Transit Enforcement (`core/src/mesh/relay.rs`, `core/src/api.rs`)**:
+  - `BitchatCoreService::new_with_key` attaches `Arc<Mutex<ResourceBudgetManager>>` directly to `MeshNode::set_resource_budget`.
+  - Both third-party BLE relays (`handle_incoming_frame`) and third-party gateway-imported BLE forwards (`process_imported_gateway_packet`) evaluate `TrafficOrigin::TransitRelay` budgets and scale relay delays by `delay_multiplier_bps`. Originated messages (`send_envelope_via`) bypass transit dropping unconditionally.
+- **Gateway Fairness Enforcement (`core/src/gateway/bridge.rs`)**:
+  - `GatewayBridge` wires `GatewayRateLimiter` (`64 KiB/s` global, `8 KiB/s * 60` per-peer, `16 chat envelopes/min` per peer, `25%` control-plane queue/bandwidth reservation) on `GatewayMessage::Forward` ingress in `spawn_session_handler`.
+- **Relay Contribution Profiles (`app/lib/main.dart`, `core/src/ffi.rs`)**:
+  - Three explicit user choices in Node Diagnostics (`set_relay_contribution_profile` / `bitchat_set_relay_contribution_profile`):
+    1. **Receive only** → `Paused` (`user_paused_relaying = true`, zero optional transit).
+    2. **Balanced** → `Balanced` (`user_profile_override = Some(Balanced)` bounded by safety caps).
+    3. **Help the network** → `Assisted` (`user_profile_override = Some(Assisted)` bounded by safety caps; thermal `Critical`, `power_save_mode`, and `user_paused_relaying` still override).
+  - UI displays locally observed counters (`transit_packets_forwarded`, `transit_bytes_forwarded`, `transit_packets_dropped_policy`) and never claims unverified "people helped" or battery savings percentages.

@@ -62,3 +62,30 @@ This evaluation quantifies routing efficiency, delivery reliability, latency dis
 
 1. **Discrete-Event Simulation**: Executed in `SimNetwork` using virtual event stepping. BLE advertising interval collisions, hardware radio sleep cycles, and OS Bluetooth queue drops are abstracted into a uniform 5% per-hop loss model.
 2. **Static Topologies**: Evaluated against fixed graph structures. Dynamic mobile churn and physical RSSI variations are addressed in Phase 4 Part B and Phase 5.
+
+---
+
+## 5. Adaptive Delivery Matched Ablations & Desktop Benchmarks (Task 5)
+
+Executed via `cargo test --test test_adaptive_delivery_ablation -- --nocapture` against the public `BitchatCoreService`, live loopback `GatewayBridge` (`RelayMode::Disabled`), Noise XX, encrypted SQLite, and `ResourceBudgetManager` (`2026-11-19`, branch `adaptive-delivery`). **These are desktop/simulated measurements — physical 4-phone RF behavior requires hardware testing on Android.**
+
+### 5.1 Gateway Failover Ablation (3 Messages Under Primary-Gateway Outbound Failure)
+| Configuration | Delivered Before Expiry | Delivery Rate | Total Attempts | Total Wall Time | Per-Msg Latencies (ms) | BLE/Iroh Outbound Bytes Logged |
+|---|---:|---:|---:|---:|---:|---:|
+| `single_route_baseline` (GW2 revoked; GW1 writer aborted, 1s deadline) | `0 / 3` | `0.0%` | — | `1100+ ms` (expired) | — | — |
+| `alternate_gateway_recovery` (GW1 writer aborted; automatic sequential GW2 fallback) | `3 / 3` | `100.0%` | `3` | `373 ms` | `[140, 114, 119]` | `4,036 B` |
+
+### 5.2 Deadline Scheduler Ablation (6 Urgent `[30s..80s]` + 3 Ordinary `[24h]` Queue, `3:1` Bounded EDF)
+- `bounded_edf_3_to_1`: Dispatches the 3 earliest-deadline urgent messages in slots `0..=2`, promotes the awaiting ordinary message at slot `3` (`MAX_CONSECUTIVE_URGENT_DISPATCHES = 3`, preventing ordinary-traffic starvation), and dispatches remaining urgent messages in slots `4..=6` (`edf_urgent_max_slot = 6`, `first_ordinary_slot = 3`).
+
+### 5.3 Resource-Budgeted Relaying Ablation (`64 KiB` Transit Burst Across 4 Neighbors + `4 KiB` Local Work)
+| Active Profile | Transit Data Admitted | Transit Data Dropped (Policy) | Reserved Control ACK (`256 B`) | Local-Originated Admitted (`4 x 1 KiB`) |
+|---|---:|---:|:---:|---:|
+| `Paused` (`Receive only`) | `0 B` | `65,536 B` | Blocked by pause | `4 / 4` (`100%`) |
+| `Minimal` (`8 KiB/s` cap, `75%` data) | `6,144 B` | `59,392 B` | **Admitted** | `4 / 4` (`100%`) |
+| `Balanced` (`32 KiB/s` cap, `75%` data) | `24,576 B` | `40,960 B` | **Admitted** | `4 / 4` (`100%`) |
+| `Assisted` (`64 KiB/s` cap, `75%` data) | `49,152 B` | `16,384 B` | **Admitted** | `4 / 4` (`100%`) |
+
+### 5.4 Release Build Artifacts (`adaptive-delivery`)
+- `app/android/app/src/main/jniLibs/arm64-v8a/libbitchat2_core.so`: `24,610,000` bytes, SHA-256 `4D82299C00E763E2A16412DC9CB9EA04D89651781B15F7C111746622CA8F92F4`
+- `app/build/app/outputs/flutter-apk/app-release.apk` *(gitignored build output)*: `82,951,605` bytes, SHA-256 `0901BE28E11086E2A140975067198E27C4D6152E59B4C247FD0BEF417244B549`
