@@ -1,23 +1,35 @@
 // CRYPTO-REVIEW:
 // What it does: Implements Ed25519 cryptographic identity, key generation, signing,
-// verification, PeerId (32-byte public key), and ShortId (8-byte BLAKE3 prefix).
-// Primitives / crates: `ed25519-dalek` (SigningKey, VerifyingKey, Signature), `blake3`, `zeroize`.
+// verification, PeerId (32-byte public key), ShortId (8-byte BLAKE3 prefix), and
+// AEAD-protected root identity persistence + crash-safe migration (`ProtectedIdentityStore`).
+// Primitives / crates: `ed25519-dalek` (SigningKey, VerifyingKey, Signature), `blake3`
+// (`derive_key` with `"bitchat2.root-identity.wrap.v1"`), `chacha20poly1305`, `rand` (`OsRng`), `zeroize`.
 // Reviewer checklist:
-// 1. Key generation uses OsRng (cryptographically secure system randomness).
-// 2. Secret key material is zeroized on drop and never cloned into unmanaged buffers.
-// 3. Debug implementations for Identity and KeyStores explicitly redact secret key bytes.
-// 4. Verification strictly checks signatures and rejects malformed/tampered signatures.
+// 1. Key generation uses `OsRng` (cryptographically secure system randomness).
+// 2. Wrapping subkey is purpose-derived via `blake3::derive_key("bitchat2.root-identity.wrap.v1", &dek.key)`
+//    (never derived from public identity bytes) and zeroized immediately after cipher setup.
+// 3. `BCID` v1 record is bounded at 101 bytes (checked via file metadata BEFORE reading) with AAD
+//    authenticating magic, format version, DEK version, and 32-byte Ed25519 public key.
+// 4. Crash-safe migration writes `.tmp` -> `fsync` -> rename -> reopen & decrypt-verify -> remove legacy file.
+// 5. Missing/wrong KEK, corruption, or dual-file PeerId mismatch ALWAYS fail closed (never regenerate).
+// 6. Debug implementations for Identity and KeyStores explicitly redact secret key bytes.
 
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use chacha20poly1305::{
+    aead::{Aead, KeyInit, Payload},
+    ChaCha20Poly1305, Nonce,
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
-use zeroize::ZeroizeOnDrop;
+use rand::{rngs::OsRng, RngCore};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::error::{Error, Result};
+use crate::storage::key::{KeyProvider, KeySecurityLevel};
 
 /// PeerId is the 32-byte Ed25519 public key of a node.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -328,6 +340,371 @@ impl fmt::Debug for FileKeyStore {
         f.debug_struct("FileKeyStore")
             .field("path", &self.path)
             .finish()
+    }
+}
+
+pub const PROTECTED_IDENTITY_MAGIC: &[u8; 4] = b"BCID";
+pub const PROTECTED_IDENTITY_FORMAT_V1: u8 = 1;
+/// Header(41) = magic(4) + fmt_v1(1) + key_ver(4) + pubkey(32), nonce(12), AEAD ciphertext+tag(48).
+pub const PROTECTED_IDENTITY_RECORD_LEN: usize = 4 + 1 + 4 + 32 + 12 + 48; // 101 bytes
+const ROOT_IDENTITY_WRAP_CONTEXT: &str = "bitchat2.root-identity.wrap.v1";
+
+static IDENTITY_IO_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Actionable, non-silent failure states for protected root identity loading and migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityStorageError {
+    KeyUnavailable(String),
+    CorruptedRecord(String),
+    KeyMismatchOrRestoreFailure(String),
+    MigrationMismatch(String),
+    IoFailure(String),
+}
+
+impl IdentityStorageError {
+    pub fn error_code(&self) -> &'static str {
+        match self {
+            Self::KeyUnavailable(_) => "IDENTITY_KEY_UNAVAILABLE",
+            Self::CorruptedRecord(_) => "IDENTITY_CORRUPTED",
+            Self::KeyMismatchOrRestoreFailure(_) => "IDENTITY_RESTORE_MISMATCH",
+            Self::MigrationMismatch(_) => "IDENTITY_MIGRATION_MISMATCH",
+            Self::IoFailure(_) => "IDENTITY_IO_ERROR",
+        }
+    }
+}
+
+impl fmt::Display for IdentityStorageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::KeyUnavailable(m)
+            | Self::CorruptedRecord(m)
+            | Self::KeyMismatchOrRestoreFailure(m)
+            | Self::MigrationMismatch(m)
+            | Self::IoFailure(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for IdentityStorageError {}
+
+/// AEAD-protected root identity persistence (`identity.enc`, `BCID` v1) with crash-safe atomic
+/// migration from legacy plaintext `identity.key`.
+pub struct ProtectedIdentityStore {
+    dir: PathBuf,
+    key_provider: Arc<dyn KeyProvider>,
+}
+
+impl fmt::Debug for ProtectedIdentityStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProtectedIdentityStore")
+            .field("dir", &self.dir)
+            .field("security_level", &self.key_provider.security_level())
+            .finish()
+    }
+}
+
+impl ProtectedIdentityStore {
+    pub fn new(dir: impl AsRef<Path>, key_provider: Arc<dyn KeyProvider>) -> Self {
+        Self {
+            dir: dir.as_ref().to_path_buf(),
+            key_provider,
+        }
+    }
+
+    pub fn enc_path(&self) -> PathBuf {
+        self.dir.join("identity.enc")
+    }
+
+    pub fn tmp_path(&self) -> PathBuf {
+        self.dir.join("identity.enc.tmp")
+    }
+
+    pub fn legacy_path(&self) -> PathBuf {
+        self.dir.join("identity.key")
+    }
+
+    pub fn security_level(&self) -> KeySecurityLevel {
+        self.key_provider.security_level()
+    }
+
+    fn derive_cipher(&self) -> std::result::Result<(u32, ChaCha20Poly1305), IdentityStorageError> {
+        let dek = self.key_provider.get_or_create_dek().map_err(|e| {
+            IdentityStorageError::KeyUnavailable(format!("Keystore unavailable: {e}"))
+        })?;
+        let mut wrap_key = blake3::derive_key(ROOT_IDENTITY_WRAP_CONTEXT, &dek.key);
+        let cipher_res = ChaCha20Poly1305::new_from_slice(&wrap_key)
+            .map_err(|e| IdentityStorageError::KeyUnavailable(format!("Cipher init failed: {e}")));
+        wrap_key.zeroize();
+        Ok((dek.version, cipher_res?))
+    }
+
+    fn read_legacy_identity(&self) -> std::result::Result<Identity, IdentityStorageError> {
+        let bytes = fs::read(self.legacy_path()).map_err(|e| {
+            IdentityStorageError::IoFailure(format!("Failed to read legacy identity.key: {e}"))
+        })?;
+        if bytes.len() != 32 {
+            return Err(IdentityStorageError::CorruptedRecord(format!(
+                "Invalid legacy identity.key length: expected 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut raw = [0u8; 32];
+        raw.copy_from_slice(&bytes);
+        let id = Identity::from_bytes(&raw);
+        raw.zeroize();
+        Ok(id)
+    }
+
+    fn read_encrypted_identity(&self) -> std::result::Result<Identity, IdentityStorageError> {
+        let enc_path = self.enc_path();
+        let meta = fs::metadata(&enc_path).map_err(|e| {
+            IdentityStorageError::IoFailure(format!("Failed to inspect identity.enc: {e}"))
+        })?;
+        if meta.len() != PROTECTED_IDENTITY_RECORD_LEN as u64 {
+            return Err(IdentityStorageError::CorruptedRecord(format!(
+                "Corrupted identity.enc length: {} bytes (expected {})",
+                meta.len(),
+                PROTECTED_IDENTITY_RECORD_LEN
+            )));
+        }
+
+        let raw = fs::read(&enc_path).map_err(|e| {
+            IdentityStorageError::IoFailure(format!("Failed to read identity.enc: {e}"))
+        })?;
+        if raw.len() != PROTECTED_IDENTITY_RECORD_LEN {
+            return Err(IdentityStorageError::CorruptedRecord(format!(
+                "Truncated/oversized identity.enc read: {} bytes",
+                raw.len()
+            )));
+        }
+        if &raw[0..4] != PROTECTED_IDENTITY_MAGIC {
+            return Err(IdentityStorageError::CorruptedRecord(
+                "Invalid identity.enc magic header".into(),
+            ));
+        }
+        if raw[4] != PROTECTED_IDENTITY_FORMAT_V1 {
+            return Err(IdentityStorageError::CorruptedRecord(format!(
+                "Unsupported identity.enc format version: {}",
+                raw[4]
+            )));
+        }
+        let mut ver_bytes = [0u8; 4];
+        ver_bytes.copy_from_slice(&raw[5..9]);
+        let record_key_ver = u32::from_be_bytes(ver_bytes);
+
+        let (active_key_ver, cipher) = self.derive_cipher()?;
+        if record_key_ver != active_key_ver {
+            return Err(IdentityStorageError::KeyMismatchOrRestoreFailure(format!(
+                "Root identity key version mismatch (record v{record_key_ver}, keystore v{active_key_ver})"
+            )));
+        }
+
+        let header_aad = &raw[0..41];
+        let mut expected_pubkey = [0u8; 32];
+        expected_pubkey.copy_from_slice(&raw[9..41]);
+        let nonce = &raw[41..53];
+        let ciphertext = &raw[53..PROTECTED_IDENTITY_RECORD_LEN];
+
+        let mut pt = cipher
+            .decrypt(
+                Nonce::from_slice(nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: header_aad,
+                },
+            )
+            .map_err(|_| {
+                IdentityStorageError::KeyMismatchOrRestoreFailure(
+                    "Failed to decrypt root identity (wrong KEK / backup restore mismatch or tampered record)"
+                        .into(),
+                )
+            })?;
+
+        if pt.len() != 32 {
+            pt.zeroize();
+            return Err(IdentityStorageError::CorruptedRecord(
+                "Decrypted root identity length invalid".into(),
+            ));
+        }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&pt);
+        pt.zeroize();
+        let identity = Identity::from_bytes(&secret);
+        secret.zeroize();
+
+        if identity.peer_id().0 != expected_pubkey {
+            return Err(IdentityStorageError::CorruptedRecord(
+                "Decrypted Ed25519 private key does not match header public key".into(),
+            ));
+        }
+        Ok(identity)
+    }
+
+    fn write_encrypted_atomic(
+        &self,
+        identity: &Identity,
+    ) -> std::result::Result<(), IdentityStorageError> {
+        fs::create_dir_all(&self.dir).map_err(|e| {
+            IdentityStorageError::IoFailure(format!("Failed to create storage dir: {e}"))
+        })?;
+
+        let (key_ver, cipher) = self.derive_cipher()?;
+        let mut nonce = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce);
+
+        let mut record = Vec::with_capacity(PROTECTED_IDENTITY_RECORD_LEN);
+        record.extend_from_slice(PROTECTED_IDENTITY_MAGIC);
+        record.push(PROTECTED_IDENTITY_FORMAT_V1);
+        record.extend_from_slice(&key_ver.to_be_bytes());
+        record.extend_from_slice(identity.peer_id().as_bytes());
+
+        let mut secret = identity.to_bytes();
+        let ct_res = cipher.encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &secret,
+                aad: &record[0..41],
+            },
+        );
+        secret.zeroize();
+        let ct = ct_res.map_err(|e| {
+            IdentityStorageError::IoFailure(format!("Failed to encrypt root identity: {e}"))
+        })?;
+
+        record.extend_from_slice(&nonce);
+        record.extend_from_slice(&ct);
+
+        let tmp = self.tmp_path();
+        {
+            let mut file = fs::File::create(&tmp).map_err(|e| {
+                IdentityStorageError::IoFailure(format!("Failed to create identity.enc.tmp: {e}"))
+            })?;
+            file.write_all(&record).map_err(|e| {
+                IdentityStorageError::IoFailure(format!("Failed to write identity.enc.tmp: {e}"))
+            })?;
+            file.sync_all().map_err(|e| {
+                IdentityStorageError::IoFailure(format!("Failed to fsync identity.enc.tmp: {e}"))
+            })?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+        }
+
+        let enc = self.enc_path();
+        fs::rename(&tmp, &enc).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            IdentityStorageError::IoFailure(format!(
+                "Failed to atomically commit identity.enc: {e}"
+            ))
+        })?;
+
+        #[cfg(unix)]
+        if let Ok(dir_handle) = fs::File::open(&self.dir) {
+            let _ = dir_handle.sync_all();
+        }
+        Ok(())
+    }
+
+    /// Load encrypted root identity or migrate legacy plaintext `identity.key` atomically.
+    ///
+    /// Crash-safe invariants:
+    /// - Orphans left in `identity.enc.tmp` are pruned without removing `identity.key`.
+    /// - If BOTH `identity.enc` and `identity.key` exist, both must match public identity; a
+    ///   mismatch fails closed without deleting either file.
+    /// - Legacy `identity.key` is removed ONLY AFTER writing `identity.enc` atomically AND
+    ///   reopening/decrypting it from disk to verify public `PeerId` equivalence.
+    /// - Never generates a replacement identity when `identity.enc` exists and cannot decrypt.
+    pub fn load_or_migrate(&self) -> std::result::Result<Identity, IdentityStorageError> {
+        let lock = IDENTITY_IO_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| IdentityStorageError::IoFailure("Identity lock poisoned".into()))?;
+
+        // Clean up any partial write artifact safely before checking state
+        let tmp = self.tmp_path();
+        if tmp.exists() {
+            let _ = fs::remove_file(&tmp);
+        }
+
+        let enc_exists = self.enc_path().exists();
+        let legacy_exists = self.legacy_path().exists();
+
+        match (enc_exists, legacy_exists) {
+            (true, true) => {
+                // Crash occurred after atomic commit of identity.enc but before removing identity.key.
+                let enc_id = self.read_encrypted_identity()?;
+                let legacy_id = self.read_legacy_identity()?;
+                if enc_id.peer_id() != legacy_id.peer_id() {
+                    return Err(IdentityStorageError::MigrationMismatch(
+                        "Both identity.enc and legacy identity.key exist with different public PeerIds; failing closed"
+                            .into(),
+                    ));
+                }
+                fs::remove_file(self.legacy_path()).map_err(|e| {
+                    IdentityStorageError::IoFailure(format!(
+                        "Failed to remove migrated legacy identity.key: {e}"
+                    ))
+                })?;
+                Ok(enc_id)
+            }
+            (true, false) => self.read_encrypted_identity(),
+            (false, true) => {
+                let legacy_id = self.read_legacy_identity()?;
+                let expected_peer_id = legacy_id.peer_id();
+                self.write_encrypted_atomic(&legacy_id)?;
+
+                // Reopen from disk and decrypt BEFORE removing legacy file
+                let verified = self.read_encrypted_identity()?;
+                if verified.peer_id() != expected_peer_id {
+                    return Err(IdentityStorageError::MigrationMismatch(
+                        "Post-commit identity verification mismatch".into(),
+                    ));
+                }
+                fs::remove_file(self.legacy_path()).map_err(|e| {
+                    IdentityStorageError::IoFailure(format!(
+                        "Failed to clean up legacy identity.key after verified migration: {e}"
+                    ))
+                })?;
+                Ok(verified)
+            }
+            (false, false) => {
+                let fresh = Identity::generate();
+                let expected_peer_id = fresh.peer_id();
+                self.write_encrypted_atomic(&fresh)?;
+                let verified = self.read_encrypted_identity()?;
+                if verified.peer_id() != expected_peer_id {
+                    return Err(IdentityStorageError::CorruptedRecord(
+                        "Newly persisted identity verification failed".into(),
+                    ));
+                }
+                Ok(verified)
+            }
+        }
+    }
+
+    /// Explicit user-confirmed destructive reset of root identity files.
+    pub fn destructive_reset_confirmed(
+        &self,
+        confirm: bool,
+    ) -> std::result::Result<(), IdentityStorageError> {
+        if !confirm {
+            return Err(IdentityStorageError::KeyUnavailable(
+                "Destructive identity reset refused without explicit user confirmation".into(),
+            ));
+        }
+        for p in [self.enc_path(), self.tmp_path(), self.legacy_path()] {
+            if p.exists() {
+                fs::remove_file(&p).map_err(|e| {
+                    IdentityStorageError::IoFailure(format!(
+                        "Failed to delete {}: {e}",
+                        p.display()
+                    ))
+                })?;
+            }
+        }
+        Ok(())
     }
 }
 

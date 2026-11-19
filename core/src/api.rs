@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::envelope::{pad_inner_payload, unpad_bucket, MsgType};
 use crate::gateway::GatewayBridge;
-use crate::identity::{FileKeyStore, Identity, KeyStore, PeerId, ShortId};
+use crate::identity::{Identity, PeerId, ProtectedIdentityStore, ShortId};
 use crate::mesh::delivery::{
     ApplicationFrame, ApplicationFrameKind, DedupStatus, DeliveryAction, DeliveryCoordinator,
     DeliveryState, EnqueueMessage, InboxDeduplicator, DEFAULT_ACK_TIMEOUT,
@@ -88,6 +88,8 @@ pub struct DiagnosticsSnapshot {
     pub transit_packets_dropped_policy: u64,
     #[serde(default)]
     pub relay_contribution_mode: String,
+    #[serde(default)]
+    pub key_security_level: String,
 }
 
 /// High-level routing metrics snapshot for mobile UI.
@@ -146,6 +148,7 @@ pub struct BitchatCoreService {
     ack_timeout: Duration,
     gateway_opted_in: bool,
     next_voucher_seq: u32,
+    key_security_level: String,
 }
 
 static SERVICE: OnceLock<RwLock<Option<BitchatCoreService>>> = OnceLock::new();
@@ -188,15 +191,20 @@ impl BitchatCoreService {
         let key_provider: Arc<dyn KeyProvider> = match dek {
             Some(k) => Arc::new(InjectedKeyProvider::new(k, key_version)),
             None => {
-                let protected_exists = ["bitchat_outbox.db", "bitchat_trust.db", "identity.enc"]
-                    .iter()
-                    .any(|f| {
-                        base_dir
-                            .join(f)
-                            .metadata()
-                            .map(|m| m.len() > 0)
-                            .unwrap_or(false)
-                    });
+                let protected_exists = [
+                    "bitchat_outbox.db",
+                    "bitchat_trust.db",
+                    "identity.enc",
+                    "identity.key",
+                ]
+                .iter()
+                .any(|f| {
+                    base_dir
+                        .join(f)
+                        .metadata()
+                        .map(|m| m.len() > 0)
+                        .unwrap_or(false)
+                });
                 if protected_exists {
                     return Err(
                         "KEY_UNAVAILABLE: Protected storage exists on disk without platform DEK; failing closed"
@@ -209,30 +217,43 @@ impl BitchatCoreService {
         Self::new_with_key_provider(storage_path, key_provider).await
     }
 
+    /// Explicitly wipe root identity and encrypted storage ONLY when user confirms destructive reset.
+    pub fn destructive_reset_storage(storage_path: &str, confirm: bool) -> Result<(), String> {
+        if !confirm {
+            return Err("Destructive reset refused without explicit confirmation".to_string());
+        }
+        let dir = PathBuf::from(storage_path);
+        for name in [
+            "identity.enc",
+            "identity.enc.tmp",
+            "identity.key",
+            "bitchat_outbox.db",
+            "bitchat_outbox.db-wal",
+            "bitchat_outbox.db-shm",
+            "bitchat_trust.db",
+            "bitchat_trust.db-wal",
+            "bitchat_trust.db-shm",
+            "bitchat_dek.enc",
+        ] {
+            let p = dir.join(name);
+            if p.exists() {
+                std::fs::remove_file(&p)
+                    .map_err(|e| format!("Failed to remove {}: {e}", p.display()))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Construct a standalone `BitchatCoreService` backed by an explicit `KeyProvider`.
     pub async fn new_with_key_provider(
         storage_path: String,
         key_provider: Arc<dyn KeyProvider>,
     ) -> Result<Self, String> {
-        // Validate key availability before opening/creating encrypted databases.
-        let _ = key_provider
-            .get_or_create_dek()
-            .map_err(|e| format!("KEY_UNAVAILABLE: Failed to unlock KeyProvider: {e}"))?;
-
-        let path = PathBuf::from(&storage_path).join("identity.key");
-        let keystore = FileKeyStore::new(path);
-        let identity = if let Some(id) = keystore
-            .load()
-            .map_err(|e| format!("Failed to load identity: {e}"))?
-        {
-            id
-        } else {
-            let new_id = Identity::generate();
-            keystore
-                .save(&new_id)
-                .map_err(|e| format!("Failed to save identity: {e}"))?;
-            new_id
-        };
+        let id_store = ProtectedIdentityStore::new(&storage_path, Arc::clone(&key_provider));
+        let key_security_level = format!("{:?}", id_store.security_level());
+        let identity = id_store
+            .load_or_migrate()
+            .map_err(|e| format!("{}: {e}", e.error_code()))?;
 
         let short_id = identity.short_id();
         let peer_id = identity.peer_id();
@@ -324,6 +345,7 @@ impl BitchatCoreService {
             ack_timeout,
             gateway_opted_in: false,
             next_voucher_seq: 1,
+            key_security_level,
         })
     }
 
@@ -1040,6 +1062,7 @@ impl BitchatCoreService {
             transit_bytes_forwarded: node_stats.transit_bytes_forwarded,
             transit_packets_dropped_policy: node_stats.transit_packets_dropped_policy,
             relay_contribution_mode: self.relay_contribution_mode.clone(),
+            key_security_level: self.key_security_level.clone(),
         }
     }
 

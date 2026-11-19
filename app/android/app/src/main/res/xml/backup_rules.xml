@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="file" path="identity.enc" />
+    <exclude domain="file" path="identity.enc.tmp" />
+    <exclude domain="file" path="identity.key" />
+    <exclude domain="file" path="bitchat_dek.enc" />
+    <exclude domain="file" path="bitchat_dek.enc.new" />
+    <exclude domain="file" path="bitchat_dek.enc.bak" />
+    <exclude domain="file" path="bitchat_outbox.db" />
+    <exclude domain="file" path="bitchat_outbox.db-wal" />
+    <exclude domain="file" path="bitchat_outbox.db-shm" />
+    <exclude domain="file" path="bitchat_trust.db" />
+    <exclude domain="file" path="bitchat_trust.db-wal" />
+    <exclude domain="file" path="bitchat_trust.db-shm" />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+</full-backup-content>

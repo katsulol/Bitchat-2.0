@@ -2,14 +2,14 @@ package com.bitchat.bitchat2
 
 // CRYPTO-REVIEW:
 // What it does: Service-owned Android Keystore KEK/DEK lifecycle with versioned bounded wrapped-key
-// records, atomic durable writes via AtomicFile, fail-closed protection when an encrypted database
-// already exists, and accurate hardware security level inspection (StrongBox / TEE / Software / Unknown).
-// Primitives / APIs: `AndroidKeyStore` (AES/GCM/NoPadding 256-bit KEK), `SecureRandom` (256-bit DEK),
-// `android.security.keystore.KeyInfo`, `android.util.AtomicFile`.
+// records (v2 binds header AAD), atomic durable writes via AtomicFile, fail-closed protection when
+// protected databases or root identity already exist, and accurate hardware security level inspection.
+// Primitives / APIs: `AndroidKeyStore` (AES/GCM/NoPadding 256-bit KEK with 9-byte header AAD),
+// `SecureRandom` (256-bit DEK), `android.security.keystore.KeyInfo`, `android.util.AtomicFile`.
 // Reviewer checklist:
-// 1. Wrapped record format is versioned and strictly length-checked (69 bytes v1; legacy 60-byte v0 migrated safely).
-// 2. If `bitchat_outbox.db` exists and wrapped DEK or KEK is missing/corrupted, `getOrCreateDek` fails closed
-//    with `KeystoreLockedException` and NEVER silently overwrites the key.
+// 1. Wrapped record format is versioned and strictly length-checked (69 bytes v2 with AAD; v0 60B & v1 69B migrated safely).
+// 2. If `bitchat_outbox.db`, `bitchat_trust.db`, or `identity.enc` exists and wrapped DEK or KEK is missing/corrupted,
+//    `getOrCreateDek` fails closed with `KeystoreLockedException` and NEVER silently regenerates a new DEK.
 // 3. `AtomicFile` ensures partial writes / crash mid-write never corrupt the existing wrapped key.
 // 4. Hardware backing is queried via `KeyInfo` rather than assumed from `"AndroidKeyStore"` provider name.
 
@@ -36,15 +36,19 @@ object AndroidKeystoreProvider {
     private const val KEK_ALIAS = "bitchat_outbox_kek"
     private const val WRAPPED_DEK_FILE = "bitchat_dek.enc"
     private const val OUTBOX_DB_FILE = "bitchat_outbox.db"
+    private const val TRUST_DB_FILE = "bitchat_trust.db"
+    private const val PROTECTED_IDENTITY_FILE = "identity.enc"
+    private const val LEGACY_IDENTITY_FILE = "identity.key"
     private const val GCM_TAG_LENGTH = 128
     private const val GCM_IV_LENGTH = 12
     private const val DEK_LENGTH = 32
     private const val CIPHERTEXT_LENGTH = DEK_LENGTH + (GCM_TAG_LENGTH / 8) // 48 bytes
     private const val LEGACY_RECORD_LEN = GCM_IV_LENGTH + CIPHERTEXT_LENGTH // 60 bytes
-    // V1 Header: Magic "BC2K" (4B) + FormatVersion (1B) + KeyVersion (4B) + IV (12B) + Ciphertext (48B) = 69B
+    // V1/V2 Header: Magic "BC2K" (4B) + FormatVersion (1B) + KeyVersion (4B) + IV (12B) + Ciphertext (48B) = 69B
     private const val V1_RECORD_LEN = 4 + 1 + 4 + GCM_IV_LENGTH + CIPHERTEXT_LENGTH
     private val MAGIC = byteArrayOf('B'.code.toByte(), 'C'.code.toByte(), '2'.code.toByte(), 'K'.code.toByte())
     private const val FORMAT_VERSION_V1: Byte = 1
+    private const val FORMAT_VERSION_V2: Byte = 2
     private const val CURRENT_KEY_VERSION: Int = 1
 
     @Synchronized
@@ -52,8 +56,11 @@ object AndroidKeystoreProvider {
         try {
             val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
             val dekFile = File(context.filesDir, WRAPPED_DEK_FILE)
-            val dbFile = File(context.filesDir, OUTBOX_DB_FILE)
-            val dbExists = dbFile.exists() && dbFile.length() > 0L
+            val protectedStateExists = listOf(
+                File(context.filesDir, OUTBOX_DB_FILE),
+                File(context.filesDir, TRUST_DB_FILE),
+                File(context.filesDir, PROTECTED_IDENTITY_FILE),
+            ).any { it.exists() && it.length() > 0L }
 
             if (dekFile.exists()) {
                 if (!keyStore.containsAlias(KEK_ALIAS)) {
@@ -65,10 +72,10 @@ object AndroidKeystoreProvider {
                 val raw = AtomicFile(dekFile).readFully()
                 return unwrapVersionedOrMigrate(dekFile, raw, kek)
             } else {
-                // Fail closed if an encrypted SQLite outbox database already exists on disk!
-                if (dbExists) {
+                // Fail closed if encrypted outbox, trust DB, or protected identity already exists on disk!
+                if (protectedStateExists) {
                     throw KeystoreLockedException(
-                        "Encrypted outbox database exists without wrapped DEK file; failing closed to prevent data loss"
+                        "Protected database or root identity exists without wrapped DEK file; failing closed to prevent data loss"
                     )
                 }
                 val kek = getOrCreateKek(keyStore)
@@ -86,16 +93,27 @@ object AndroidKeystoreProvider {
 
     /**
      * Explicit user-authorized destructive reset when keystore state is unrecoverable.
-     * Deletes wrapped DEK, SQLite database (plus WAL/SHM), and rotates KEK alias.
+     * Deletes wrapped DEK, SQLite databases (plus WAL/SHM), identity files, and rotates KEK alias.
      */
     @Synchronized
     fun destructiveReset(context: Context) {
-        File(context.filesDir, WRAPPED_DEK_FILE).delete()
-        File(context.filesDir, "$WRAPPED_DEK_FILE.new").delete()
-        File(context.filesDir, "$WRAPPED_DEK_FILE.bak").delete()
-        File(context.filesDir, OUTBOX_DB_FILE).delete()
-        File(context.filesDir, "$OUTBOX_DB_FILE-wal").delete()
-        File(context.filesDir, "$OUTBOX_DB_FILE-shm").delete()
+        val toDelete = listOf(
+            WRAPPED_DEK_FILE,
+            "$WRAPPED_DEK_FILE.new",
+            "$WRAPPED_DEK_FILE.bak",
+            OUTBOX_DB_FILE,
+            "$OUTBOX_DB_FILE-wal",
+            "$OUTBOX_DB_FILE-shm",
+            TRUST_DB_FILE,
+            "$TRUST_DB_FILE-wal",
+            "$TRUST_DB_FILE-shm",
+            PROTECTED_IDENTITY_FILE,
+            "$PROTECTED_IDENTITY_FILE.tmp",
+            LEGACY_IDENTITY_FILE,
+        )
+        for (name in toDelete) {
+            File(context.filesDir, name).delete()
+        }
         try {
             val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
             if (keyStore.containsAlias(KEK_ALIAS)) {
@@ -164,8 +182,15 @@ object AndroidKeystoreProvider {
         if (dek.size != DEK_LENGTH) {
             throw KeystoreLockedException("Invalid DEK length: ${dek.size}")
         }
+        val header = ByteBuffer.allocate(9).apply {
+            put(MAGIC)
+            put(FORMAT_VERSION_V2)
+            putInt(keyVersion)
+        }.array()
+
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, kek)
+        cipher.updateAAD(header)
         val iv = cipher.iv
         if (iv == null || iv.size != GCM_IV_LENGTH) {
             throw KeystoreLockedException("Invalid AES-GCM IV length")
@@ -176,9 +201,7 @@ object AndroidKeystoreProvider {
         }
 
         val buf = ByteBuffer.allocate(V1_RECORD_LEN)
-        buf.put(MAGIC)
-        buf.put(FORMAT_VERSION_V1)
-        buf.putInt(keyVersion)
+        buf.put(header)
         buf.put(iv)
         buf.put(ciphertext)
         return buf.array()
@@ -192,17 +215,26 @@ object AndroidKeystoreProvider {
                 }
             }
             val fmtVer = raw[4]
-            if (fmtVer != FORMAT_VERSION_V1) {
-                throw KeystoreLockedException("Unsupported wrapped DEK format version: $fmtVer")
-            }
             val iv = raw.copyOfRange(9, 9 + GCM_IV_LENGTH)
             val ciphertext = raw.copyOfRange(9 + GCM_IV_LENGTH, V1_RECORD_LEN)
-            return decryptGcm(iv, ciphertext, kek)
+            return when (fmtVer) {
+                FORMAT_VERSION_V2 -> {
+                    val aad = raw.copyOfRange(0, 9)
+                    decryptGcm(iv, ciphertext, kek, aad)
+                }
+                FORMAT_VERSION_V1 -> {
+                    val dek = decryptGcm(iv, ciphertext, kek, null)
+                    val upgraded = wrapVersionedDek(dek, kek, CURRENT_KEY_VERSION)
+                    writeAtomic(dekFile, upgraded)
+                    dek
+                }
+                else -> throw KeystoreLockedException("Unsupported wrapped DEK format version: $fmtVer")
+            }
         } else if (raw.size == LEGACY_RECORD_LEN) {
             // Safe migration from Phase 4 v0 60-byte wrapped key record
             val iv = raw.copyOfRange(0, GCM_IV_LENGTH)
             val ciphertext = raw.copyOfRange(GCM_IV_LENGTH, LEGACY_RECORD_LEN)
-            val dek = decryptGcm(iv, ciphertext, kek)
+            val dek = decryptGcm(iv, ciphertext, kek, null)
             val upgraded = wrapVersionedDek(dek, kek, CURRENT_KEY_VERSION)
             writeAtomic(dekFile, upgraded)
             return dek
@@ -213,10 +245,13 @@ object AndroidKeystoreProvider {
         }
     }
 
-    private fun decryptGcm(iv: ByteArray, ciphertext: ByteArray, kek: SecretKey): ByteArray {
+    private fun decryptGcm(iv: ByteArray, ciphertext: ByteArray, kek: SecretKey, aad: ByteArray?): ByteArray {
         val spec = GCMParameterSpec(GCM_TAG_LENGTH, iv)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, kek, spec)
+        if (aad != null) {
+            cipher.updateAAD(aad)
+        }
         val plain = cipher.doFinal(ciphertext)
         if (plain.size != DEK_LENGTH) {
             plain.fill(0)
