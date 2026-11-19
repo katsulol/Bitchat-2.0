@@ -24,11 +24,11 @@
 - **Directional Session Keys**: Distinct transmission and reception symmetric encryption keys with AEAD ChaCha20-Poly1305.
 - **Anti-Replay Window**: 64-bit sliding replay window prevents message duplication and replay attacks.
 
-### 3. Store-and-Forward Guaranteed Delivery
-- **Durable Local Outbox**: Messages targeted at disconnected or multi-hop peers are committed atomically to encrypted SQLite storage.
-- **Cryptographic Delivery ACKs**: Receiving endpoints generate authentic signed acknowledgment frames upon successful decryption.
+### 3. Bounded Store-and-Forward Delivery & Authenticated ACKs
+- **Durable Local Outbox**: Normal-mode messages targeted at disconnected or multi-hop peers are committed atomically to encrypted SQLite storage (`bitchat_outbox.db`). Delivery is bounded by TTL, retry limits, and hop budgets (up to 7 hops), never promised as unbounded "guaranteed delivery".
+- **Cryptographic Delivery ACKs**: Receiving endpoints generate authenticated end-to-end `ApplicationFrame::Ack` frames inside the Noise session upon successful decryption.
 - **Adaptive Exponential Backoff**: Retries throttle exponentially with jitter, pausing automatically when peers are out of range and waking up upon physical reconnection.
-- **Terminal Delivery State Machine**: Strict lifecycle state guarantees (`Queued` → `InFlight` → `Delivered` or `Expired`/`Failed`), preventing zombie retries.
+- **Terminal Delivery State Machine**: Strict lifecycle state transitions (`Queued` → `InFlight` → `Delivered` or `Expired`/`Failed`/`Cancelled`), preventing zombie retries.
 
 ### 4. Internet-Bridged Iroh P2P Gateways
 - **NAT-Traversing QUIC Gateways**: Direct peer-to-peer tunnels powered by Iroh for long-distance connectivity across separate BLE mesh islands.
@@ -154,10 +154,11 @@
 
 ### 1. Verify Rust Core
 ```bash
-# Run complete test suite (153 unit & integration tests)
-cargo test --manifest-path core/Cargo.toml
+# Run complete test suite (223 unit & integration tests)
+cargo test --manifest-path core/Cargo.toml --all
 
-# Run linter
+# Run formatter and linter
+cargo fmt --manifest-path core/Cargo.toml -- --check
 cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
 ```
 
@@ -167,39 +168,44 @@ cargo build --manifest-path core/Cargo.toml --target aarch64-linux-android --rel
 cp target/aarch64-linux-android/release/libbitchat2_core.so app/android/app/src/main/jniLibs/arm64-v8a/
 ```
 
-### 3. Build & Install Flutter App
+### 3. Build & Verify Flutter App
 ```bash
 cd app
 flutter analyze
-flutter build apk --debug
-
-# Install on connected device via ADB
-adb install -r build/app/outputs/flutter-apk/app-debug.apk
+flutter test
+# Build labeled internal test APK (production release builds fail closed without external keystore secrets)
+flutter build apk --release -PallowDebugTestSigning=true
 ```
 
 ---
 
-## Physical Device Verification
+## Verification Scope & Physical Device Status
 
-The system has been verified on physical Android devices across five core milestones:
-
-1. **BLE Mesh & Coarse Proximity**: Dual-role advertising and scanning with real-time RSSI bucket updates (`Immediate`, `Near`, `Far`).
-2. **Volatile Ephemeral Chat**: Ephemeral key negotiation with active time-to-live countdown, memory zeroization on expiry, and Android `FLAG_SECURE` window shielding.
-3. **Scoped Peer Trust & 1-Hop Capability Vouchers**: Ed25519 signed voucher generation, camera QR scanning, verification, and cascade revocation.
-4. **Iroh Internet Gateway**: NAT-bypassing QUIC connections between isolated nodes using 5-minute single-use pairing invitations.
-5. **Resource-Aware Hysteresis**: Dynamic relay throttling based on live OS battery and charging broadcast receivers.
+- **Simulator & Integration Suite (`PASS`)**: 223 Rust tests (151 unit + 72 integration across `test_phase6_*` and `test_security_hardening`) and 13 Flutter widget tests pass deterministically.
+- **Matched Quantitative Evaluation (`PASS`)**: 600 multi-seed flood simulations across 5 topologies, 160 retry ablation runs, 40 cover traffic runs, and 21 Merkle vs ID-inventory sync cells in [docs/EVALUATION_FINAL.md](docs/EVALUATION_FINAL.md).
+- **Physical Multi-Device Matrix (`Pending Human Execution`)**: The 12-scenario physical hardware verification protocol and log-capture harness (`docs/capture_device_logs.ps1`) are recorded in [docs/DEVICE_TEST_RESULTS_FINAL.md](docs/DEVICE_TEST_RESULTS_FINAL.md) and remain honestly marked `Pending` until executed on physical Android phones.
 
 ---
 
 ## Documentation
 
+- [Final Release Report, Demo Script & Project Handoff](docs/FINAL_REPORT_AND_HANDOFF.md)
+- [Phase 6 Progress & Acceptance Ledger](docs/PHASE6_PROGRESS.md)
+- [Phase 6 Runtime Acceptance Suite](docs/PHASE6_RUNTIME_ACCEPTANCE.md)
+- [Final Quantitative Evaluation Report](docs/EVALUATION_FINAL.md)
+- [Physical Device Test Matrix & Results Ledger](docs/DEVICE_TEST_RESULTS_FINAL.md)
+- [Internal Security Hardening Review](docs/SECURITY_REVIEW_FINAL.md)
+- [Build Provenance & Native ABI Verification](docs/BUILD_PROVENANCE.md)
+- [Release Signing & Secret Separation](docs/RELEASE_SIGNING.md)
 - [System Architecture](docs/ARCHITECTURE.md)
 - [Trust & Capability Vouchers](docs/TRUST_PROTOCOL.md)
 - [Volatile Chat Protocol](docs/VOLATILE_CHAT.md)
-- [Guaranteed Delivery Protocol](docs/DELIVERY_PROTOCOL.md)
+- [Bounded Store-and-Forward Delivery Protocol](docs/DELIVERY_PROTOCOL.md)
+- [Bounded Conversation Sync Design](docs/SYNC_DESIGN.md)
+- [Merkle Conversation Sync Protocol](docs/SYNC_PROTOCOL.md)
+- [Experimental Link Cover Traffic](docs/COVER_TRAFFIC.md)
 - [Resource Hysteresis Policy](docs/RESOURCE_POLICY.md)
 - [Coarse Proximity Rationale](docs/PROXIMITY_LIMITATIONS.md)
 - [Threat Model](docs/THREAT_MODEL.md)
 - [Cryptographic Audit Review](docs/CRYPTO_REVIEW.md)
 - [Architectural Decisions (ADRs)](docs/DECISIONS.md)
-- [Physical Device Test Plan](docs/DEVICE_TEST_PLAN.md)

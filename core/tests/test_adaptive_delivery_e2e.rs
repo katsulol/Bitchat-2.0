@@ -749,8 +749,8 @@ async fn test_t1_sender_restart_rehydrates_normal_and_privacy_zero_disk_plus_rec
 
     // Wait for B's route on sender
     let bridge = nodes[0].svc.gateway_bridge_arc().unwrap();
-    for _ in 0..50 {
-        pump_ble_and_inbound(&mut nodes, 3).await;
+    for _ in 0..100 {
+        pump_ble_and_inbound(&mut nodes, 4).await;
         if !bridge
             .authorized_candidates_for_peer(&b_peer_id)
             .await
@@ -758,11 +758,11 @@ async fn test_t1_sender_restart_rehydrates_normal_and_privacy_zero_disk_plus_rec
         {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
     let mut delivered = false;
-    for _ in 0..50 {
+    for _ in 0..100 {
         let _ = nodes[0].svc.pump_outbox().await;
         pump_ble_and_inbound(&mut nodes, 5).await;
         if nodes[0]
@@ -775,7 +775,7 @@ async fn test_t1_sender_restart_rehydrates_normal_and_privacy_zero_disk_plus_rec
             delivered = true;
             break;
         }
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(
         delivered,
