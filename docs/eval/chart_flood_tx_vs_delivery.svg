@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="360" viewBox="0 0 760 360">
+  <rect width="100%" height="100%" fill="#121212"/>
+  <text x="24" y="34" fill="#ffffff" font-family="monospace" font-size="15" font-weight="bold">Phase 6 Flood Policies — Mean Transmissions vs Reachable Delivery (20 Seeds)</text>
+  <text x="24" y="77" fill="#cccccc" font-family="monospace" font-size="11">Dense30   NaiveFlood          </text>
+  <rect x="240" y="65" width="150" height="16" fill="#4CAF50" rx="3"/>
+  <text x="398" y="77" fill="#81C784" font-family="monospace" font-size="11">30.0 tx | 100.0% deliv(TTL)</text>
+  <text x="24" y="103" fill="#cccccc" font-family="monospace" font-size="11">Dense30   AdaptiveFlood       </text>
+  <rect x="240" y="91" width="22" height="16" fill="#4CAF50" rx="3"/>
+  <text x="270" y="103" fill="#81C784" font-family="monospace" font-size="11">4.5 tx | 100.0% deliv(TTL)</text>
+  <text x="24" y="129" fill="#cccccc" font-family="monospace" font-size="11">Dense30   CoverageAware       </text>
+  <rect x="240" y="117" width="21" height="16" fill="#4CAF50" rx="3"/>
+  <text x="269" y="129" fill="#81C784" font-family="monospace" font-size="11">4.3 tx | 100.0% deliv(TTL)</text>
+  <text x="24" y="155" fill="#cccccc" font-family="monospace" font-size="11">Dense30   Coverage+ResBalanced</text>
+  <rect x="240" y="143" width="21" height="16" fill="#4CAF50" rx="3"/>
+  <text x="269" y="155" fill="#81C784" font-family="monospace" font-size="11">4.2 tx | 100.0% deliv(TTL)</text>
+  <text x="24" y="181" fill="#cccccc" font-family="monospace" font-size="11">Dense30   Coverage+ResMinimal </text>
+  <rect x="240" y="169" width="22" height="16" fill="#4CAF50" rx="3"/>
+  <text x="270" y="181" fill="#81C784" font-family="monospace" font-size="11">4.5 tx | 100.0% deliv(TTL)</text>
+  <text x="24" y="207" fill="#cccccc" font-family="monospace" font-size="11">RandGeo50 NaiveFlood          </text>
+  <rect x="240" y="195" width="244" height="16" fill="#4CAF50" rx="3"/>
+  <text x="492" y="207" fill="#81C784" font-family="monospace" font-size="11">48.9 tx | 99.5% deliv(TTL)</text>
+  <text x="24" y="233" fill="#cccccc" font-family="monospace" font-size="11">RandGeo50 AdaptiveFlood       </text>
+  <rect x="240" y="221" width="122" height="16" fill="#4CAF50" rx="3"/>
+  <text x="370" y="233" fill="#81C784" font-family="monospace" font-size="11">24.5 tx | 97.5% deliv(TTL)</text>
+  <text x="24" y="259" fill="#cccccc" font-family="monospace" font-size="11">RandGeo50 CoverageAware       </text>
+  <rect x="240" y="247" width="144" height="16" fill="#4CAF50" rx="3"/>
+  <text x="392" y="259" fill="#81C784" font-family="monospace" font-size="11">28.9 tx | 99.8% deliv(TTL)</text>
+  <text x="24" y="285" fill="#cccccc" font-family="monospace" font-size="11">RandGeo50 Coverage+ResBalanced</text>
+  <rect x="240" y="273" width="143" height="16" fill="#4CAF50" rx="3"/>
+  <text x="391" y="285" fill="#81C784" font-family="monospace" font-size="11">28.6 tx | 99.8% deliv(TTL)</text>
+  <text x="24" y="311" fill="#cccccc" font-family="monospace" font-size="11">RandGeo50 Coverage+ResMinimal </text>
+  <rect x="240" y="299" width="144" height="16" fill="#4CAF50" rx="3"/>
+  <text x="392" y="311" fill="#81C784" font-family="monospace" font-size="11">28.9 tx | 100.0% deliv(TTL)</text>
+</svg>
