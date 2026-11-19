@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'mesh_bridge.dart';
+import 'delivery_explanation.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -48,8 +49,12 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   List<String> _peers = [];
   String? _selectedRecipient; // null = Broadcast
   bool _isPrivacyMode = false;
+  int? _selectedDeadlineSecs;
   bool _lastSessionReady = false;
   Timer? _pollTimer;
+  StreamSubscription<ChatMessage>? _msgSub;
+  StreamSubscription<List<String>>? _peersSub;
+  StreamSubscription<dynamic>? _deliverySub;
 
   @override
   void initState() {
@@ -60,7 +65,8 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       }
     });
 
-    _bridge.messages.listen((msg) {
+    _msgSub = _bridge.messages.listen((msg) {
+      if (!mounted) return;
       setState(() {
         _messages.add(msg);
         if (_messages.length > 500) {
@@ -69,18 +75,26 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       });
     });
 
-    _bridge.peers.listen((peers) {
+    _peersSub = _bridge.peers.listen((peers) {
+      if (!mounted) return;
       setState(() {
         _peers = peers;
         // corrections.md: Never auto-reset selected recipient to broadcast on disconnect!
       });
     });
 
-    _bridge.deliveryEvents.listen((event) {
+    _deliverySub = _bridge.deliveryEvents.listen((event) {
+      if (!mounted) return;
       setState(() {
         for (final m in _messages) {
           if (m.logicalId == event.logicalId) {
             m.deliveryState = event.state;
+            m.deliveryReason = event.reason;
+            m.observedTransport = event.transport;
+            m.attemptCount = event.attemptCount;
+            if (event.expiresAt > 0) {
+              m.expiresAtUnix = event.expiresAt;
+            }
           }
         }
       });
@@ -107,7 +121,12 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       if (_selectedRecipient == null) {
         await _bridge.sendBroadcast(text);
       } else {
-        await _bridge.sendMessage(_selectedRecipient!, text, isPrivacy: _isPrivacyMode);
+        await _bridge.sendMessage(
+          _selectedRecipient!,
+          text,
+          isPrivacy: _isPrivacyMode,
+          deadlineSecs: _selectedDeadlineSecs,
+        );
       }
       _inputController.clear();
     } catch (e) {
@@ -125,6 +144,9 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _msgSub?.cancel();
+    _peersSub?.cancel();
+    _deliverySub?.cancel();
     _bridge.stopMesh();
     _bridge.dispose();
     _inputController.dispose();
@@ -179,45 +201,54 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
         children: [
           // Body Header: Node Identity & Mesh Status
           Container(
+            width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
             color: const Color(0xFF1E1E1E),
-            child: Row(
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                const Text('My ID: ', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                Flexible(
-                  child: Text(
-                    _bridge.myShortId,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontFamily: 'monospace',
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF81C784),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('My ID: ', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    Flexible(
+                      child: Text(
+                        _bridge.myShortId,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontFamily: 'monospace',
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFF81C784),
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                    const SizedBox(width: 6),
+                    InkWell(
+                      onTap: () {
+                        Clipboard.setData(ClipboardData(text: _bridge.myShortId));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('ShortId copied to clipboard')),
+                        );
+                      },
+                      child: const Padding(
+                        padding: EdgeInsets.all(2.0),
+                        child: Icon(Icons.copy, size: 14, color: Colors.grey),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    InkWell(
+                      onTap: _showMyIdQrDialog,
+                      child: const Padding(
+                        padding: EdgeInsets.all(2.0),
+                        child: Icon(Icons.qr_code, size: 16, color: Color(0xFF81C784)),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(width: 6),
-                InkWell(
-                  onTap: () {
-                    Clipboard.setData(ClipboardData(text: _bridge.myShortId));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('ShortId copied to clipboard')),
-                    );
-                  },
-                  child: const Padding(
-                    padding: EdgeInsets.all(2.0),
-                    child: Icon(Icons.copy, size: 14, color: Colors.grey),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                InkWell(
-                  onTap: _showMyIdQrDialog,
-                  child: const Padding(
-                    padding: EdgeInsets.all(2.0),
-                    child: Icon(Icons.qr_code, size: 16, color: Color(0xFF81C784)),
-                  ),
-                ),
-                const Spacer(),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                   decoration: BoxDecoration(
@@ -277,15 +308,21 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                   color: _peers.isNotEmpty ? Colors.blue : Colors.grey,
                 ),
                 const SizedBox(width: 6),
-                Text(
-                  '${_peers.length} Neighbors:',
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                Flexible(
+                  child: Text(
+                    '${_peers.length} Neighbors:',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                  ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 6),
                 Expanded(
                   child: _peers.isEmpty
                       ? const Text(
                           'Scanning for BLE mesh peers...',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
                         )
                       : SingleChildScrollView(
@@ -528,26 +565,81 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                 style: const TextStyle(fontSize: 14),
                               ),
                               if (isMe && !msg.isBroadcast) ...[
-                                const SizedBox(height: 4),
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  mainAxisAlignment: MainAxisAlignment.end,
-                                  children: [
-                                    if (msg.isPrivacy) ...[
-                                      const Icon(Icons.shield, size: 11, color: Colors.tealAccent),
-                                      const SizedBox(width: 4),
-                                    ],
-                                    _buildDeliveryStatusIcon(msg.deliveryState),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      msg.deliveryState,
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        color: _deliveryStatusColor(msg.deliveryState),
-                                        fontFamily: 'monospace',
-                                      ),
-                                    ),
-                                  ],
+                                const SizedBox(height: 6),
+                                Builder(
+                                  builder: (ctx) {
+                                    final explanation = DeliveryExplanation.explain(
+                                      state: msg.deliveryState,
+                                      reason: msg.deliveryReason,
+                                      transport: msg.observedTransport,
+                                      attemptCount: msg.attemptCount,
+                                    );
+                                    final transportLabel =
+                                        DeliveryExplanation.formatTransport(msg.observedTransport);
+                                    final remLabel =
+                                        DeliveryExplanation.formatRemainingDeadline(msg.expiresAtUnix);
+                                    final canCancel = msg.logicalId != null &&
+                                        (msg.deliveryState == 'Queued' ||
+                                            msg.deliveryState == 'InFlight');
+
+                                    return Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            if (msg.isPrivacy) ...[
+                                              const Icon(Icons.shield,
+                                                  size: 11, color: Colors.tealAccent),
+                                              const SizedBox(width: 4),
+                                            ],
+                                            _buildDeliveryStatusIcon(msg.deliveryState),
+                                            const SizedBox(width: 4),
+                                            Flexible(
+                                              child: Text(
+                                                '${msg.deliveryState}: $explanation',
+                                                softWrap: true,
+                                                style: TextStyle(
+                                                  fontSize: 10,
+                                                  color: _deliveryStatusColor(msg.deliveryState),
+                                                ),
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Wrap(
+                                          spacing: 6,
+                                          runSpacing: 2,
+                                          crossAxisAlignment: WrapCrossAlignment.center,
+                                          children: [
+                                            Text(
+                                              'Try ${msg.attemptCount} · $transportLabel${remLabel.isNotEmpty ? " · $remLabel" : ""}',
+                                              style: const TextStyle(
+                                                fontSize: 9,
+                                                color: Colors.white60,
+                                                fontFamily: 'monospace',
+                                              ),
+                                            ),
+                                            if (canCancel)
+                                              GestureDetector(
+                                                onTap: () {
+                                                  _bridge.cancelMessage(msg.logicalId!);
+                                                },
+                                                child: const Text(
+                                                  'Cancel',
+                                                  style: TextStyle(
+                                                    fontSize: 10,
+                                                    color: Colors.orangeAccent,
+                                                    fontWeight: FontWeight.bold,
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ],
+                                    );
+                                  },
                                 ),
                               ],
                             ],
@@ -560,15 +652,18 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
 
           // Message input bar
           Container(
-            padding: const EdgeInsets.all(8),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
             color: const Color(0xFF1E1E1E),
             child: SafeArea(
               child: Row(
                 children: [
                   ActionChip(
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    padding: const EdgeInsets.symmetric(horizontal: 2),
                     avatar: Icon(
                       _selectedRecipient == null ? Icons.campaign : Icons.lock,
-                      size: 16,
+                      size: 15,
                       color: _selectedRecipient == null ? Colors.amber : Colors.purpleAccent,
                     ),
                     label: Text(
@@ -590,6 +685,8 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                   if (_selectedRecipient != null) ...[
                     const SizedBox(width: 4),
                     IconButton(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                       icon: Icon(
                         _isPrivacyMode ? Icons.security : Icons.security_outlined,
                         color: _isPrivacyMode ? Colors.tealAccent : Colors.grey,
@@ -602,7 +699,53 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                         });
                       },
                     ),
+                    PopupMenuButton<int?>(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                      tooltip: 'Delivery Deadline (${DeliveryExplanation.formatDeadlineLabel(_selectedDeadlineSecs)})',
+                      icon: Icon(
+                        Icons.hourglass_bottom,
+                        color: _selectedDeadlineSecs != null ? Colors.lightGreenAccent : Colors.grey,
+                        size: 20,
+                      ),
+                      onSelected: (secs) {
+                        if (!DeliveryExplanation.isDeadlineCompatibleWithMode(
+                          secs,
+                          isPrivacy: _isPrivacyMode,
+                        )) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Selected deadline exceeds current mode maximum TTL'),
+                            ),
+                          );
+                          return;
+                        }
+                        setState(() {
+                          _selectedDeadlineSecs = secs;
+                        });
+                      },
+                      itemBuilder: (ctx) => [
+                        const PopupMenuItem(
+                          value: null,
+                          child: Text('Delivery Deadline: Mode Default (24h / 15m)'),
+                        ),
+                        const PopupMenuItem(
+                          value: DeliveryExplanation.preset2mSecs,
+                          child: Text('Delivery Deadline: 2 minutes (120s)'),
+                        ),
+                        const PopupMenuItem(
+                          value: DeliveryExplanation.preset15mSecs,
+                          child: Text('Delivery Deadline: 15 minutes (900s)'),
+                        ),
+                        const PopupMenuItem(
+                          value: DeliveryExplanation.preset1hSecs,
+                          child: Text('Delivery Deadline: 1 hour (3600s)'),
+                        ),
+                      ],
+                    ),
                     PopupMenuButton<int>(
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                       tooltip: 'Volatile Chat Retention',
                       icon: Builder(
                         builder: (ctx) {
@@ -636,25 +779,28 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       ],
                     ),
                   ],
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   Expanded(
                     child: TextField(
                       controller: _inputController,
                       decoration: InputDecoration(
-                        hintText: _selectedRecipient == null ? 'Broadcast message to mesh...' : 'Private message...',
+                        isDense: true,
+                        hintText: _selectedRecipient == null ? 'Broadcast...' : 'Private message...',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(24),
                           borderSide: BorderSide.none,
                         ),
                         filled: true,
                         fillColor: const Color(0xFF2C2C2C),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       ),
                       onSubmitted: (_) => _sendMessage(),
                     ),
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 4),
                   IconButton(
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
                     icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
                     onPressed: _sendMessage,
                   ),
@@ -675,6 +821,8 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
         return const Icon(Icons.check, size: 12, color: Colors.white70);
       case 'Delivered':
         return const Icon(Icons.done_all, size: 13, color: Colors.greenAccent);
+      case 'Cancelled':
+        return const Icon(Icons.cancel_outlined, size: 12, color: Colors.grey);
       case 'Failed':
       case 'Expired':
         return const Icon(Icons.error_outline, size: 12, color: Colors.redAccent);
@@ -691,6 +839,8 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
         return Colors.white70;
       case 'Delivered':
         return Colors.greenAccent;
+      case 'Cancelled':
+        return Colors.grey;
       case 'Failed':
       case 'Expired':
         return Colors.redAccent;
@@ -796,7 +946,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     const Text('Transport, Trust & Privacy Layer', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
                     const SizedBox(height: 6),
                     Text('Gateway Active: ${diag?.gatewayActive ?? false ? "YES" : "NO"}', style: const TextStyle(fontSize: 12)),
-                    Text('Privacy Direct-Only Enforced: ${diag?.gatewayRelayDisabled ?? true ? "YES (Relay Blocked)" : "NO (Relay Allowed)"}', style: const TextStyle(fontSize: 12)),
+                    Text(
+                      'Gateway Direct/Relay Mode: ${diag == null ? "Unknown" : (diag.gatewayRelayDisabled ? "Relay Disabled (Direct-only)" : "Relay Enabled (Default)")}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
                     Text(
                       'Gateway Consent: ${diag?.approvedGatewayCount ?? 0} approved, ${diag?.pendingGatewayCount ?? 0} pending | Active 1-Hop Vouchers: ${diag?.activeVouchersCount ?? 0}',
                       style: const TextStyle(fontSize: 12),

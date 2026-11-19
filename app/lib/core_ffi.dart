@@ -79,12 +79,20 @@ class RustDeliveryEvent {
   final String state;
   final String recipient;
   final int timestamp;
+  final String reason;
+  final String transport;
+  final int attemptCount;
+  final int expiresAt;
 
   RustDeliveryEvent({
     required this.logicalId,
     required this.state,
     required this.recipient,
     required this.timestamp,
+    this.reason = '',
+    this.transport = 'Unknown',
+    this.attemptCount = 0,
+    this.expiresAt = 0,
   });
 
   factory RustDeliveryEvent.fromJson(Map<String, dynamic> json) {
@@ -93,6 +101,10 @@ class RustDeliveryEvent {
       state: json['state'] as String? ?? '',
       recipient: json['recipient'] as String? ?? '',
       timestamp: json['timestamp'] as int? ?? 0,
+      reason: json['reason'] as String? ?? '',
+      transport: json['transport'] as String? ?? 'Unknown',
+      attemptCount: json['attempt_count'] as int? ?? 0,
+      expiresAt: json['expires_at'] as int? ?? 0,
     );
   }
 }
@@ -201,6 +213,8 @@ class CoreFfi {
   late final BitchatSendBroadcastDart _sendBroadcast;
   late final BitchatSendToDart _sendTo;
   late final BitchatSendMessageDart _sendMessage;
+  late final BitchatSendMessageWithDeadlineDart _sendMessageWithDeadline;
+  late final BitchatCancelMessageDart _cancelMessage;
   late final BitchatGetDeliveryStateDart _getDeliveryState;
   late final BitchatStringDart _pollDeliveryEvents;
   late final BitchatStringDart _getDiagnostics;
@@ -251,6 +265,8 @@ class CoreFfi {
       _sendBroadcast = _lib!.lookupFunction<BitchatSendBroadcastC, BitchatSendBroadcastDart>('bitchat_send_broadcast');
       _sendTo = _lib!.lookupFunction<BitchatSendToC, BitchatSendToDart>('bitchat_send_to');
       _sendMessage = _lib!.lookupFunction<BitchatSendMessageC, BitchatSendMessageDart>('bitchat_send_message');
+      _sendMessageWithDeadline = _lib!.lookupFunction<BitchatSendMessageWithDeadlineC, BitchatSendMessageWithDeadlineDart>('bitchat_send_message_with_deadline');
+      _cancelMessage = _lib!.lookupFunction<BitchatCancelMessageC, BitchatCancelMessageDart>('bitchat_cancel_message');
       _getDeliveryState = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_delivery_state');
       _pollDeliveryEvents = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_poll_delivery_events');
       _getDiagnostics = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_get_diagnostics');
@@ -583,6 +599,42 @@ class CoreFfi {
     }
   }
 
+  String? sendMessageWithDeadline(
+    String recipient,
+    String text,
+    int mode,
+    int? deadlineSecs,
+  ) {
+    if (!_initialized) return null;
+    final recipPtr = recipient.toNativeUtf8();
+    final textPtr = text.toNativeUtf8();
+    try {
+      final ptr = _sendMessageWithDeadline(
+        recipPtr,
+        textPtr,
+        mode,
+        deadlineSecs ?? -1,
+      );
+      if (ptr == nullptr) return null;
+      final logicalId = ptr.toDartString();
+      _freeString(ptr);
+      return logicalId;
+    } finally {
+      calloc.free(recipPtr);
+      calloc.free(textPtr);
+    }
+  }
+
+  bool cancelMessage(String logicalId) {
+    if (!_initialized) return false;
+    final idPtr = logicalId.toNativeUtf8();
+    try {
+      return _cancelMessage(idPtr) == 1;
+    } finally {
+      calloc.free(idPtr);
+    }
+  }
+
   String? getDeliveryState(String logicalId) {
     if (!_initialized) return null;
     final idPtr = logicalId.toNativeUtf8();
@@ -809,6 +861,12 @@ typedef BitchatInitWithKeyDart = Pointer<Utf8> Function(Pointer<Utf8> storagePat
 
 typedef BitchatSendMessageC = Pointer<Utf8> Function(Pointer<Utf8> recipient, Pointer<Utf8> text, Uint8 mode);
 typedef BitchatSendMessageDart = Pointer<Utf8> Function(Pointer<Utf8> recipient, Pointer<Utf8> text, int mode);
+
+typedef BitchatSendMessageWithDeadlineC = Pointer<Utf8> Function(Pointer<Utf8> recipient, Pointer<Utf8> text, Uint8 mode, Int64 deadlineSecs);
+typedef BitchatSendMessageWithDeadlineDart = Pointer<Utf8> Function(Pointer<Utf8> recipient, Pointer<Utf8> text, int mode, int deadlineSecs);
+
+typedef BitchatCancelMessageC = Int32 Function(Pointer<Utf8> logicalId);
+typedef BitchatCancelMessageDart = int Function(Pointer<Utf8> logicalId);
 
 typedef BitchatGetDeliveryStateC = Pointer<Utf8> Function(Pointer<Utf8> logicalId);
 typedef BitchatGetDeliveryStateDart = Pointer<Utf8> Function(Pointer<Utf8> logicalId);

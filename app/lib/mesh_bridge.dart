@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
 import 'core_ffi.dart';
+import 'delivery_explanation.dart';
 
 /// Data model representing a verified mesh chat message.
 class ChatMessage {
@@ -11,7 +12,12 @@ class ChatMessage {
   final String text;
   final int hopCount;
   final bool isBroadcast;
-  String deliveryState; // 'Queued', 'InFlight', 'Delivered', 'Failed', 'Expired'
+  String deliveryState; // 'Queued', 'InFlight', 'Delivered', 'Failed', 'Expired', 'Cancelled'
+  String deliveryReason;
+  String observedTransport;
+  int attemptCount;
+  int expiresAtUnix;
+  final int? requestedDeadlineSecs;
   final bool isPrivacy;
   final DateTime timestamp;
 
@@ -24,6 +30,11 @@ class ChatMessage {
     required this.hopCount,
     required this.isBroadcast,
     this.deliveryState = 'Delivered',
+    this.deliveryReason = '',
+    this.observedTransport = 'Unknown',
+    this.attemptCount = 0,
+    this.expiresAtUnix = 0,
+    this.requestedDeadlineSecs,
     this.isPrivacy = false,
     DateTime? timestamp,
   }) : timestamp = timestamp ?? DateTime.now();
@@ -309,9 +320,30 @@ class MeshBridge {
     return CoreFfi.instance.isSessionReady(recipientShortId);
   }
 
-  Future<String?> sendMessage(String recipientShortId, String text, {bool isPrivacy = false}) async {
+  Future<String?> sendMessage(
+    String recipientShortId,
+    String text, {
+    bool isPrivacy = false,
+    int? deadlineSecs,
+  }) async {
+    if (!DeliveryExplanation.isDeadlineCompatibleWithMode(
+      deadlineSecs,
+      isPrivacy: isPrivacy,
+    )) {
+      throw Exception(
+        'Deadline ${DeliveryExplanation.formatDeadlineLabel(deadlineSecs)} exceeds ${isPrivacy ? "Privacy" : "Normal"} mode limit',
+      );
+    }
+
     final mode = isPrivacy ? 1 : 0;
-    final logicalId = CoreFfi.instance.sendMessage(recipientShortId, text, mode);
+    final logicalId = deadlineSecs == null
+        ? CoreFfi.instance.sendMessage(recipientShortId, text, mode)
+        : CoreFfi.instance.sendMessageWithDeadline(
+            recipientShortId,
+            text,
+            mode,
+            deadlineSecs,
+          );
     if (logicalId == null) {
       // If session not ready, initiate handshake
       final isReady = CoreFfi.instance.isSessionReady(recipientShortId);
@@ -339,11 +371,24 @@ class MeshBridge {
         hopCount: 0,
         isBroadcast: false,
         deliveryState: 'Queued',
+        deliveryReason: 'Queued',
+        observedTransport: 'Unknown',
+        attemptCount: 0,
+        expiresAtUnix: deadlineSecs != null
+            ? (DateTime.now().millisecondsSinceEpoch ~/ 1000) + deadlineSecs
+            : 0,
+        requestedDeadlineSecs: deadlineSecs,
         isPrivacy: isPrivacy,
       ));
     }
 
     return logicalId;
+  }
+
+  bool cancelMessage(String logicalId) {
+    final cancelled = CoreFfi.instance.cancelMessage(logicalId);
+    _drainDeliveryEvents();
+    return cancelled;
   }
 
   Future<void> sendDirect(String recipientShortId, String text, {bool isPrivacy = false}) async {
