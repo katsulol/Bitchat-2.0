@@ -149,6 +149,24 @@ impl GatewayConfig {
         Ok(GatewayConsentState::IdentityVerifiedPendingConsent)
     }
 
+    /// Hydrate persisted consent state on startup without weakening `Blocked`.
+    pub fn seed_consent_state(&mut self, endpoint_id: EndpointId, state: GatewayConsentState) {
+        if self.consent_state(&endpoint_id) == GatewayConsentState::Blocked
+            && state != GatewayConsentState::Blocked
+        {
+            return;
+        }
+        self.pending_peers.remove(&endpoint_id);
+        match state {
+            GatewayConsentState::Unrecognized => {
+                self.peer_states.remove(&endpoint_id);
+            }
+            other => {
+                self.peer_states.insert(endpoint_id, other);
+            }
+        }
+    }
+
     /// Explicitly authorize a remote gateway endpoint ID (unless Blocked).
     pub fn approve_gateway(&mut self, endpoint_id: EndpointId) -> bool {
         if self.consent_state(&endpoint_id) == GatewayConsentState::Blocked {

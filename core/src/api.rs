@@ -35,9 +35,10 @@ use crate::storage::{
 use crate::transport::bridge::{BridgeHandle, BridgeTransport};
 use crate::transport::Transport;
 use crate::trust::{
-    AuthOutcome, AuthReason, AuthorizationContext, Capability, InboundAuthEvent,
-    PeerLinkIdentityState, PeerTrustState, PendingMessageRequest, SignedVoucher, TrustPolicy,
-    TrustQuotaConfig, TrustStore, DEFAULT_MAX_PENDING_REQUESTS,
+    AuthOutcome, AuthReason, AuthorizationContext, Capability, GatewayApprovalStatus,
+    InboundAuthEvent, PeerLinkIdentityState, PeerTrustState, PendingMessageRequest,
+    PersistedGatewayApproval, SignedVoucher, SignedVoucherRevocation, SqliteTrustStore,
+    TrustPolicy, TrustProvenance, TrustQuotaConfig, TrustStore, DEFAULT_MAX_PENDING_REQUESTS,
 };
 
 pub const CORE_BUILD_VERSION: &str = "v2.0.5-phase5";
@@ -131,6 +132,8 @@ pub struct BitchatCoreService {
     gateway_bridge: Option<Arc<GatewayBridge>>,
     last_route_candidate: Option<String>,
     trust_store: Arc<RwLock<TrustStore>>,
+    trust_db: Arc<SqliteTrustStore>,
+    persisted_gateway_approvals: std::sync::RwLock<HashMap<String, PersistedGatewayApproval>>,
     link_identities: HashMap<String, PeerLinkIdentityState>,
     auth_events: VecDeque<InboundAuthEvent>,
     pending_message_requests: VecDeque<PendingMessageRequest>,
@@ -175,12 +178,47 @@ fn parse_logical_id_hex(logical_id_hex: &str) -> Result<[u8; 16], String> {
 
 impl BitchatCoreService {
     /// Construct a standalone `BitchatCoreService` instance rooted in `storage_path`,
-    /// rehydrating any pending Normal-mode outbox records from encrypted SQLite.
+    /// rehydrating any pending Normal-mode outbox records and verified trust state from encrypted SQLite.
     pub async fn new_with_key(
         storage_path: String,
         dek: Option<[u8; 32]>,
         key_version: u32,
     ) -> Result<Self, String> {
+        let base_dir = PathBuf::from(&storage_path);
+        let key_provider: Arc<dyn KeyProvider> = match dek {
+            Some(k) => Arc::new(InjectedKeyProvider::new(k, key_version)),
+            None => {
+                let protected_exists = ["bitchat_outbox.db", "bitchat_trust.db", "identity.enc"]
+                    .iter()
+                    .any(|f| {
+                        base_dir
+                            .join(f)
+                            .metadata()
+                            .map(|m| m.len() > 0)
+                            .unwrap_or(false)
+                    });
+                if protected_exists {
+                    return Err(
+                        "KEY_UNAVAILABLE: Protected storage exists on disk without platform DEK; failing closed"
+                            .to_string(),
+                    );
+                }
+                Arc::new(InjectedKeyProvider::random(key_version))
+            }
+        };
+        Self::new_with_key_provider(storage_path, key_provider).await
+    }
+
+    /// Construct a standalone `BitchatCoreService` backed by an explicit `KeyProvider`.
+    pub async fn new_with_key_provider(
+        storage_path: String,
+        key_provider: Arc<dyn KeyProvider>,
+    ) -> Result<Self, String> {
+        // Validate key availability before opening/creating encrypted databases.
+        let _ = key_provider
+            .get_or_create_dek()
+            .map_err(|e| format!("KEY_UNAVAILABLE: Failed to unlock KeyProvider: {e}"))?;
+
         let path = PathBuf::from(&storage_path).join("identity.key");
         let keystore = FileKeyStore::new(path);
         let identity = if let Some(id) = keystore
@@ -201,6 +239,10 @@ impl BitchatCoreService {
         let (transport, handle) = BridgeTransport::new(short_id);
         let mut node = MeshNode::new(identity, transport, Box::new(CoverageAwareFlood::default()));
         let now_instant = Instant::now();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let resource_mgr = Arc::new(std::sync::Mutex::new(ResourceBudgetManager::new(
             RelayResourceProfile::Balanced,
             Duration::from_secs(10),
@@ -208,11 +250,22 @@ impl BitchatCoreService {
         )));
         node.set_resource_budget(Arc::clone(&resource_mgr));
 
+        // Open and hydrate encrypted TrustStore BEFORE creating gateway/outbox admission state (fail-closed)
+        let trust_db_path = PathBuf::from(&storage_path).join("bitchat_trust.db");
+        let trust_db = Arc::new(
+            SqliteTrustStore::open(&trust_db_path, peer_id, Arc::clone(&key_provider))
+                .map_err(|e| format!("TRUST_STORAGE_ERROR: {e}"))?,
+        );
+        let mut trust_store = TrustStore::new(peer_id, TrustQuotaConfig::default());
+        let loaded_gw_approvals = trust_db
+            .load_into(&mut trust_store, now_instant, Some(now_secs))
+            .map_err(|e| format!("TRUST_STORAGE_ERROR: Failed to hydrate persisted trust: {e}"))?;
+        let mut gw_map = HashMap::new();
+        for rec in loaded_gw_approvals {
+            gw_map.insert(rec.endpoint_id.clone(), rec);
+        }
+
         let db_path = PathBuf::from(&storage_path).join("bitchat_outbox.db");
-        let key_provider: Arc<dyn KeyProvider> = match dek {
-            Some(k) => Arc::new(InjectedKeyProvider::new(k, key_version)),
-            None => Arc::new(InjectedKeyProvider::random(key_version)),
-        };
         let limits = OutboxLimits::default();
         let sqlite_store = SqliteOutboxStore::open(&db_path, key_provider, limits)
             .map_err(|e| format!("Failed to open SQLite store: {e:?}"))?;
@@ -220,10 +273,6 @@ impl BitchatCoreService {
         let mut outbox_mgr = OutboxManager::new(peer_id, sqlite_store, memory_store, limits);
         let mut delivery_coord = DeliveryCoordinator::new(peer_id);
         let dedup = InboxDeduplicator::new(10_000, Duration::from_secs(86400));
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         let ack_timeout = DEFAULT_ACK_TIMEOUT;
         let mut delivery_events = Vec::new();
 
@@ -260,10 +309,9 @@ impl BitchatCoreService {
             delivery_events,
             gateway_bridge: None,
             last_route_candidate: None,
-            trust_store: Arc::new(RwLock::new(TrustStore::new(
-                peer_id,
-                TrustQuotaConfig::default(),
-            ))),
+            trust_store: Arc::new(RwLock::new(trust_store)),
+            trust_db,
+            persisted_gateway_approvals: std::sync::RwLock::new(gw_map),
             link_identities: HashMap::new(),
             auth_events: VecDeque::with_capacity(MAX_AUTH_EVENT_QUEUE),
             pending_message_requests: VecDeque::with_capacity(DEFAULT_MAX_PENDING_REQUESTS),
@@ -1684,14 +1732,31 @@ impl BitchatCoreService {
         let id_bytes = self.node.identity().to_bytes();
         let id_clone = Identity::from_bytes(&id_bytes);
 
-        let bridge = GatewayBridge::new_with_trust_store(
+        let bridge = GatewayBridge::new_with_trust_store_and_db(
             id_clone,
             None,
             relay_mode,
             Arc::clone(&self.trust_store),
+            Some(Arc::clone(&self.trust_db)),
         )
         .await
         .map_err(|e| format!("Failed to create GatewayBridge: {e}"))?;
+
+        // Hydrate persisted gateway approvals/revocations/blocks BEFORE enabling ingress traffic
+        {
+            let snapshot: Vec<PersistedGatewayApproval> = self
+                .persisted_gateway_approvals
+                .read()
+                .map(|m| m.values().cloned().collect())
+                .unwrap_or_default();
+            let cfg_arc = bridge.config();
+            let mut cfg = cfg_arc.write().await;
+            for rec in snapshot {
+                if let Ok(ep) = rec.endpoint_id.parse::<iroh::EndpointId>() {
+                    cfg.seed_consent_state(ep, rec.status.to_consent_state());
+                }
+            }
+        }
 
         bridge.set_enabled(true).await;
         self.gateway_opted_in = true;
@@ -1754,6 +1819,23 @@ impl BitchatCoreService {
             .import_and_approve_contact(&contact_str)
             .await
             .map_err(|e| format!("Failed to import contact: {e}"))?;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if let Ok(pk) = contact.binding.bitchat_pubkey() {
+            if let Ok(mut map) = self.persisted_gateway_approvals.write() {
+                map.insert(
+                    contact.iroh_endpoint_id_hex.clone(),
+                    PersistedGatewayApproval {
+                        endpoint_id: contact.iroh_endpoint_id_hex.clone(),
+                        bitchat_pubkey: pk,
+                        status: GatewayApprovalStatus::Approved,
+                        updated_at_unix: now_secs,
+                    },
+                );
+            }
+        }
         self.gateway_opted_in = true;
         Ok(contact.iroh_endpoint_id_hex)
     }
@@ -1869,6 +1951,11 @@ impl BitchatCoreService {
             .trim()
             .parse::<iroh::EndpointId>()
             .map_err(|e| format!("Invalid endpoint ID: {e}"))?;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         let bridge = self
             .gateway_bridge
             .as_ref()
@@ -1882,26 +1969,70 @@ impl BitchatCoreService {
             .into_iter()
             .find(|p| p.endpoint_id == endpoint_id)
             .map(|p| PeerId(p.bitchat_pubkey));
+        let known_pubkey = pending_pubkey.or_else(|| {
+            self.persisted_gateway_approvals
+                .read()
+                .ok()
+                .and_then(|m| {
+                    m.get(&endpoint_id.to_string())
+                        .map(|r| PeerId(r.bitchat_pubkey))
+                })
+                .filter(|p| p.0 != [0u8; 32])
+        });
+
+        // Verify local TrustStore does not block this peer before persisting approval
+        if let Some(pid) = known_pubkey {
+            if matches!(
+                self.trust_store.read().await.peer_state(&pid),
+                PeerTrustState::Blocked { .. }
+            ) {
+                return Err("Peer identity is blocked locally".to_string());
+            }
+        }
 
         let approved = bridge.config().write().await.approve_gateway(endpoint_id);
         if !approved {
             return Err("Gateway endpoint is blocked locally".to_string());
         }
 
-        if let Some(pid) = pending_pubkey {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let mut caps = std::collections::HashSet::new();
-            caps.insert(Capability::UseGatewayForForwarding);
-            caps.insert(Capability::PermitOutboundGateway);
-            caps.insert(Capability::ReceiveDirectMessage);
+        let mut caps = std::collections::HashSet::new();
+        caps.insert(Capability::UseGatewayForForwarding);
+        caps.insert(Capability::PermitOutboundGateway);
+        caps.insert(Capability::ReceiveDirectMessage);
+
+        let ep_str = endpoint_id.to_string();
+        let gw_rec = PersistedGatewayApproval {
+            endpoint_id: ep_str.clone(),
+            bitchat_pubkey: known_pubkey.map(|p| p.0).unwrap_or([0u8; 32]),
+            status: GatewayApprovalStatus::Approved,
+            updated_at_unix: now_secs,
+        };
+        if let Some(pid) = known_pubkey {
+            self.trust_db
+                .upsert_peer_state(
+                    &pid,
+                    &PeerTrustState::Approved {
+                        capabilities: caps.clone(),
+                        granted_at_unix: now_secs,
+                    },
+                    TrustProvenance::ExplicitLocal,
+                )
+                .map_err(|e| format!("Failed to persist peer approval: {e}"))?;
+        }
+        self.trust_db
+            .upsert_gateway_approval(&gw_rec)
+            .map_err(|e| format!("Failed to persist gateway approval: {e}"))?;
+        if let Ok(mut map) = self.persisted_gateway_approvals.write() {
+            map.insert(ep_str, gw_rec);
+        }
+
+        if let Some(pid) = known_pubkey {
             let _ = self
                 .trust_store
                 .write()
                 .await
                 .approve_peer(pid, caps, now_secs);
+            self.clear_pending_requests_for(&pid);
         }
         Ok(())
     }
@@ -1915,11 +2046,82 @@ impl BitchatCoreService {
             .trim()
             .parse::<iroh::EndpointId>()
             .map_err(|e| format!("Invalid endpoint ID: {e}"))?;
-        let bridge = self
-            .gateway_bridge
-            .as_ref()
-            .ok_or("Gateway bridge is not running")?;
-        bridge.revoke_or_block_peer(endpoint_id, block).await;
+        let ep_str = endpoint_id.to_string();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let known_pubkey = if let Some(ref bridge) = self.gateway_bridge {
+            bridge.session_pubkey(&endpoint_id).await
+        } else {
+            None
+        }
+        .or_else(|| {
+            self.persisted_gateway_approvals
+                .read()
+                .ok()
+                .and_then(|m| m.get(&ep_str).map(|r| r.bitchat_pubkey))
+                .filter(|pk| *pk != [0u8; 32])
+        });
+
+        let gw_status = if block {
+            GatewayApprovalStatus::Blocked
+        } else {
+            GatewayApprovalStatus::Revoked
+        };
+        let gw_rec = PersistedGatewayApproval {
+            endpoint_id: ep_str.clone(),
+            bitchat_pubkey: known_pubkey.unwrap_or([0u8; 32]),
+            status: gw_status,
+            updated_at_unix: now_secs,
+        };
+        self.trust_db
+            .upsert_gateway_approval(&gw_rec)
+            .map_err(|e| format!("Failed to persist gateway state: {e}"))?;
+        if let Ok(mut map) = self.persisted_gateway_approvals.write() {
+            map.insert(ep_str, gw_rec);
+        }
+
+        if let Some(ref bridge) = self.gateway_bridge {
+            bridge.revoke_or_block_peer(endpoint_id, block).await;
+        }
+        if let Some(pk) = known_pubkey {
+            let pid = PeerId(pk);
+            let st = if block {
+                PeerTrustState::Blocked {
+                    blocked_at_unix: now_secs,
+                }
+            } else {
+                let ts = self.trust_store.read().await;
+                match ts.peer_state(&pid) {
+                    PeerTrustState::Approved {
+                        mut capabilities,
+                        granted_at_unix,
+                    } => {
+                        capabilities.remove(&Capability::UseGatewayForForwarding);
+                        capabilities.remove(&Capability::PermitOutboundGateway);
+                        if capabilities.is_empty() {
+                            PeerTrustState::Revoked {
+                                revoked_at_unix: now_secs,
+                            }
+                        } else {
+                            PeerTrustState::Approved {
+                                capabilities,
+                                granted_at_unix,
+                            }
+                        }
+                    }
+                    _ => PeerTrustState::Revoked {
+                        revoked_at_unix: now_secs,
+                    },
+                }
+            };
+            self.trust_db
+                .upsert_peer_state(&pid, &st, TrustProvenance::ExplicitLocal)
+                .map_err(|e| format!("Failed to persist peer state: {e}"))?;
+            self.trust_store.write().await.restore_peer_state(pid, st);
+        }
         Ok(())
     }
 
@@ -1935,17 +2137,30 @@ impl BitchatCoreService {
             .unwrap_or_default()
             .as_secs();
 
-        let bridge_to_revoke = {
+        let (new_state, bridge_to_revoke) = {
             let mut ts = self.trust_store.write().await;
-            match action.as_str() {
+            let (st, bridge_arg) = match action.as_str() {
                 "approve" => {
                     let mut caps = std::collections::HashSet::new();
                     caps.insert(Capability::ReceiveDirectMessage);
                     caps.insert(Capability::UseGatewayForForwarding);
                     caps.insert(Capability::PermitOutboundGateway);
+                    let st = PeerTrustState::Approved {
+                        capabilities: caps.clone(),
+                        granted_at_unix: now_secs,
+                    };
+                    // Validate quota before persisting
+                    let prev_state = ts.peer_state(&pid);
                     ts.approve_peer(pid, caps, now_secs)
                         .map_err(|e| format!("Approve failed: {e}"))?;
-                    None
+                    if let Err(e) =
+                        self.trust_db
+                            .upsert_peer_state(&pid, &st, TrustProvenance::ExplicitLocal)
+                    {
+                        ts.restore_peer_state(pid, prev_state);
+                        return Err(format!("Failed to persist peer approval: {e}"));
+                    }
+                    (st, None)
                 }
                 "introducer" => {
                     let mut caps = std::collections::HashSet::new();
@@ -1953,21 +2168,81 @@ impl BitchatCoreService {
                     caps.insert(Capability::UseGatewayForForwarding);
                     caps.insert(Capability::PermitOutboundGateway);
                     caps.insert(Capability::ActAsIntroducer);
+                    let st = PeerTrustState::Approved {
+                        capabilities: caps.clone(),
+                        granted_at_unix: now_secs,
+                    };
+                    let prev_state = ts.peer_state(&pid);
                     ts.approve_peer(pid, caps, now_secs)
                         .map_err(|e| format!("Approve introducer failed: {e}"))?;
-                    None
+                    if let Err(e) =
+                        self.trust_db
+                            .upsert_peer_state(&pid, &st, TrustProvenance::ExplicitLocal)
+                    {
+                        ts.restore_peer_state(pid, prev_state);
+                        return Err(format!("Failed to persist introducer approval: {e}"));
+                    }
+                    (st, None)
                 }
                 "revoke" => {
+                    let st = PeerTrustState::Revoked {
+                        revoked_at_unix: now_secs,
+                    };
+                    self.trust_db
+                        .upsert_peer_state(&pid, &st, TrustProvenance::ExplicitLocal)
+                        .map_err(|e| format!("Failed to persist revocation: {e}"))?;
                     ts.revoke_peer(pid, now_secs);
-                    self.gateway_bridge.as_ref().map(|b| (Arc::clone(b), false))
+                    (
+                        st,
+                        self.gateway_bridge.as_ref().map(|b| (Arc::clone(b), false)),
+                    )
                 }
                 "block" => {
+                    let st = PeerTrustState::Blocked {
+                        blocked_at_unix: now_secs,
+                    };
+                    self.trust_db
+                        .upsert_peer_state(&pid, &st, TrustProvenance::ExplicitLocal)
+                        .map_err(|e| format!("Failed to persist block: {e}"))?;
                     ts.block_peer(pid, now_secs);
-                    self.gateway_bridge.as_ref().map(|b| (Arc::clone(b), true))
+                    (
+                        st,
+                        self.gateway_bridge.as_ref().map(|b| (Arc::clone(b), true)),
+                    )
                 }
                 other => return Err(format!("Unsupported trust action: {other}")),
-            }
+            };
+            (st, bridge_arg)
         };
+        let _ = new_state;
+
+        if action == "revoke" || action == "block" {
+            let gw_status = if action == "block" {
+                GatewayApprovalStatus::Blocked
+            } else {
+                GatewayApprovalStatus::Revoked
+            };
+            let matched_eps: Vec<PersistedGatewayApproval> = self
+                .persisted_gateway_approvals
+                .read()
+                .map(|m| {
+                    m.values()
+                        .filter(|r| r.bitchat_pubkey == pid.0)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            for mut rec in matched_eps {
+                rec.status = gw_status;
+                rec.updated_at_unix = now_secs;
+                self.trust_db
+                    .upsert_gateway_approval(&rec)
+                    .map_err(|e| format!("Failed to persist gateway revocation: {e}"))?;
+                if let Ok(mut map) = self.persisted_gateway_approvals.write() {
+                    map.insert(rec.endpoint_id.clone(), rec);
+                }
+            }
+        }
 
         if let Some((bridge, block)) = bridge_to_revoke {
             bridge.revoke_or_block_by_peer_id(&pid, block).await;
@@ -2070,11 +2345,16 @@ impl BitchatCoreService {
             .unwrap_or_default()
             .as_secs();
 
-        self.trust_store
-            .write()
-            .await
-            .import_voucher(&voucher, now_instant, Some(now_secs))
-            .map_err(|e| format!("Voucher rejected: {e}"))?;
+        {
+            let mut ts = self.trust_store.write().await;
+            ts.import_voucher(&voucher, now_instant, Some(now_secs))
+                .map_err(|e| format!("Voucher rejected: {e}"))?;
+            if let Some(grant) = ts.get_voucher(&voucher.credential_id).cloned() {
+                if let Err(e) = self.trust_db.upsert_voucher(&grant) {
+                    return Err(format!("Failed to persist voucher: {e}"));
+                }
+            }
+        }
 
         let summary = serde_json::json!({
             "issuer": voucher.issuer.to_string(),
@@ -2084,6 +2364,29 @@ impl BitchatCoreService {
             "expires_at_unix": voucher.expires_at_unix,
         });
         serde_json::to_string(&summary).map_err(|e| format!("Serialization error: {e}"))
+    }
+
+    pub async fn trust_import_revocation(
+        &mut self,
+        rev: SignedVoucherRevocation,
+    ) -> Result<(), String> {
+        let now_instant = Instant::now();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut ts = self.trust_store.write().await;
+        ts.import_revocation(&rev, now_instant)
+            .map_err(|e| format!("Revocation rejected: {e}"))?;
+        self.trust_db
+            .upsert_revocation(
+                &rev.issuer,
+                &rev.credential_id,
+                rev.revocation_seq,
+                now_secs,
+            )
+            .map_err(|e| format!("Failed to persist voucher revocation: {e}"))?;
+        Ok(())
     }
 
     pub fn get_peer_id(&self, short_id: String) -> Result<String, String> {

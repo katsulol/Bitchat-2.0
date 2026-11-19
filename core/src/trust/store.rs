@@ -82,8 +82,45 @@ impl TrustStore {
         self.peer_states.get(peer).cloned().unwrap_or_default()
     }
 
+    pub fn list_peer_states(&self) -> Vec<(PeerId, PeerTrustState)> {
+        self.peer_states
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
+            .collect()
+    }
+
+    /// Hydrate a peer trust record loaded from verified persistent storage.
+    pub fn restore_peer_state(&mut self, peer: PeerId, state: PeerTrustState) {
+        if peer == self.local_peer_id {
+            return;
+        }
+        self.peer_states.insert(peer, state);
+    }
+
+    /// Hydrate a voucher grant loaded from verified persistent storage.
+    pub fn restore_voucher(&mut self, grant: ActiveVoucherGrant) {
+        self.active_vouchers.insert(grant.credential_id, grant);
+    }
+
+    /// Hydrate a voucher revocation entry loaded from verified persistent storage.
+    pub fn restore_revocation(
+        &mut self,
+        issuer: PeerId,
+        credential_id: [u8; 16],
+        revocation_seq: u32,
+        recorded_at: Instant,
+    ) {
+        self.revoked_credentials
+            .insert((issuer, credential_id), (revocation_seq, recorded_at));
+        self.active_vouchers.remove(&credential_id);
+    }
+
     pub fn active_voucher_count(&self) -> usize {
         self.active_vouchers.len()
+    }
+
+    pub fn get_voucher(&self, credential_id: &[u8; 16]) -> Option<&ActiveVoucherGrant> {
+        self.active_vouchers.get(credential_id)
     }
 
     pub fn approved_introducer_count(&self) -> usize {

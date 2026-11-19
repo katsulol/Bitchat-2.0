@@ -2,6 +2,7 @@
 
 pub mod model;
 pub mod policy;
+pub mod sqlite;
 pub mod store;
 pub mod voucher;
 
@@ -10,6 +11,9 @@ pub use model::{
     Capability, InboundAuthEvent, PeerLinkIdentityState, PeerTrustState, PendingMessageRequest,
 };
 pub use policy::TrustPolicy;
+pub use sqlite::{
+    GatewayApprovalStatus, PersistedGatewayApproval, SqliteTrustStore, TrustProvenance,
+};
 pub use store::{TrustQuotaConfig, TrustStore, DEFAULT_MAX_PENDING_REQUESTS};
 pub use voucher::{
     SignedVoucher, SignedVoucherRevocation, MAX_FUTURE_ISSUED_SKEW_SECS, MAX_IMPORT_REQUEST_BYTES,

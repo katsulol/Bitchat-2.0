@@ -18,7 +18,8 @@ use crate::gateway::wire::{
 };
 use crate::identity::{Identity, PeerId};
 use crate::trust::{
-    AuthOutcome, AuthReason, AuthorizationContext, Capability, PeerTrustState, TrustPolicy,
+    AuthOutcome, AuthReason, AuthorizationContext, Capability, GatewayApprovalStatus,
+    PeerTrustState, PersistedGatewayApproval, SqliteTrustStore, TrustPolicy, TrustProvenance,
     TrustQuotaConfig, TrustStore,
 };
 use iroh::endpoint::Connection;
@@ -41,6 +42,7 @@ pub struct GatewayBridge {
     relay_mode: RelayMode,
     config: Arc<RwLock<GatewayConfig>>,
     trust_store: Arc<RwLock<TrustStore>>,
+    trust_db: Option<Arc<SqliteTrustStore>>,
     routes: Arc<RwLock<GatewayRouteTable>>,
     stats: Arc<GatewayStats>,
     rate_limiter: Arc<std::sync::Mutex<crate::gateway::fairness::GatewayRateLimiter>>,
@@ -73,6 +75,24 @@ impl GatewayBridge {
         relay_mode: RelayMode,
         trust_store: Arc<RwLock<TrustStore>>,
     ) -> Result<Self> {
+        Self::new_with_trust_store_and_db(
+            bitchat_identity,
+            iroh_secret,
+            relay_mode,
+            trust_store,
+            None,
+        )
+        .await
+    }
+
+    /// Create a new gateway bridge sharing an existing `TrustStore` and encrypted persistence handle.
+    pub async fn new_with_trust_store_and_db(
+        bitchat_identity: Identity,
+        iroh_secret: Option<SecretKey>,
+        relay_mode: RelayMode,
+        trust_store: Arc<RwLock<TrustStore>>,
+        trust_db: Option<Arc<SqliteTrustStore>>,
+    ) -> Result<Self> {
         let endpoint = create_endpoint(iroh_secret, relay_mode.clone())
             .await
             .map_err(|e| Error::Transport(format!("Failed to bind Iroh endpoint: {e}")))?;
@@ -85,6 +105,7 @@ impl GatewayBridge {
             relay_mode,
             config: Arc::new(RwLock::new(GatewayConfig::new())),
             trust_store,
+            trust_db,
             routes: Arc::new(RwLock::new(GatewayRouteTable::new())),
             stats: Arc::new(GatewayStats::new()),
             rate_limiter: Arc::new(std::sync::Mutex::new(
@@ -199,7 +220,16 @@ impl GatewayBridge {
             .unwrap_or_default()
             .as_secs();
 
+        let mut caps = HashSet::new();
+        caps.insert(Capability::PermitOutboundGateway);
+        caps.insert(Capability::UseGatewayForForwarding);
+        caps.insert(Capability::ReceiveDirectMessage);
+
         {
+            let mut cfg = self.config.write().await;
+            if cfg.consent_state(&id) == GatewayConsentState::Blocked {
+                return Err(Error::Transport("Peer is blocked locally".into()));
+            }
             let mut ts = self.trust_store.write().await;
             if matches!(
                 ts.peer_state(&remote_peer_id),
@@ -207,20 +237,36 @@ impl GatewayBridge {
             ) {
                 return Err(Error::Transport("Peer identity is blocked locally".into()));
             }
-            let mut caps = HashSet::new();
-            caps.insert(Capability::PermitOutboundGateway);
-            caps.insert(Capability::UseGatewayForForwarding);
-            caps.insert(Capability::ReceiveDirectMessage);
-            let _ = ts.approve_peer(remote_peer_id, caps, now_secs);
+            ts.approve_peer(remote_peer_id, caps.clone(), now_secs)?;
+            cfg.approve_gateway(id);
+            cfg.enabled = true;
         }
 
-        let mut cfg = self.config.write().await;
-        if !cfg.approve_gateway(id) {
-            return Err(Error::Transport("Peer is blocked locally".into()));
+        if let Some(ref db) = self.trust_db {
+            db.upsert_peer_state(
+                &remote_peer_id,
+                &PeerTrustState::Approved {
+                    capabilities: caps,
+                    granted_at_unix: now_secs,
+                },
+                TrustProvenance::ExplicitLocal,
+            )?;
+            db.upsert_gateway_approval(&PersistedGatewayApproval {
+                endpoint_id: id.to_string(),
+                bitchat_pubkey: pubkey,
+                status: GatewayApprovalStatus::Approved,
+                updated_at_unix: now_secs,
+            })?;
         }
-        cfg.enabled = true;
-        drop(cfg);
         Ok(contact)
+    }
+
+    pub async fn session_pubkey(&self, endpoint_id: &EndpointId) -> Option<[u8; 32]> {
+        self.active_sessions
+            .read()
+            .await
+            .get(endpoint_id)
+            .map(|s| s.remote_bitchat_pubkey)
     }
 
     /// Revoke or permanently block a gateway peer, atomically withdrawing routes and closing active sessions.
@@ -250,7 +296,40 @@ impl GatewayBridge {
             if block {
                 ts.block_peer(pid, now_secs);
             } else {
-                ts.revoke_peer(pid, now_secs);
+                // Gateway revocation removes only gateway capabilities if direct chat approval remains
+                match ts.peer_state(&pid) {
+                    PeerTrustState::Approved {
+                        mut capabilities,
+                        granted_at_unix,
+                    } => {
+                        capabilities.remove(&Capability::UseGatewayForForwarding);
+                        capabilities.remove(&Capability::PermitOutboundGateway);
+                        if capabilities.is_empty() {
+                            ts.revoke_peer(pid, now_secs);
+                        } else {
+                            let _ = ts.approve_peer(pid, capabilities, granted_at_unix);
+                        }
+                    }
+                    _ => ts.revoke_peer(pid, now_secs),
+                }
+            }
+        }
+        if let Some(ref db) = self.trust_db {
+            let gw_status = if block {
+                GatewayApprovalStatus::Blocked
+            } else {
+                GatewayApprovalStatus::Revoked
+            };
+            let pk = assoc_peer_id.map(|p| p.0).unwrap_or([0u8; 32]);
+            let _ = db.upsert_gateway_approval(&PersistedGatewayApproval {
+                endpoint_id: endpoint_id.to_string(),
+                bitchat_pubkey: pk,
+                status: gw_status,
+                updated_at_unix: now_secs,
+            });
+            if let Some(pid) = assoc_peer_id {
+                let st = self.trust_store.read().await.peer_state(&pid);
+                let _ = db.upsert_peer_state(&pid, &st, TrustProvenance::ExplicitLocal);
             }
         }
         if let Some(session) = self.active_sessions.write().await.remove(&endpoint_id) {
@@ -522,7 +601,26 @@ impl GatewayBridge {
                                         let mut caps = HashSet::new();
                                         caps.insert(Capability::UseGatewayForForwarding);
                                         caps.insert(Capability::ReceiveDirectMessage);
-                                        let _ = ts.approve_peer(remote_peer_id, caps, now_secs);
+                                        let _ =
+                                            ts.approve_peer(remote_peer_id, caps.clone(), now_secs);
+                                        if let Some(ref db) = self.trust_db {
+                                            let _ = db.upsert_peer_state(
+                                                &remote_peer_id,
+                                                &PeerTrustState::Approved {
+                                                    capabilities: caps,
+                                                    granted_at_unix: now_secs,
+                                                },
+                                                TrustProvenance::ExplicitLocal,
+                                            );
+                                            let _ = db.upsert_gateway_approval(
+                                                &PersistedGatewayApproval {
+                                                    endpoint_id: remote_id.to_string(),
+                                                    bitchat_pubkey: pk,
+                                                    status: GatewayApprovalStatus::Approved,
+                                                    updated_at_unix: now_secs,
+                                                },
+                                            );
+                                        }
                                         true
                                     }
                                     Ok(_) => false,
