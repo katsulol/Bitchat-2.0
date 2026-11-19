@@ -13,7 +13,8 @@ void main() {
 }
 
 class BitchatApp extends StatelessWidget {
-  const BitchatApp({super.key});
+  final MeshBridge? bridge;
+  const BitchatApp({super.key, this.bridge});
 
   @override
   Widget build(BuildContext context) {
@@ -30,20 +31,22 @@ class BitchatApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const MeshChatScreen(),
+      home: MeshChatScreen(bridge: bridge),
     );
   }
 }
 
 class MeshChatScreen extends StatefulWidget {
-  const MeshChatScreen({super.key});
+  final MeshBridge? bridge;
+  const MeshChatScreen({super.key, this.bridge});
 
   @override
   State<MeshChatScreen> createState() => _MeshChatScreenState();
 }
 
 class _MeshChatScreenState extends State<MeshChatScreen> {
-  final MeshBridge _bridge = MeshBridge();
+  late final MeshBridge _bridge;
+  late final bool _ownsBridge;
   final TextEditingController _inputController = TextEditingController();
   final List<ChatMessage> _messages = [];
   List<String> _peers = [];
@@ -52,14 +55,24 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   int? _selectedDeadlineSecs;
   bool _lastSessionReady = false;
   Timer? _pollTimer;
+  Timer? _gatewayDialogTimer;
   StreamSubscription<ChatMessage>? _msgSub;
   StreamSubscription<List<String>>? _peersSub;
   StreamSubscription<dynamic>? _deliverySub;
+  StreamSubscription<void>? _stateSub;
 
   @override
   void initState() {
     super.initState();
+    _ownsBridge = widget.bridge == null;
+    _bridge = widget.bridge ?? MeshBridge();
     _bridge.startMesh().then((_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+
+    _stateSub = _bridge.stateChanges.listen((_) {
       if (mounted) {
         setState(() {});
       }
@@ -144,11 +157,16 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _gatewayDialogTimer?.cancel();
+    _gatewayDialogTimer = null;
     _msgSub?.cancel();
     _peersSub?.cancel();
     _deliverySub?.cancel();
-    _bridge.stopMesh();
-    _bridge.dispose();
+    _stateSub?.cancel();
+    if (_ownsBridge) {
+      _bridge.stopMesh();
+      _bridge.dispose();
+    }
     _inputController.dispose();
     super.dispose();
   }
@@ -210,44 +228,49 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
               alignment: WrapAlignment.spaceBetween,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('My ID: ', style: TextStyle(fontSize: 12, color: Colors.grey)),
-                    Flexible(
-                      child: Text(
-                        _bridge.myShortId,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontFamily: 'monospace',
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF81C784),
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: (MediaQuery.sizeOf(context).width - 28).clamp(80.0, double.infinity),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text('My ID: ', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                      Flexible(
+                        child: Text(
+                          _bridge.myShortId,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontFamily: 'monospace',
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF81C784),
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                    const SizedBox(width: 6),
-                    InkWell(
-                      onTap: () {
-                        Clipboard.setData(ClipboardData(text: _bridge.myShortId));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('ShortId copied to clipboard')),
-                        );
-                      },
-                      child: const Padding(
-                        padding: EdgeInsets.all(2.0),
-                        child: Icon(Icons.copy, size: 14, color: Colors.grey),
+                      const SizedBox(width: 6),
+                      InkWell(
+                        onTap: () {
+                          Clipboard.setData(ClipboardData(text: _bridge.myShortId));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('ShortId copied to clipboard')),
+                          );
+                        },
+                        child: const Padding(
+                          padding: EdgeInsets.all(2.0),
+                          child: Icon(Icons.copy, size: 14, color: Colors.grey),
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 6),
-                    InkWell(
-                      onTap: _showMyIdQrDialog,
-                      child: const Padding(
-                        padding: EdgeInsets.all(2.0),
-                        child: Icon(Icons.qr_code, size: 16, color: Color(0xFF81C784)),
+                      const SizedBox(width: 6),
+                      InkWell(
+                        onTap: _showMyIdQrDialog,
+                        child: const Padding(
+                          padding: EdgeInsets.all(2.0),
+                          child: Icon(Icons.qr_code, size: 16, color: Color(0xFF81C784)),
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
@@ -278,6 +301,50 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
               ],
             ),
           ),
+          if (_bridge.hasAbiError)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              color: Colors.red.shade900,
+              child: Row(
+                children: [
+                  const Icon(Icons.error_outline, size: 16, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Native ABI mismatch (fail-closed): ${_bridge.lastAbiError}',
+                      style: const TextStyle(fontSize: 12, color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (_bridge.permissionsDenied)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              color: Colors.orange.shade900.withValues(alpha: 0.9),
+              child: Row(
+                children: [
+                  const Icon(Icons.bluetooth_disabled, size: 16, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _bridge.lastPermissionError ??
+                          'Bluetooth / Location permissions denied.',
+                      style: const TextStyle(fontSize: 12, color: Colors.white),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _bridge.retryPermissions,
+                    child: const Text(
+                      'Retry',
+                      style: TextStyle(fontSize: 12, color: Colors.amberAccent),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           if (_bridge.hasKeystoreError)
             Container(
               width: double.infinity,
@@ -374,9 +441,13 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                   children: [
                     const Icon(Icons.public, size: 16, color: Colors.tealAccent),
                     const SizedBox(width: 6),
-                    Text(
-                      '${gwRoutes.length} Gateway Peers:',
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.tealAccent),
+                    Flexible(
+                      child: Text(
+                        '${gwRoutes.length} Gateway Peers:',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.tealAccent),
+                      ),
                     ),
                     const SizedBox(width: 8),
                     Expanded(
@@ -477,8 +548,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                         color: Colors.deepOrange.shade900.withAlpha(110),
                         child: Text(
                           volState.state == 'UnsupportedByPeer'
-                              ? 'Volatile chat unsupported by peer: outgoing messages fell back to persistent E2EE.'
-                              : 'Volatile Chat (${volState.retentionSecs}s): local RAM-only retention; remote deletion depends on peer compliance and cannot prevent screenshots or modified clients.',
+                              ? 'Volatile chat unsupported by peer: sending blocked (no silent downgrade). Disable volatile mode explicitly to send persistent E2EE.'
+                              : volState.state == 'Pending'
+                                  ? 'Volatile chat negotiating: sending blocked until peer confirms support (no silent downgrade).'
+                                  : 'Volatile Chat (${volState.retentionSecs}s): local RAM-only retention; remote deletion depends on peer compliance and cannot prevent screenshots or modified clients.',
                           style: const TextStyle(fontSize: 10, color: Colors.orangeAccent),
                         ),
                       ),
@@ -491,17 +564,21 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
           Expanded(
             child: _messages.isEmpty
                 ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.wifi_tethering, size: 48, color: Colors.grey.shade700),
-                        const SizedBox(height: 12),
-                        const Text(
-                          'No mesh messages yet.\nBroadcast or select a neighbor to chat.',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ],
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.wifi_tethering, size: 48, color: Colors.grey.shade700),
+                          const SizedBox(height: 12),
+                          const Text(
+                            'No mesh messages yet.\nBroadcast or select a neighbor to chat.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ],
+                      ),
                     ),
                   )
                 : ListView.builder(
@@ -781,20 +858,34 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                   ],
                   const SizedBox(width: 6),
                   Expanded(
-                    child: TextField(
-                      controller: _inputController,
-                      decoration: InputDecoration(
-                        isDense: true,
-                        hintText: _selectedRecipient == null ? 'Broadcast...' : 'Private message...',
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
-                        ),
-                        filled: true,
-                        fillColor: const Color(0xFF2C2C2C),
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      ),
-                      onSubmitted: (_) => _sendMessage(),
+                    child: Builder(
+                      builder: (ctx) {
+                        final isVolatileInput = _selectedRecipient != null &&
+                            _bridge.getVolatileState(_selectedRecipient!).state !=
+                                'NotRequested';
+                        return TextField(
+                          controller: _inputController,
+                          enableSuggestions: !isVolatileInput,
+                          autocorrect: !isVolatileInput,
+                          decoration: InputDecoration(
+                            isDense: true,
+                            hintText: _selectedRecipient == null
+                                ? 'Broadcast...'
+                                : 'Private message...',
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide.none,
+                            ),
+                            filled: true,
+                            fillColor: const Color(0xFF2C2C2C),
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
+                            ),
+                          ),
+                          onSubmitted: (_) => _sendMessage(),
+                        );
+                      },
                     ),
                   ),
                   const SizedBox(width: 4),
@@ -858,6 +949,13 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
         return StatefulBuilder(
           builder: (ctx, setModalState) {
             final diag = _bridge.getDiagnostics();
+            final bi = _bridge.getBuildInfo();
+            final coverStatus = _bridge.supportsExperimentalFeatures
+                ? _bridge.getCoverStatus()
+                : null;
+            final syncStatus = _bridge.supportsExperimentalFeatures
+                ? _bridge.getSyncStatus()
+                : null;
             return Padding(
               padding: const EdgeInsets.all(20),
               child: SingleChildScrollView(
@@ -882,7 +980,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            diag?.buildVersion ?? 'v2.0.5-phase5',
+                            diag?.buildVersion ?? 'v2.0.6-phase6',
                             style: const TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.bold,
@@ -892,6 +990,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           ),
                         ),
                       ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'ABI v${bi?.abiVersion ?? diag?.abiVersion ?? 0} | Commit: ${bi?.gitCommit ?? diag?.gitCommit ?? "unknown"} | ${(bi?.buildDirty ?? diag?.buildDirty ?? false) ? "dirty" : "clean"} | Key: ${diag?.keySecurityLevel ?? "Unknown"}',
+                      style: const TextStyle(fontSize: 10, fontFamily: 'monospace', color: Colors.white70),
                     ),
                     const SizedBox(height: 12),
                     Text('ShortId: ${_bridge.myShortId}', style: const TextStyle(fontFamily: 'monospace')),
@@ -938,6 +1041,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       children: [
                         for (final entry in const [
                           ('receive_only', 'Receive only'),
+                          ('minimal', 'Minimal'),
                           ('balanced', 'Balanced'),
                           ('help_network', 'Help the network'),
                         ])
@@ -960,7 +1064,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     const Divider(height: 24),
                     const Text('Transport, Trust & Privacy Layer', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.tealAccent)),
                     const SizedBox(height: 6),
-                    Text('Gateway Active: ${diag?.gatewayActive ?? false ? "YES" : "NO"}', style: const TextStyle(fontSize: 12)),
+                    Text('Gateway Active: ${diag?.gatewayActive ?? false ? "YES" : "NO"} | Observed Path: ${diag?.gatewayObservedPath ?? "Unknown"}', style: const TextStyle(fontSize: 12)),
                     Text(
                       'Gateway Direct/Relay Mode: ${diag == null ? "Unknown" : (diag.gatewayRelayDisabled ? "Relay Disabled (Direct-only)" : "Relay Enabled (Default)")}',
                       style: const TextStyle(fontSize: 12),
@@ -972,6 +1076,98 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     if (diag?.lastRouteCandidate != null) ...[
                       const SizedBox(height: 4),
                       Text('Last Route Candidate: ${diag!.lastRouteCandidate}', style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+                    ],
+                    if (_bridge.supportsExperimentalFeatures) ...[
+                      const Divider(height: 24),
+                      const Text(
+                        'Experimental Controls (Default OFF)',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.deepPurpleAccent),
+                      ),
+                      const SizedBox(height: 4),
+                      SwitchListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Experimental Traffic Padding (Default OFF)',
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: Text(
+                          'Dummy frames sent: ${coverStatus?.dummyFramesSent ?? 0} (${coverStatus?.maxBytesPerMinute ?? 4096} B/min cap). Experimental dummy padding on direct approved links only; does not hide online presence or guarantee anonymity.',
+                          style: const TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        value: coverStatus?.enabled ?? _bridge.coverTrafficEnabled,
+                        onChanged: (enabled) {
+                          _bridge.setCoverTraffic(enabled);
+                          setModalState(() {});
+                          setState(() {});
+                        },
+                      ),
+                      SwitchListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Experimental Normal-Mode Sync (Default OFF)',
+                          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: Text(
+                          'Cap: ${syncStatus?.maxRecordsPerConversation ?? 1024} records / ${(syncStatus?.maxSessionBytes ?? 262144) ~/ 1024} KiB. Normal-mode retained records only; Privacy/volatile excluded. Pending human crypto review.',
+                          style: const TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        value: syncStatus?.enabled ?? _bridge.syncEnabled,
+                        onChanged: (enabled) {
+                          _bridge.setSyncEnabled(enabled);
+                          setModalState(() {});
+                          setState(() {});
+                        },
+                      ),
+                      if ((syncStatus?.enabled ?? _bridge.syncEnabled) && _selectedRecipient != null) ...[
+                        const SizedBox(height: 4),
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            OutlinedButton(
+                              onPressed: () {
+                                try {
+                                  final fullPid = _bridge.getPeerFullId(_selectedRecipient!) ?? _selectedRecipient!;
+                                  _bridge.initiateSync(fullPid, useMerkle: false);
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Sync initiated (ID Inventory baseline).')),
+                                  );
+                                } catch (e) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('Sync unavailable: ${e.toString().replaceAll("Exception: ", "")}'),
+                                      backgroundColor: Colors.red.shade900,
+                                    ),
+                                  );
+                                }
+                                setModalState(() {});
+                              },
+                              child: const Text('Sync Peer (ID-Inventory)', style: TextStyle(fontSize: 11)),
+                            ),
+                            OutlinedButton(
+                              onPressed: () {
+                                try {
+                                  final fullPid = _bridge.getPeerFullId(_selectedRecipient!) ?? _selectedRecipient!;
+                                  _bridge.initiateSync(fullPid, useMerkle: true);
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Sync initiated (Experimental Merkle).')),
+                                  );
+                                } catch (e) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('Sync unavailable: ${e.toString().replaceAll("Exception: ", "")}'),
+                                      backgroundColor: Colors.red.shade900,
+                                    ),
+                                  );
+                                }
+                                setModalState(() {});
+                              },
+                              child: const Text('Sync Peer (Experimental Merkle)', style: TextStyle(fontSize: 11)),
+                            ),
+                          ],
+                        ),
+                      ],
                     ],
                   ],
                 ),
@@ -995,6 +1191,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   }
 
   void _showGatewayDialog() {
+    _gatewayDialogTimer?.cancel();
     Timer? dialogTimer;
     String? localContactUri;
 
@@ -1008,8 +1205,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
             dialogTimer ??= Timer.periodic(const Duration(milliseconds: 600), (_) {
               if (context.mounted) {
                 setModalState(() {});
+              } else {
+                dialogTimer?.cancel();
               }
             });
+            _gatewayDialogTimer = dialogTimer;
             final stats = _bridge.getGatewayStats();
             final isRunning = stats?.isRunning ?? false;
             if (isRunning && localContactUri == null) {
@@ -1556,8 +1756,98 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     ),
                     const SizedBox(height: 6),
                     const Text(
-                      'Vouchers grant scoped capability authorization (1 hop only) and do NOT establish unique human identity.',
+                      'Scope: 1-hop introduction only (subject -> audience, bounded TTL). Never transitive, never auto-approves relay gateways, and does NOT prove unique human identity.',
                       style: TextStyle(fontSize: 11, color: Colors.amberAccent),
+                    ),
+                    Builder(
+                      builder: (ctx) {
+                        final pendingReqs = _bridge.getPendingMessageRequests();
+                        final authEvents = _bridge.pollAuthEvents();
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (pendingReqs.isNotEmpty) ...[
+                              const Divider(height: 16),
+                              Text(
+                                'Pending Message Requests (${pendingReqs.length}):',
+                                style: const TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.amberAccent,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              ...pendingReqs.map((req) {
+                                final label = req.senderPeerId.length >= 16
+                                    ? '${req.senderShortId} (${req.senderPeerId.substring(0, 12)}...)'
+                                    : req.senderShortId;
+                                return Container(
+                                  margin: const EdgeInsets.only(bottom: 6),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF262626),
+                                    borderRadius: BorderRadius.circular(6),
+                                    border: Border.all(color: Colors.amber.shade700, width: 0.7),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              label,
+                                              style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                            Text(
+                                              'Reason: ${req.reason}${req.isVolatile ? " | Volatile" : ""}',
+                                              style: const TextStyle(fontSize: 10, color: Colors.grey),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      TextButton(
+                                        onPressed: () {
+                                          final ok = _bridge.setPeerTrustState(req.senderPeerId, 'approve');
+                                          setModalState(() {
+                                            statusSuccess = ok;
+                                            statusMessage = ok
+                                                ? 'Approved request from ${req.senderShortId}.'
+                                                : 'Failed to approve ${req.senderShortId}.';
+                                          });
+                                        },
+                                        child: const Text('Approve', style: TextStyle(fontSize: 11, color: Colors.greenAccent)),
+                                      ),
+                                      TextButton(
+                                        onPressed: () {
+                                          final ok = _bridge.setPeerTrustState(req.senderPeerId, 'block');
+                                          setModalState(() {
+                                            statusSuccess = ok;
+                                            statusMessage = ok
+                                                ? 'Blocked sender ${req.senderShortId}.'
+                                                : 'Failed to block ${req.senderShortId}.';
+                                          });
+                                        },
+                                        child: const Text('Block', style: TextStyle(fontSize: 11, color: Colors.redAccent)),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              }),
+                            ],
+                            if (authEvents.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Text(
+                                'Recent Auth Events (${authEvents.length}): ${authEvents.first.shortId} -> ${authEvents.first.outcome} (${authEvents.first.reason})',
+                                style: const TextStyle(fontSize: 10, color: Colors.white60, fontFamily: 'monospace'),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ],
+                          ],
+                        );
+                      },
                     ),
                     if (statusMessage != null) ...[
                       const SizedBox(height: 10),

@@ -256,9 +256,10 @@ class BitchatBleService : Service() {
     private fun startServiceInForeground() {
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Bitchat 2.0 Mesh Active")
-            .setContentText("Listening and forwarding peer frames via BLE")
+            .setContentText("Bluetooth Low Energy mesh service")
             .setSmallIcon(android.R.drawable.stat_notify_sync)
             .setOngoing(true)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 

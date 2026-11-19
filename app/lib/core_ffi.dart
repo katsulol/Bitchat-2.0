@@ -17,6 +17,7 @@ class RustInboundMessage {
   final String text;
   final int hopCount;
   final bool isBroadcast;
+  final String authStatus;
 
   RustInboundMessage({
     required this.msgId,
@@ -25,6 +26,7 @@ class RustInboundMessage {
     required this.text,
     required this.hopCount,
     required this.isBroadcast,
+    this.authStatus = 'Allowed',
   });
 
   factory RustInboundMessage.fromJson(Map<String, dynamic> json) {
@@ -35,6 +37,7 @@ class RustInboundMessage {
       text: json['text'] as String,
       hopCount: json['hop_count'] as int,
       isBroadcast: json['is_broadcast'] as bool,
+      authStatus: json['auth_status'] as String? ?? 'Allowed',
     );
   }
 }
@@ -131,6 +134,15 @@ class RustDiagnostics {
   final int transitBytesForwarded;
   final int transitPacketsDroppedPolicy;
   final String relayContributionMode;
+  final String keySecurityLevel;
+  final String gatewayRelayMode;
+  final String gatewayObservedPath;
+  final int gatewayPathObservedAtUnix;
+  final int abiVersion;
+  final String gitCommit;
+  final bool buildDirty;
+  final int runtimeGeneration;
+  final bool uiAttached;
 
   RustDiagnostics({
     required this.myShortId,
@@ -142,7 +154,7 @@ class RustDiagnostics {
     required this.gatewayActive,
     required this.gatewayRelayDisabled,
     this.lastRouteCandidate,
-    this.buildVersion = 'v2.0.5-phase5',
+    this.buildVersion = 'v2.0.6-phase6',
     this.resourceProfile = 'Balanced',
     this.batteryBand = 'Unknown',
     this.chargingState = 'Unknown',
@@ -154,6 +166,15 @@ class RustDiagnostics {
     this.transitBytesForwarded = 0,
     this.transitPacketsDroppedPolicy = 0,
     this.relayContributionMode = 'balanced',
+    this.keySecurityLevel = 'Unknown',
+    this.gatewayRelayMode = 'Default',
+    this.gatewayObservedPath = 'Unknown',
+    this.gatewayPathObservedAtUnix = 0,
+    this.abiVersion = 2,
+    this.gitCommit = '',
+    this.buildDirty = false,
+    this.runtimeGeneration = 0,
+    this.uiAttached = false,
   });
 
   factory RustDiagnostics.fromJson(Map<String, dynamic> json) {
@@ -167,7 +188,7 @@ class RustDiagnostics {
       gatewayActive: json['gateway_active'] as bool? ?? false,
       gatewayRelayDisabled: json['gateway_relay_disabled'] as bool? ?? true,
       lastRouteCandidate: json['last_route_candidate'] as String?,
-      buildVersion: json['build_version'] as String? ?? 'v2.0.5-phase5',
+      buildVersion: json['build_version'] as String? ?? 'v2.0.6-phase6',
       resourceProfile: json['resource_profile'] as String? ?? 'Balanced',
       batteryBand: json['battery_band'] as String? ?? 'Unknown',
       chargingState: json['charging_state'] as String? ?? 'Unknown',
@@ -179,6 +200,163 @@ class RustDiagnostics {
       transitBytesForwarded: json['transit_bytes_forwarded'] as int? ?? 0,
       transitPacketsDroppedPolicy: json['transit_packets_dropped_policy'] as int? ?? 0,
       relayContributionMode: json['relay_contribution_mode'] as String? ?? 'balanced',
+      keySecurityLevel: json['key_security_level'] as String? ?? 'Unknown',
+      gatewayRelayMode: json['gateway_relay_mode'] as String? ?? 'Default',
+      gatewayObservedPath: json['gateway_observed_path'] as String? ?? 'Unknown',
+      gatewayPathObservedAtUnix: json['gateway_path_observed_at_unix'] as int? ?? 0,
+      abiVersion: json['abi_version'] as int? ?? 2,
+      gitCommit: json['git_commit'] as String? ?? '',
+      buildDirty: json['build_dirty'] as bool? ?? false,
+      runtimeGeneration: json['runtime_generation'] as int? ?? 0,
+      uiAttached: json['ui_attached'] as bool? ?? false,
+    );
+  }
+}
+
+class RustBuildInfo {
+  final String buildVersion;
+  final int abiVersion;
+  final String gitCommit;
+  final bool buildDirty;
+  final String buildTarget;
+
+  RustBuildInfo({
+    required this.buildVersion,
+    required this.abiVersion,
+    required this.gitCommit,
+    required this.buildDirty,
+    required this.buildTarget,
+  });
+
+  factory RustBuildInfo.fromJson(Map<String, dynamic> json) {
+    return RustBuildInfo(
+      buildVersion: json['build_version'] as String? ?? '',
+      abiVersion: json['abi_version'] as int? ?? 0,
+      gitCommit: json['git_commit'] as String? ?? 'unknown',
+      buildDirty: json['build_dirty'] as bool? ?? false,
+      buildTarget: json['build_target'] as String? ?? 'unknown',
+    );
+  }
+}
+
+class RustAuthEvent {
+  final String peerId;
+  final String shortId;
+  final String? logicalId;
+  final String outcome;
+  final String reason;
+  final String capability;
+  final int timestamp;
+
+  RustAuthEvent({
+    required this.peerId,
+    required this.shortId,
+    this.logicalId,
+    required this.outcome,
+    required this.reason,
+    required this.capability,
+    required this.timestamp,
+  });
+
+  factory RustAuthEvent.fromJson(Map<String, dynamic> json) {
+    return RustAuthEvent(
+      peerId: json['peer_id'] as String? ?? '',
+      shortId: json['short_id'] as String? ?? '',
+      logicalId: json['logical_id'] as String?,
+      outcome: json['outcome'] as String? ?? '',
+      reason: json['reason'] as String? ?? '',
+      capability: json['capability'] as String? ?? '',
+      timestamp: json['timestamp'] as int? ?? 0,
+    );
+  }
+}
+
+class RustPendingMessageRequest {
+  final String senderPeerId;
+  final String senderShortId;
+  final String logicalId;
+  final String reason;
+  final int receivedAtUnix;
+  final bool isVolatile;
+
+  RustPendingMessageRequest({
+    required this.senderPeerId,
+    required this.senderShortId,
+    required this.logicalId,
+    required this.reason,
+    required this.receivedAtUnix,
+    required this.isVolatile,
+  });
+
+  factory RustPendingMessageRequest.fromJson(Map<String, dynamic> json) {
+    return RustPendingMessageRequest(
+      senderPeerId: json['sender_peer_id'] as String? ?? '',
+      senderShortId: json['sender_short_id'] as String? ?? '',
+      logicalId: json['logical_id'] as String? ?? '',
+      reason: json['reason'] as String? ?? '',
+      receivedAtUnix: json['received_at_unix'] as int? ?? 0,
+      isVolatile: json['is_volatile'] as bool? ?? false,
+    );
+  }
+}
+
+class RustCoverStatus {
+  final bool enabled;
+  final bool experimental;
+  final int negotiatedPeers;
+  final int dummyFramesSent;
+  final int dummyBytesSent;
+  final int dummyFramesDiscarded;
+  final int maxBytesPerMinute;
+
+  RustCoverStatus({
+    required this.enabled,
+    required this.experimental,
+    required this.negotiatedPeers,
+    required this.dummyFramesSent,
+    required this.dummyBytesSent,
+    required this.dummyFramesDiscarded,
+    required this.maxBytesPerMinute,
+  });
+
+  factory RustCoverStatus.fromJson(Map<String, dynamic> json) {
+    return RustCoverStatus(
+      enabled: json['enabled'] as bool? ?? false,
+      experimental: json['experimental'] as bool? ?? true,
+      negotiatedPeers: json['negotiated_peers'] as int? ?? 0,
+      dummyFramesSent: json['dummy_frames_sent'] as int? ?? 0,
+      dummyBytesSent: json['dummy_bytes_sent'] as int? ?? 0,
+      dummyFramesDiscarded: json['dummy_frames_discarded'] as int? ?? 0,
+      maxBytesPerMinute: json['max_bytes_per_minute'] as int? ?? 0,
+    );
+  }
+}
+
+class RustSyncStatus {
+  final bool enabled;
+  final bool experimental;
+  final bool pendingCryptoReview;
+  final int activeSessions;
+  final int maxRecordsPerConversation;
+  final int maxSessionBytes;
+
+  RustSyncStatus({
+    required this.enabled,
+    required this.experimental,
+    required this.pendingCryptoReview,
+    required this.activeSessions,
+    required this.maxRecordsPerConversation,
+    required this.maxSessionBytes,
+  });
+
+  factory RustSyncStatus.fromJson(Map<String, dynamic> json) {
+    return RustSyncStatus(
+      enabled: json['enabled'] as bool? ?? false,
+      experimental: json['experimental'] as bool? ?? true,
+      pendingCryptoReview: json['pending_crypto_review'] as bool? ?? true,
+      activeSessions: json['active_sessions'] as int? ?? 0,
+      maxRecordsPerConversation: json['max_records_per_conversation'] as int? ?? 1024,
+      maxSessionBytes: json['max_session_bytes'] as int? ?? 262144,
     );
   }
 }
@@ -212,12 +390,24 @@ class RustVolatileState {
 }
 
 class CoreFfi {
+  static const int expectedAbiVersion = 2;
   static final CoreFfi instance = CoreFfi._();
   CoreFfi._();
 
   DynamicLibrary? _lib;
   bool _initialized = false;
+  bool get isLoaded => _initialized;
+  String? lastAbiError;
 
+  late final BitchatAbiVersionDart _abiVersion;
+  late final BitchatCheckAbiVersionDart _checkAbiVersion;
+  late final BitchatStringDart _buildInfo;
+  late final BitchatStringDart _lastError;
+  late final BitchatRuntimeGenDart _runtimeGeneration;
+  late final BitchatRuntimeGenDart _attachUi;
+  late final BitchatGatewayStopDart _detachUi;
+  late final BitchatGatewayStopDart _shutdown;
+  late final BitchatDestructiveResetDart _destructiveResetStorage;
   late final BitchatInitDart _init;
   late final BitchatInitWithKeyDart _initWithKey;
   late final BitchatStringDart _myShortId;
@@ -229,6 +419,8 @@ class CoreFfi {
   late final BitchatCancelMessageDart _cancelMessage;
   late final BitchatGetDeliveryStateDart _getDeliveryState;
   late final BitchatStringDart _pollDeliveryEvents;
+  late final BitchatStringDart _pollAuthEvents;
+  late final BitchatStringDart _pendingMessageRequests;
   late final BitchatStringDart _getDiagnostics;
   late final BitchatPumpOutboxDart _pumpOutbox;
   late final BitchatPeerDart _initiateHandshake;
@@ -261,9 +453,15 @@ class CoreFfi {
   late final BitchatSetVolatileSessionDart _setVolatileSession;
   late final BitchatGetDeliveryStateDart _getVolatileState;
   late final BitchatGetDeliveryStateDart _getPeerId;
+  late final BitchatToggleFeatureDart _setCoverTraffic;
+  late final BitchatStringDart _getCoverStatus;
+  late final BitchatToggleFeatureDart _setSyncEnabled;
+  late final BitchatInitiateSyncDart _initiateSync;
+  late final BitchatStringDart _getSyncStatus;
 
   bool loadLibrary() {
     if (_initialized) return true;
+    lastAbiError = null;
     try {
       if (Platform.isAndroid) {
         _lib = DynamicLibrary.open('libbitchat2_core.so');
@@ -271,6 +469,36 @@ class CoreFfi {
         _lib = DynamicLibrary.process();
       }
 
+      _freeString = _lib!.lookupFunction<BitchatFreeStringC, BitchatFreeStringDart>('bitchat_free_string');
+      _freeBytes = _lib!.lookupFunction<BitchatFreeBytesC, BitchatFreeBytesDart>('bitchat_free_bytes');
+      _lastError = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_last_error');
+
+      try {
+        _abiVersion = _lib!.lookupFunction<BitchatAbiVersionC, BitchatAbiVersionDart>('bitchat_abi_version');
+        _checkAbiVersion = _lib!.lookupFunction<BitchatCheckAbiVersionC, BitchatCheckAbiVersionDart>('bitchat_check_abi_version');
+      } catch (e) {
+        lastAbiError = 'ABI_MISMATCH: Incompatible native library (missing Phase 6 ABI v$expectedAbiVersion exports)';
+        return false;
+      }
+
+      if (_checkAbiVersion(expectedAbiVersion) != 0) {
+        final actualVer = _abiVersion();
+        final errPtr = _lastError();
+        if (errPtr != nullptr) {
+          lastAbiError = errPtr.toDartString();
+          _freeString(errPtr);
+        } else {
+          lastAbiError = 'ABI_MISMATCH: host expects ABI v$expectedAbiVersion, native library provides v$actualVer';
+        }
+        return false;
+      }
+
+      _buildInfo = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_build_info');
+      _runtimeGeneration = _lib!.lookupFunction<BitchatRuntimeGenC, BitchatRuntimeGenDart>('bitchat_runtime_generation');
+      _attachUi = _lib!.lookupFunction<BitchatRuntimeGenC, BitchatRuntimeGenDart>('bitchat_attach_ui');
+      _detachUi = _lib!.lookupFunction<BitchatGatewayStopC, BitchatGatewayStopDart>('bitchat_detach_ui');
+      _shutdown = _lib!.lookupFunction<BitchatGatewayStopC, BitchatGatewayStopDart>('bitchat_shutdown');
+      _destructiveResetStorage = _lib!.lookupFunction<BitchatDestructiveResetC, BitchatDestructiveResetDart>('bitchat_destructive_reset_storage');
       _init = _lib!.lookupFunction<BitchatInitC, BitchatInitDart>('bitchat_init');
       _initWithKey = _lib!.lookupFunction<BitchatInitWithKeyC, BitchatInitWithKeyDart>('bitchat_init_with_key');
       _myShortId = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_my_short_id');
@@ -282,6 +510,8 @@ class CoreFfi {
       _cancelMessage = _lib!.lookupFunction<BitchatCancelMessageC, BitchatCancelMessageDart>('bitchat_cancel_message');
       _getDeliveryState = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_delivery_state');
       _pollDeliveryEvents = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_poll_delivery_events');
+      _pollAuthEvents = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_poll_auth_events');
+      _pendingMessageRequests = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_pending_message_requests');
       _getDiagnostics = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_get_diagnostics');
       _pumpOutbox = _lib!.lookupFunction<BitchatPumpOutboxC, BitchatPumpOutboxDart>('bitchat_pump_outbox');
       _initiateHandshake = _lib!.lookupFunction<BitchatPeerC, BitchatPeerDart>('bitchat_initiate_handshake');
@@ -291,8 +521,6 @@ class CoreFfi {
       _onFrameReceived = _lib!.lookupFunction<BitchatFrameRecvC, BitchatFrameRecvDart>('bitchat_on_frame_received');
       _pollOutbound = _lib!.lookupFunction<BitchatPollOutboundC, BitchatPollOutboundDart>('bitchat_poll_outbound');
       _pollInbound = _lib!.lookupFunction<BitchatPollInboundC, BitchatPollInboundDart>('bitchat_poll_inbound');
-      _freeString = _lib!.lookupFunction<BitchatFreeStringC, BitchatFreeStringDart>('bitchat_free_string');
-      _freeBytes = _lib!.lookupFunction<BitchatFreeBytesC, BitchatFreeBytesDart>('bitchat_free_bytes');
       _gatewayStart = _lib!.lookupFunction<BitchatGatewayStartC, BitchatGatewayStartDart>('bitchat_gateway_start');
       _gatewayStop = _lib!.lookupFunction<BitchatGatewayStopC, BitchatGatewayStopDart>('bitchat_gateway_stop');
       _gatewayExportContact = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_gateway_export_contact');
@@ -314,10 +542,18 @@ class CoreFfi {
       _setVolatileSession = _lib!.lookupFunction<BitchatSetVolatileSessionC, BitchatSetVolatileSessionDart>('bitchat_set_volatile_session');
       _getVolatileState = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_volatile_state');
       _getPeerId = _lib!.lookupFunction<BitchatGetDeliveryStateC, BitchatGetDeliveryStateDart>('bitchat_get_peer_id');
+      _setCoverTraffic = _lib!.lookupFunction<BitchatToggleFeatureC, BitchatToggleFeatureDart>('bitchat_set_cover_traffic');
+      _getCoverStatus = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_get_cover_status');
+      _setSyncEnabled = _lib!.lookupFunction<BitchatToggleFeatureC, BitchatToggleFeatureDart>('bitchat_set_sync_enabled');
+      _initiateSync = _lib!.lookupFunction<BitchatInitiateSyncC, BitchatInitiateSyncDart>('bitchat_initiate_sync');
+      _getSyncStatus = _lib!.lookupFunction<BitchatStringC, BitchatStringDart>('bitchat_get_sync_status');
 
       _initialized = true;
       return true;
     } catch (e) {
+      if (Platform.isAndroid && lastAbiError == null) {
+        lastAbiError = 'ABI_LOAD_ERROR: Failed to bind native library symbols: $e';
+      }
       return false;
     }
   }
@@ -878,9 +1114,166 @@ class CoreFfi {
       calloc.free(ptr);
     }
   }
+
+  int getAbiVersion() {
+    if (!_initialized) return 0;
+    return _abiVersion();
+  }
+
+  RustBuildInfo? getBuildInfo() {
+    if (!_initialized) return null;
+    final ptr = _buildInfo();
+    if (ptr == nullptr) return null;
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      return RustBuildInfo.fromJson(jsonDecode(jsonStr) as Map<String, dynamic>);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? getLastError() {
+    if (_lib == null) return lastAbiError;
+    try {
+      final ptr = _lastError();
+      if (ptr == nullptr) return lastAbiError;
+      final msg = ptr.toDartString();
+      _freeString(ptr);
+      return msg;
+    } catch (_) {
+      return lastAbiError;
+    }
+  }
+
+  int runtimeGeneration() => _initialized ? _runtimeGeneration() : 0;
+
+  int attachUi() => _initialized ? _attachUi() : 0;
+
+  bool detachUi() => _initialized && _detachUi() == 0;
+
+  bool shutdown() => _initialized && _shutdown() == 0;
+
+  bool destructiveResetStorage(String storagePath, {bool confirm = false}) {
+    if (!_initialized) return false;
+    final pathPtr = storagePath.toNativeUtf8();
+    try {
+      return _destructiveResetStorage(pathPtr, confirm ? 1 : 0) == 0;
+    } finally {
+      calloc.free(pathPtr);
+    }
+  }
+
+  List<RustAuthEvent> pollAuthEvents() {
+    if (!_initialized) return [];
+    final ptr = _pollAuthEvents();
+    if (ptr == nullptr) return [];
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      final list = jsonDecode(jsonStr) as List<dynamic>;
+      return list
+          .map((e) => RustAuthEvent.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  List<RustPendingMessageRequest> pendingMessageRequests() {
+    if (!_initialized) return [];
+    final ptr = _pendingMessageRequests();
+    if (ptr == nullptr) return [];
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      final list = jsonDecode(jsonStr) as List<dynamic>;
+      return list
+          .map(
+            (e) =>
+                RustPendingMessageRequest.fromJson(e as Map<String, dynamic>),
+          )
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  bool setCoverTraffic(bool enabled) {
+    if (!_initialized) return false;
+    return _setCoverTraffic(enabled ? 1 : 0) == 1;
+  }
+
+  RustCoverStatus? getCoverStatus() {
+    if (!_initialized) return null;
+    final ptr = _getCoverStatus();
+    if (ptr == nullptr) return null;
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      return RustCoverStatus.fromJson(
+        jsonDecode(jsonStr) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool setSyncEnabled(bool enabled) {
+    if (!_initialized) return false;
+    return _setSyncEnabled(enabled ? 1 : 0) == 1;
+  }
+
+  Map<String, dynamic>? initiateSync(String peerIdHex, {bool useMerkle = false}) {
+    if (!_initialized) return null;
+    final peerPtr = peerIdHex.toNativeUtf8();
+    try {
+      final ptr = _initiateSync(peerPtr, useMerkle ? 1 : 0);
+      if (ptr == nullptr) return null;
+      final jsonStr = ptr.toDartString();
+      _freeString(ptr);
+      return jsonDecode(jsonStr) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    } finally {
+      calloc.free(peerPtr);
+    }
+  }
+
+  RustSyncStatus? getSyncStatus() {
+    if (!_initialized) return null;
+    final ptr = _getSyncStatus();
+    if (ptr == nullptr) return null;
+    final jsonStr = ptr.toDartString();
+    _freeString(ptr);
+    try {
+      return RustSyncStatus.fromJson(
+        jsonDecode(jsonStr) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 // FFI native signatures
+typedef BitchatAbiVersionC = Uint32 Function();
+typedef BitchatAbiVersionDart = int Function();
+
+typedef BitchatCheckAbiVersionC = Int32 Function(Uint32 expectedAbi);
+typedef BitchatCheckAbiVersionDart = int Function(int expectedAbi);
+
+typedef BitchatRuntimeGenC = Uint64 Function();
+typedef BitchatRuntimeGenDart = int Function();
+
+typedef BitchatDestructiveResetC = Int32 Function(Pointer<Utf8> storagePath, Uint8 confirm);
+typedef BitchatDestructiveResetDart = int Function(Pointer<Utf8> storagePath, int confirm);
+
+typedef BitchatToggleFeatureC = Int32 Function(Uint8 enabled);
+typedef BitchatToggleFeatureDart = int Function(int enabled);
+
+typedef BitchatInitiateSyncC = Pointer<Utf8> Function(Pointer<Utf8> peerId, Uint8 useMerkle);
+typedef BitchatInitiateSyncDart = Pointer<Utf8> Function(Pointer<Utf8> peerId, int useMerkle);
 typedef BitchatInitC = Pointer<Utf8> Function(Pointer<Utf8> storagePath);
 typedef BitchatInitDart = Pointer<Utf8> Function(Pointer<Utf8> storagePath);
 

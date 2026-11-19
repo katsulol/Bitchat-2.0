@@ -196,6 +196,19 @@ class MainActivity : FlutterActivity(), BitchatBleService.BleEventListener {
         if (requestCode == PERMISSION_REQUEST_CODE) {
             if (hasAllPermissions()) {
                 pendingShortIdHex?.let { startBleService(it) }
+            } else {
+                val missing = getRequiredPermissions().filter {
+                    ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+                }
+                val gen = activeEngineGen
+                runOnUiThread {
+                    if (gen == uiGeneration.get()) {
+                        methodChannel?.invokeMethod(
+                            "onPermissionsDenied",
+                            mapOf("missing" to missing)
+                        )
+                    }
+                }
             }
         }
     }
