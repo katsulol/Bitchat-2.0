@@ -7,10 +7,14 @@ use bitchat2_core::envelope::{Envelope, Flags, MsgType, CURRENT_VERSION, MAX_HOP
 use bitchat2_core::gateway::iroh_link::accept_gateway_conn;
 use bitchat2_core::gateway::GatewayBridge;
 use bitchat2_core::identity::Identity;
+use bitchat2_core::mesh::policy::NaiveFlood;
+use bitchat2_core::mesh::relay::MeshNode;
 use bitchat2_core::mesh::resource::{
-    BatteryBand, NetworkMetering, RelayResourceProfile, ResourceAdmission, ResourceBudgetManager,
-    ResourceSnapshot, ThermalState, TrafficOrigin, TriState,
+    estimate_fragmented_wire_bytes, BatteryBand, NetworkMetering, RelayResourceProfile,
+    ResourceAdmission, ResourceBudgetManager, ResourceSnapshot, ThermalState, TrafficOrigin,
+    TriState, MAX_TRACKED_NEIGHBOR_WINDOWS,
 };
+use bitchat2_core::transport::sim::SimNetwork;
 use iroh::RelayMode;
 
 fn fresh_temp_dir(label: &str) -> PathBuf {
@@ -400,4 +404,229 @@ async fn test_t4_control_reservation_and_gateway_rate_limiter() {
 
     peer_bridge.close().await;
     host.close().await;
+}
+
+#[tokio::test]
+async fn test_t3_small_mtu_fragment_wire_byte_metering() {
+    // 1. Exact fragment byte helper matches Fragmenter split counts (FRAGMENT_HEADER_LEN = 4)
+    // mtu=80 => chunk_size=76 => 160B envelope splits into 3 fragments (80 + 80 + 12 = 172 wire bytes)
+    assert_eq!(estimate_fragmented_wire_bytes(160, 80), 172);
+    assert_eq!(estimate_fragmented_wire_bytes(50, 512), 54);
+
+    // 2. Real MeshNode with small BLE MTU (80B) meters fragmented wire bytes across 3-node chain
+    let net = SimNetwork::new(6031);
+    let id_a = Identity::generate();
+    let id_r = Identity::generate();
+    let id_b = Identity::generate();
+    let s_a = id_a.short_id();
+    let s_r = id_r.short_id();
+    let s_b = id_b.short_id();
+    net.set_bidirectional_link(s_a, s_r, Duration::ZERO, 0.0);
+    net.set_bidirectional_link(s_r, s_b, Duration::ZERO, 0.0);
+
+    let now = Instant::now();
+    let budget = std::sync::Arc::new(std::sync::Mutex::new(ResourceBudgetManager::new(
+        RelayResourceProfile::Minimal,
+        Duration::from_secs(10),
+        now,
+    )));
+
+    let mut node_a = MeshNode::new(id_a, net.create_node(s_a), Box::new(NaiveFlood)).with_mtu(80);
+    let mut node_r = MeshNode::new(id_r, net.create_node(s_r), Box::new(NaiveFlood)).with_mtu(80);
+    node_r.set_resource_budget(std::sync::Arc::clone(&budget));
+    let mut node_b = MeshNode::new(id_b, net.create_node(s_b), Box::new(NaiveFlood)).with_mtu(80);
+
+    // Send 4 large multi-fragment broadcasts (~400B payload => ~431B encoded => 6 frags * 4B + 431 = 455B wire each).
+    // Minimal per-neighbor cap is 4096 B/s: 9 x 455 = 4095 B (all 9 admitted), 10th hits 4550 B > 4096 B!
+    for i in 0..10u8 {
+        node_a
+            .send_broadcast(vec![b'X' + (i % 4); 400])
+            .await
+            .unwrap();
+    }
+    for _ in 0..150 {
+        while node_r.step_at(now).await.unwrap_or(false) {}
+        while node_b.step_at(now).await.unwrap_or(false) {}
+    }
+
+    let r_stats = node_r.stats();
+    assert!(
+        r_stats.transit_bytes_forwarded > 0 && r_stats.transit_packets_dropped_policy >= 1,
+        "Small-MTU fragmented forwarding must meter exact fragmented wire bytes and enforce cap: {r_stats:?}"
+    );
+    assert!(node_b.stats().deliveries <= 9);
+}
+
+#[test]
+fn test_t3_ack_starvation_resistance_bounded_control_and_churn_cap() {
+    let now = Instant::now();
+    let mut mgr =
+        ResourceBudgetManager::new(RelayResourceProfile::Minimal, Duration::from_secs(10), now);
+    let n1 = bitchat2_core::identity::ShortId([0xA1; 8]);
+    let n2 = bitchat2_core::identity::ShortId([0xA2; 8]);
+
+    // Exhaust 75% data cap (6144 B in Minimal) with Chat
+    assert!(matches!(
+        mgr.check_and_record(
+            TrafficOrigin::TransitRelay { neighbor: n1 },
+            MsgType::Chat,
+            3072,
+            now
+        ),
+        ResourceAdmission::Admitted { .. }
+    ));
+    assert!(matches!(
+        mgr.check_and_record(
+            TrafficOrigin::TransitRelay { neighbor: n2 },
+            MsgType::Chat,
+            3072,
+            now
+        ),
+        ResourceAdmission::Admitted { .. }
+    ));
+    // Data is now rejected to preserve 25% control capacity
+    assert_eq!(
+        mgr.check_and_record(
+            TrafficOrigin::TransitRelay { neighbor: n2 },
+            MsgType::Chat,
+            256,
+            now
+        ),
+        ResourceAdmission::RejectedControlCapacityReserved
+    );
+
+    // Genuine Ack passes without starving
+    assert!(matches!(
+        mgr.check_and_record(
+            TrafficOrigin::TransitRelay { neighbor: n1 },
+            MsgType::Ack,
+            256,
+            now
+        ),
+        ResourceAdmission::Admitted { .. }
+    ));
+
+    // Spoofed control-frame flood from a single neighbor CANNOT bypass per-neighbor fairness indefinitely!
+    // Even if total budget is raised to Balanced (32 KiB/s, 16 KiB/s per neighbor), saturating control cap fails cleanly.
+    let mut bal_mgr =
+        ResourceBudgetManager::new(RelayResourceProfile::Balanced, Duration::from_secs(10), now);
+    let attacker = bitchat2_core::identity::ShortId([0xEE; 8]);
+    let mut admitted_ctrl = 0usize;
+    let mut rejected_ctrl = false;
+    for _ in 0..40 {
+        match bal_mgr.check_and_record(
+            TrafficOrigin::TransitRelay { neighbor: attacker },
+            MsgType::Handshake,
+            1024,
+            now,
+        ) {
+            ResourceAdmission::Admitted { .. } => {
+                admitted_ctrl += 1;
+                bal_mgr.release_queued_item();
+            }
+            ResourceAdmission::RejectedNeighborFairnessExceeded => {
+                rejected_ctrl = true;
+                break;
+            }
+            other => panic!("Unexpected rejection: {other:?}"),
+        }
+    }
+    assert!(
+        rejected_ctrl && admitted_ctrl == 16,
+        "Single-neighbor control flood must be capped (admitted={admitted_ctrl}, rejected={rejected_ctrl})"
+    );
+
+    // Identity churn of > 256 neighbors stays cleanly bounded without panicking or growing unboundedly
+    for i in 0..(MAX_TRACKED_NEIGHBOR_WINDOWS + 64) {
+        let sid = bitchat2_core::identity::ShortId((i as u64).to_be_bytes());
+        let _ = bal_mgr.check_and_record(
+            TrafficOrigin::TransitRelay { neighbor: sid },
+            MsgType::Chat,
+            64,
+            now + Duration::from_millis(i as u64),
+        );
+        bal_mgr.release_queued_item();
+    }
+}
+
+#[test]
+fn test_t3_stale_telemetry_automatic_conservative_degradation() {
+    let t0 = Instant::now();
+    let mut mgr =
+        ResourceBudgetManager::new(RelayResourceProfile::Balanced, Duration::from_secs(10), t0);
+    mgr.set_telemetry_stale_after(Duration::from_secs(30));
+
+    // Fresh telemetry: charging + high battery + nominal thermal -> Assisted
+    let mut snap = ResourceSnapshot::default_at(t0 + Duration::from_secs(15));
+    snap.charging = TriState::True;
+    snap.battery_band = BatteryBand::High;
+    assert_eq!(mgr.update_snapshot(&snap), RelayResourceProfile::Assisted);
+    assert_eq!(mgr.active_profile(), RelayResourceProfile::Assisted);
+
+    // Advance past 30s staleness threshold without new OS updates -> conservative downgrade from Assisted -> Balanced
+    let stale_now = t0 + Duration::from_secs(50);
+    assert_eq!(
+        mgr.refresh_stale_telemetry(stale_now),
+        RelayResourceProfile::Balanced
+    );
+}
+
+#[tokio::test]
+async fn test_t3_pause_resume_preserves_identity_runtime_and_single_delivery() {
+    let mut nodes = vec![
+        NodeHarness::new("t3_pr_a").await,
+        NodeHarness::new("t3_pr_r").await,
+        NodeHarness::new("t3_pr_b").await,
+    ];
+    connect_ble(&mut nodes, 0, 1).await;
+    connect_ble(&mut nodes, 1, 2).await;
+    pump_line(&mut nodes, 10).await;
+
+    let r_pid_before = nodes[1].svc.my_peer_id();
+    let r_sid_before = nodes[1].svc.my_short_id();
+
+    assert_eq!(
+        nodes[1]
+            .svc
+            .set_relay_contribution_profile("receive_only")
+            .unwrap(),
+        "Paused"
+    );
+    nodes[0]
+        .svc
+        .send_broadcast("t3-paused-drop".into())
+        .await
+        .unwrap();
+    pump_line(&mut nodes, 12).await;
+    assert!(!nodes[2].inbox.iter().any(|m| m.text == "t3-paused-drop"));
+
+    assert_eq!(
+        nodes[1]
+            .svc
+            .set_relay_contribution_profile("balanced")
+            .unwrap(),
+        "Balanced"
+    );
+    assert_eq!(nodes[1].svc.my_peer_id(), r_pid_before);
+    assert_eq!(nodes[1].svc.my_short_id(), r_sid_before);
+
+    nodes[0]
+        .svc
+        .send_broadcast("t3-resumed-deliver".into())
+        .await
+        .unwrap();
+    pump_line(&mut nodes, 12).await;
+    let delivered_count = nodes[2]
+        .inbox
+        .iter()
+        .filter(|m| m.text == "t3-resumed-deliver")
+        .count();
+    assert_eq!(
+        delivered_count, 1,
+        "Resumed runtime must deliver exactly once without duplicate runtime or duplicate display"
+    );
+
+    for n in nodes {
+        n.cleanup().await;
+    }
 }

@@ -563,14 +563,21 @@ impl<T: Transport> MeshNode<T> {
         }
 
         // Gate third-party transit forwarding through local ResourceBudgetManager
-        let (budget_reserved, delay_mult_bps) =
-            match self.check_transit_budget(from_peer, envelope.msg_type, assembled.len(), now) {
-                Ok(v) => v,
-                Err(()) => {
-                    self.stats.inc_transit_dropped_policy();
-                    return Ok(());
-                }
-            };
+        // metering exact link-layer fragmented wire bytes (envelope + 4B/frag headers).
+        let metered_wire_bytes =
+            crate::mesh::resource::estimate_fragmented_wire_bytes(assembled.len(), self.mtu);
+        let (budget_reserved, delay_mult_bps) = match self.check_transit_budget(
+            from_peer,
+            envelope.msg_type,
+            metered_wire_bytes,
+            now,
+        ) {
+            Ok(v) => v,
+            Err(()) => {
+                self.stats.inc_transit_dropped_policy();
+                return Ok(());
+            }
+        };
 
         // Forward to internet gateway if remote route configured
         if let Some(bridge) = &self.gateway_bridge {
@@ -695,10 +702,12 @@ impl<T: Transport> MeshNode<T> {
                 });
                 self.stats.inc_deliveries();
             } else if !env.recipient_short_id.is_broadcast() {
+                let metered_wire_bytes =
+                    crate::mesh::resource::estimate_fragmented_wire_bytes(imported.len(), self.mtu);
                 let (budget_reserved, _) = match self.check_transit_budget(
                     env.sender_short_id,
                     env.msg_type,
-                    imported.len(),
+                    metered_wire_bytes,
                     now,
                 ) {
                     Ok(v) => v,

@@ -19,6 +19,27 @@ use crate::gateway::fairness::CONTROL_PLANE_RESERVATION_RATIO;
 use crate::identity::ShortId;
 use crate::mesh::policy::{RelayContext, RelayPolicy};
 
+/// Default duration after which unchanged OS battery/charging telemetry degrades conservatively.
+pub const DEFAULT_TELEMETRY_STALE_AFTER: Duration = Duration::from_secs(300);
+/// Hard cap on per-neighbor window entries to bound memory under identity churn.
+pub const MAX_TRACKED_NEIGHBOR_WINDOWS: usize = 256;
+
+/// Compute exact link-layer wire bytes transmitted for an encoded `Envelope` under `mtu`,
+/// accounting for the 4-byte `FragmentHeader` per fragment.
+pub fn estimate_fragmented_wire_bytes(encoded_len: usize, mtu: usize) -> usize {
+    let hdr = crate::mesh::fragment::FRAGMENT_HEADER_LEN;
+    if mtu <= hdr {
+        return encoded_len.saturating_add(hdr);
+    }
+    let chunk_size = mtu - hdr;
+    let num_chunks = if encoded_len == 0 {
+        1
+    } else {
+        encoded_len.div_ceil(chunk_size)
+    };
+    encoded_len.saturating_add(num_chunks.saturating_mul(hdr))
+}
+
 /// Three-valued platform observation state where OS APIs may not report a definite boolean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriState {
@@ -234,10 +255,14 @@ pub struct ResourceBudgetManager {
     active_profile: RelayResourceProfile,
     last_profile_change: Instant,
     min_upgrade_dwell: Duration,
+    telemetry_stale_after: Duration,
+    last_telemetry_update: Instant,
+    last_snapshot: ResourceSnapshot,
     window_start: Instant,
     transit_bytes_in_window: usize,
     transit_data_bytes_in_window: usize,
     neighbor_windows: HashMap<ShortId, NeighborTransitWindow>,
+    neighbor_control_windows: HashMap<ShortId, NeighborTransitWindow>,
     current_transit_queue: usize,
 }
 
@@ -251,15 +276,59 @@ impl ResourceBudgetManager {
             active_profile: initial_profile,
             last_profile_change: now,
             min_upgrade_dwell,
+            telemetry_stale_after: DEFAULT_TELEMETRY_STALE_AFTER,
+            last_telemetry_update: now,
+            last_snapshot: ResourceSnapshot::default_at(now),
             window_start: now,
             transit_bytes_in_window: 0,
             transit_data_bytes_in_window: 0,
             neighbor_windows: HashMap::new(),
+            neighbor_control_windows: HashMap::new(),
             current_transit_queue: 0,
         }
     }
 
     pub fn active_profile(&self) -> RelayResourceProfile {
+        self.active_profile
+    }
+
+    pub fn set_telemetry_stale_after(&mut self, duration: Duration) {
+        self.telemetry_stale_after = duration;
+    }
+
+    /// Degrade conservatively if telemetry becomes stale (e.g. OS stopped delivering updates
+    /// while previously charging), preserving explicit user pause and worst-case thermal cap.
+    pub fn refresh_stale_telemetry(&mut self, now: Instant) -> RelayResourceProfile {
+        if now.saturating_duration_since(self.last_telemetry_update) > self.telemetry_stale_after {
+            let mut conservative = ResourceSnapshot {
+                charging: TriState::Unknown,
+                battery_band: BatteryBand::Unknown,
+                power_save_mode: TriState::Unknown,
+                thermal_state: self.last_snapshot.thermal_state,
+                network_metering: NetworkMetering::Unknown,
+                ble_ready: self.last_snapshot.ble_ready,
+                is_foreground: self.last_snapshot.is_foreground,
+                user_paused_relaying: self.last_snapshot.user_paused_relaying,
+                user_profile_override: self
+                    .last_snapshot
+                    .user_profile_override
+                    .map(|p| p.min(RelayResourceProfile::Balanced)),
+                timestamp: now,
+            };
+            if conservative.user_paused_relaying
+                || !conservative.ble_ready
+                || conservative.thermal_state == ThermalState::Critical
+            {
+                self.active_profile = RelayResourceProfile::Paused;
+            } else {
+                conservative.timestamp = now;
+                let target = conservative.compute_raw_profile();
+                if target < self.active_profile {
+                    self.active_profile = target;
+                    self.last_profile_change = now;
+                }
+            }
+        }
         self.active_profile
     }
 
@@ -281,6 +350,8 @@ impl ResourceBudgetManager {
     ) -> RelayResourceProfile {
         let target = snapshot.compute_raw_profile();
         let now = snapshot.timestamp;
+        self.last_telemetry_update = now;
+        self.last_snapshot = snapshot.clone();
 
         if target < self.active_profile {
             // Immediate safety downgrade
@@ -295,6 +366,18 @@ impl ResourceBudgetManager {
             self.last_profile_change = now;
         }
         self.active_profile
+    }
+
+    fn bound_window_map(map: &mut HashMap<ShortId, NeighborTransitWindow>) {
+        if map.len() >= MAX_TRACKED_NEIGHBOR_WINDOWS {
+            if let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, w)| w.window_start)
+                .map(|(k, _)| *k)
+            {
+                map.remove(&oldest);
+            }
+        }
     }
 
     /// Evaluate and record byte budget consumption for a packet (including all fragments).
@@ -317,9 +400,11 @@ impl ResourceBudgetManager {
             unreachable!()
         };
 
+        self.refresh_stale_telemetry(now);
+
         let is_control = matches!(msg_type, MsgType::Handshake | MsgType::Ack);
 
-        // In Paused profile, drop all non-control transit forwarding
+        // In Paused profile, drop all third-party transit forwarding
         if self.active_profile == RelayResourceProfile::Paused {
             return ResourceAdmission::RejectedPaused;
         }
@@ -360,21 +445,47 @@ impl ResourceBudgetManager {
             return ResourceAdmission::RejectedTransitBudgetExhausted;
         }
 
-        // Per-neighbor fairness check (1-second window)
+        // Per-neighbor fairness check (1-second window), bounded separately for data vs control
+        // so reserved ACK/Handshake capacity cannot be abused as an unlimited flood bypass.
         let per_nbr_limit = self.active_profile.per_neighbor_bytes_per_sec();
-        let nbr_win = self
-            .neighbor_windows
-            .entry(neighbor)
-            .or_insert(NeighborTransitWindow {
-                window_start: now,
-                bytes_used: 0,
-            });
-        if now.saturating_duration_since(nbr_win.window_start) >= Duration::from_secs(1) {
-            nbr_win.window_start = now;
-            nbr_win.bytes_used = 0;
-        }
-        if !is_control && nbr_win.bytes_used.saturating_add(total_wire_bytes) > per_nbr_limit {
-            return ResourceAdmission::RejectedNeighborFairnessExceeded;
+        if is_control {
+            if !self.neighbor_control_windows.contains_key(&neighbor) {
+                Self::bound_window_map(&mut self.neighbor_control_windows);
+            }
+            let ctrl_win =
+                self.neighbor_control_windows
+                    .entry(neighbor)
+                    .or_insert(NeighborTransitWindow {
+                        window_start: now,
+                        bytes_used: 0,
+                    });
+            if now.saturating_duration_since(ctrl_win.window_start) >= Duration::from_secs(1) {
+                ctrl_win.window_start = now;
+                ctrl_win.bytes_used = 0;
+            }
+            if ctrl_win.bytes_used.saturating_add(total_wire_bytes) > per_nbr_limit {
+                return ResourceAdmission::RejectedNeighborFairnessExceeded;
+            }
+            ctrl_win.bytes_used = ctrl_win.bytes_used.saturating_add(total_wire_bytes);
+        } else {
+            if !self.neighbor_windows.contains_key(&neighbor) {
+                Self::bound_window_map(&mut self.neighbor_windows);
+            }
+            let nbr_win = self
+                .neighbor_windows
+                .entry(neighbor)
+                .or_insert(NeighborTransitWindow {
+                    window_start: now,
+                    bytes_used: 0,
+                });
+            if now.saturating_duration_since(nbr_win.window_start) >= Duration::from_secs(1) {
+                nbr_win.window_start = now;
+                nbr_win.bytes_used = 0;
+            }
+            if nbr_win.bytes_used.saturating_add(total_wire_bytes) > per_nbr_limit {
+                return ResourceAdmission::RejectedNeighborFairnessExceeded;
+            }
+            nbr_win.bytes_used = nbr_win.bytes_used.saturating_add(total_wire_bytes);
         }
 
         // Record consumption
@@ -386,7 +497,6 @@ impl ResourceBudgetManager {
                 .transit_data_bytes_in_window
                 .saturating_add(total_wire_bytes);
         }
-        nbr_win.bytes_used = nbr_win.bytes_used.saturating_add(total_wire_bytes);
         self.current_transit_queue = self.current_transit_queue.saturating_add(1);
 
         ResourceAdmission::Admitted {

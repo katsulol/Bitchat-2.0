@@ -12,8 +12,8 @@
 |---|---|---|---|---|---|
 | **Task 0** | Freeze baseline, map live code, reconcile gaps & ownership | Baseline | **PASS** | `d71dba8` | `docs/PHASE6_BASELINE.md`, `docs/DECISIONS.md` (ADR-0017), `170/170` Rust tests + `5/5` Flutter tests verified at `6638a79` |
 | **Task 1** | Live authorization & explicit link identity states (`UnboundLink`/`ClaimedShortId`/`VerifiedPeer`) | P0 | **PASS** | `c097374` | `relay.rs`, `trust/model.rs`, `api.rs`, `ffi.rs`, 6 new public-runtime tests in `core/tests/test_phase6_auth_e2e.rs` (`176/176` Cargo tests pass) |
-| **Task 2** | Encrypted SQLite trust persistence & fail-closed gateway startup wiring | P0 | **PASS** | *pending commit* | `core/src/trust/sqlite.rs` (`bitchat_trust.db`), `GatewayConfig::seed_consent_state`, `api.rs` + `bridge.rs` startup/persist wiring, 4 E2E + 2 unit tests (`182/182` Cargo tests pass) |
-| **Task 3** | Live resource metering (fragmented wire bytes, control cap, stale telemetry) | P0 | Pending | — | Depends on Task 0 + 1 |
+| **Task 2** | Encrypted SQLite trust persistence & fail-closed gateway startup wiring | P0 | **PASS** | `cd1b573` | `core/src/trust/sqlite.rs` (`bitchat_trust.db`), `GatewayConfig::seed_consent_state`, `api.rs` + `bridge.rs` startup/persist wiring, 4 E2E + 2 unit tests (`182/182` Cargo tests pass) |
+| **Task 3** | Live resource metering (fragmented wire bytes, control cap, stale telemetry) | P0 | **PASS** | *pending commit* | `resource.rs` (`estimate_fragmented_wire_bytes`, `refresh_stale_telemetry`, per-neighbor control cap, 256-entry bound), `relay.rs`, 4 new tests in `test_resource_forwarding_e2e.rs` (`186/186` Cargo tests pass) |
 | **Task 4** | Protected root identity (`BCID` v1) & crash-safe atomic migration | P0 | Pending | — | Depends on Task 0 |
 | **Task 5** | Runtime lifecycle ownership, Iroh path diagnostics & 43+ FFI safety audit | P1 | Pending | — | Depends on Tasks 1–4 |
 | **Task 6** | Public-runtime release-blocker regression suite (`PHASE6_RUNTIME_ACCEPTANCE.md`) | P1 | Pending | — | Depends on Tasks 1–5 |
