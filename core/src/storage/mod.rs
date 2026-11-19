@@ -14,7 +14,10 @@ pub use key::{
     WrappedKeyFileProvider,
 };
 pub use memory::MemoryOutboxStore;
-pub use outbox::{MessageMode, OutboxLimits, OutboxRecord, OutboxStore, SendRejection, SendResult};
+pub use outbox::{
+    MessageMode, OutboxLimits, OutboxRecord, OutboxStore, SendRejection, SendResult,
+    DEADLINE_PRESET_15M_SECS, DEADLINE_PRESET_1H_SECS, DEADLINE_PRESET_2M_SECS, MIN_DEADLINE_SECS,
+};
 pub use sqlite::SqliteOutboxStore;
 pub use volatile::{
     VolatileFrameKind, VolatileMessageEntry, VolatileNegotiationFrame, VolatileSendCheck,
@@ -87,10 +90,23 @@ impl OutboxManager {
             });
         }
 
-        // Determine TTL bounded by mode limits
-        let ttl = ttl_override.unwrap_or_else(|| mode.default_ttl());
-        let bounded_ttl = ttl.min(mode.max_ttl());
-        let expires_at = now.saturating_add(bounded_ttl.as_secs());
+        // Validate TTL against mode bounds strictly (never clamp invalid deadlines silently)
+        let ttl = match ttl_override {
+            Some(req_ttl) => {
+                let req_secs = req_ttl.as_secs();
+                let max_ttl = mode.max_ttl();
+                if req_secs < MIN_DEADLINE_SECS || req_ttl > max_ttl {
+                    return SendResult::Rejected(SendRejection::InvalidDeadline {
+                        requested_secs: req_secs,
+                        min_secs: MIN_DEADLINE_SECS,
+                        max_secs: max_ttl.as_secs(),
+                    });
+                }
+                req_ttl
+            }
+            None => mode.default_ttl(),
+        };
+        let expires_at = now.saturating_add(ttl.as_secs());
 
         // Generate logical message ID once
         let mut logical_id = [0u8; 16];
@@ -157,6 +173,13 @@ impl OutboxManager {
     pub fn mark_cancelled(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
         let _ = self.memory_store.mark_cancelled(logical_id);
         let _ = self.sqlite_store.mark_cancelled(logical_id);
+        Ok(())
+    }
+
+    /// Mark message expired (terminal state).
+    pub fn mark_expired(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
+        let _ = self.memory_store.mark_expired(logical_id);
+        let _ = self.sqlite_store.mark_expired(logical_id);
         Ok(())
     }
 

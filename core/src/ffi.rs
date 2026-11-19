@@ -596,6 +596,79 @@ pub unsafe extern "C" fn bitchat_send_message(
     }
 }
 
+/// Send an end-to-end encrypted direct chat message with an explicit optional deadline (seconds).
+///
+/// Pass a negative `deadline_secs` (e.g., `-1`) to use the mode's default deadline;
+/// non-negative values (`>= 0`) are validated strictly against mode bounds (`MIN_DEADLINE_SECS..=mode.max_ttl()`).
+///
+/// # Safety
+///
+/// `recipient` and `text` must be valid null-terminated C strings.
+/// Returned logical ID string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_send_message_with_deadline(
+    recipient: *const c_char,
+    text: *const c_char,
+    mode: u8,
+    deadline_secs: i64,
+) -> *mut c_char {
+    let target = match c_str_to_string(recipient) {
+        Some(t) => t,
+        None => return std::ptr::null_mut(),
+    };
+    let body = match c_str_to_string(text) {
+        Some(b) => b,
+        None => return std::ptr::null_mut(),
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return std::ptr::null_mut(),
+    };
+
+    let deadline_opt = if deadline_secs < 0 {
+        None
+    } else {
+        Some(deadline_secs as u64)
+    };
+
+    match rt.block_on(api::send_message_with_deadline(
+        target,
+        body,
+        mode,
+        deadline_opt,
+    )) {
+        Ok(logical_id) => string_to_c_char(logical_id),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Cancel a non-terminal outbound logical message by its 32-character hex ID.
+///
+/// Returns `1` if cancelled, `0` if already terminal or not found, or `-1` on invalid input/error.
+///
+/// # Safety
+///
+/// `logical_id` must be a valid null-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_cancel_message(logical_id: *const c_char) -> i32 {
+    let id = match c_str_to_string(logical_id) {
+        Some(i) => i,
+        None => return -1,
+    };
+
+    let rt = match get_rt() {
+        Some(r) => r,
+        None => return -1,
+    };
+
+    match rt.block_on(api::cancel_message(id)) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(_) => -1,
+    }
+}
+
 /// Query delivery state of a logical message by its 32-character hex ID.
 ///
 /// # Safety

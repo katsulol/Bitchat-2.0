@@ -224,6 +224,24 @@ impl SqliteOutboxStore {
                 SendRejection::StorageError(format!("AEAD authentication/decryption failed: {e}"))
             })
     }
+
+    fn set_terminal_state(
+        &self,
+        logical_id: &[u8; 16],
+        target: DeliveryState,
+    ) -> Result<(), SendRejection> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| SendRejection::StorageError("Mutex lock failed".into()))?;
+
+        conn.execute(
+            "UPDATE outbox SET state = ?1 WHERE logical_id = ?2 AND state NOT IN (2, 3, 4, 5)",
+            params![target as u8, logical_id.as_slice()],
+        )
+        .map_err(|e| SendRejection::StorageError(format!("Update failed: {e}")))?;
+        Ok(())
+    }
 }
 
 impl OutboxStore for SqliteOutboxStore {
@@ -350,45 +368,19 @@ impl OutboxStore for SqliteOutboxStore {
     }
 
     fn mark_delivered(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| SendRejection::StorageError("Mutex lock failed".into()))?;
-
-        conn.execute(
-            "UPDATE outbox SET state = ?1 WHERE logical_id = ?2",
-            params![DeliveryState::Delivered as u8, logical_id.as_slice()],
-        )
-        .map_err(|e| SendRejection::StorageError(format!("Update failed: {e}")))?;
-        Ok(())
+        self.set_terminal_state(logical_id, DeliveryState::Delivered)
     }
 
     fn mark_failed(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| SendRejection::StorageError("Mutex lock failed".into()))?;
-
-        conn.execute(
-            "UPDATE outbox SET state = ?1 WHERE logical_id = ?2",
-            params![DeliveryState::Failed as u8, logical_id.as_slice()],
-        )
-        .map_err(|e| SendRejection::StorageError(format!("Update failed: {e}")))?;
-        Ok(())
+        self.set_terminal_state(logical_id, DeliveryState::Failed)
     }
 
     fn mark_cancelled(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| SendRejection::StorageError("Mutex lock failed".into()))?;
+        self.set_terminal_state(logical_id, DeliveryState::Cancelled)
+    }
 
-        conn.execute(
-            "UPDATE outbox SET state = ?1 WHERE logical_id = ?2",
-            params![DeliveryState::Cancelled as u8, logical_id.as_slice()],
-        )
-        .map_err(|e| SendRejection::StorageError(format!("Update failed: {e}")))?;
-        Ok(())
+    fn mark_expired(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
+        self.set_terminal_state(logical_id, DeliveryState::Expired)
     }
 
     fn get(&self, logical_id: &[u8; 16]) -> Result<Option<OutboxRecord>, SendRejection> {

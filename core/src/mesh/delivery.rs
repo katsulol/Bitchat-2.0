@@ -289,6 +289,13 @@ pub struct OutgoingRecord {
     last_emitted: Option<(DeliveryState, RouteReason)>,
 }
 
+impl OutgoingRecord {
+    /// Remaining duration before hard expiration at `now`.
+    pub fn remaining_ttl(&self, now: Instant) -> Duration {
+        self.expires_at.saturating_duration_since(now)
+    }
+}
+
 /// Action produced by the delivery coordinator on timeout check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeliveryAction {
@@ -300,6 +307,8 @@ pub enum DeliveryAction {
 pub const DEFAULT_MAX_HANDSHAKE_ATTEMPTS: u32 = 5;
 pub const DEFAULT_RECONNECT_WAKEUP_COOLDOWN: Duration = Duration::from_secs(5);
 pub const DEFAULT_ACK_TIMEOUT: Duration = Duration::from_secs(4);
+pub const MAX_CONSECUTIVE_URGENT_DISPATCHES: u32 = 3;
+pub const URGENT_DEADLINE_WINDOW: Duration = Duration::from_secs(120);
 
 /// Sender delivery coordinator managing logical message states, retries, and authenticated ACKs.
 #[derive(Debug, Clone)]
@@ -308,6 +317,7 @@ pub struct DeliveryCoordinator {
     records: HashMap<LogicalMessageId, OutgoingRecord>,
     last_reconnect_wakeup: HashMap<ShortId, Instant>,
     reconnect_cooldown: Duration,
+    edf_consecutive_urgent: u32,
 }
 
 /// Request payload to enqueue a new outgoing logical message.
@@ -329,6 +339,7 @@ impl DeliveryCoordinator {
             records: HashMap::new(),
             last_reconnect_wakeup: HashMap::new(),
             reconnect_cooldown: DEFAULT_RECONNECT_WAKEUP_COOLDOWN,
+            edf_consecutive_urgent: 0,
         }
     }
 
@@ -696,34 +707,73 @@ impl DeliveryCoordinator {
             .map(|r| r.recipient_peer_id)
             .collect();
 
-        // Pass 3: Collect ready records and emit at most 1 ReadyToRetry per recipient.
-        let mut ready: Vec<(PeerId, Instant, Instant, LogicalMessageId)> = self
-            .records
-            .values()
-            .filter(|r| {
-                !r.state.is_terminal()
-                    && !busy_recipients.contains(&r.recipient_peer_id)
-                    && now >= r.next_attempt_at
-            })
-            .map(|r| {
-                (
-                    r.recipient_peer_id,
-                    r.expires_at,
-                    r.created_at,
-                    r.logical_id,
-                )
-            })
-            .collect();
+        // Pass 3: Bounded 3:1 Earliest-Deadline-First scheduling (max 1 active attempt per recipient).
+        let mut urgent: Vec<(PeerId, Instant, Instant, LogicalMessageId)> = Vec::new();
+        let mut ordinary: Vec<(PeerId, Instant, Instant, LogicalMessageId)> = Vec::new();
+        for record in self.records.values() {
+            if record.state.is_terminal()
+                || busy_recipients.contains(&record.recipient_peer_id)
+                || now < record.next_attempt_at
+            {
+                continue;
+            }
+            let item = (
+                record.recipient_peer_id,
+                record.expires_at,
+                record.created_at,
+                record.logical_id,
+            );
+            if record.remaining_ttl(now) <= URGENT_DEADLINE_WINDOW {
+                urgent.push(item);
+            } else {
+                ordinary.push(item);
+            }
+        }
 
-        ready.sort_by(|a, b| {
+        urgent.sort_by(|a, b| {
             a.1.cmp(&b.1)
                 .then_with(|| a.2.cmp(&b.2))
                 .then_with(|| a.3.cmp(&b.3))
         });
+        ordinary.sort_by(|a, b| {
+            a.2.cmp(&b.2)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.3.cmp(&b.3))
+        });
 
         let mut picked_recipients = HashSet::new();
-        for (recipient, _, _, logical_id) in ready {
-            if picked_recipients.insert(recipient) {
+        let mut u_idx = 0usize;
+        let mut o_idx = 0usize;
+        loop {
+            while u_idx < urgent.len() && picked_recipients.contains(&urgent[u_idx].0) {
+                u_idx += 1;
+            }
+            while o_idx < ordinary.len() && picked_recipients.contains(&ordinary[o_idx].0) {
+                o_idx += 1;
+            }
+
+            let pick_ordinary = if o_idx < ordinary.len()
+                && (self.edf_consecutive_urgent >= MAX_CONSECUTIVE_URGENT_DISPATCHES
+                    || u_idx >= urgent.len())
+            {
+                true
+            } else if u_idx < urgent.len() {
+                false
+            } else {
+                break;
+            };
+
+            if pick_ordinary {
+                let (recipient, _, _, logical_id) = ordinary[o_idx];
+                o_idx += 1;
+                picked_recipients.insert(recipient);
+                self.edf_consecutive_urgent = 0;
+                actions.push(DeliveryAction::ReadyToRetry(logical_id));
+            } else {
+                let (recipient, _, _, logical_id) = urgent[u_idx];
+                u_idx += 1;
+                picked_recipients.insert(recipient);
+                self.edf_consecutive_urgent = self.edf_consecutive_urgent.saturating_add(1);
                 actions.push(DeliveryAction::ReadyToRetry(logical_id));
             }
         }

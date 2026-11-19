@@ -22,6 +22,22 @@ impl MemoryOutboxStore {
             total_bytes: 0,
         }
     }
+
+    fn set_terminal_state(
+        &mut self,
+        logical_id: &[u8; 16],
+        target: DeliveryState,
+    ) -> Result<(), SendRejection> {
+        let rec = self
+            .records
+            .get_mut(logical_id)
+            .ok_or_else(|| SendRejection::StorageError("Record not found".into()))?;
+
+        if !rec.state.is_terminal() {
+            rec.state = target;
+        }
+        Ok(())
+    }
 }
 
 impl Default for MemoryOutboxStore {
@@ -76,33 +92,19 @@ impl OutboxStore for MemoryOutboxStore {
     }
 
     fn mark_delivered(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
-        let rec = self
-            .records
-            .get_mut(logical_id)
-            .ok_or_else(|| SendRejection::StorageError("Record not found".into()))?;
-
-        rec.state = DeliveryState::Delivered;
-        Ok(())
+        self.set_terminal_state(logical_id, DeliveryState::Delivered)
     }
 
     fn mark_failed(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
-        let rec = self
-            .records
-            .get_mut(logical_id)
-            .ok_or_else(|| SendRejection::StorageError("Record not found".into()))?;
-
-        rec.state = DeliveryState::Failed;
-        Ok(())
+        self.set_terminal_state(logical_id, DeliveryState::Failed)
     }
 
     fn mark_cancelled(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
-        let rec = self
-            .records
-            .get_mut(logical_id)
-            .ok_or_else(|| SendRejection::StorageError("Record not found".into()))?;
+        self.set_terminal_state(logical_id, DeliveryState::Cancelled)
+    }
 
-        rec.state = DeliveryState::Cancelled;
-        Ok(())
+    fn mark_expired(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection> {
+        self.set_terminal_state(logical_id, DeliveryState::Expired)
     }
 
     fn get(&self, logical_id: &[u8; 16]) -> Result<Option<OutboxRecord>, SendRejection> {

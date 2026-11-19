@@ -5,6 +5,11 @@ use crate::mesh::delivery::DeliveryState;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+pub const MIN_DEADLINE_SECS: u64 = 1;
+pub const DEADLINE_PRESET_2M_SECS: u64 = 120;
+pub const DEADLINE_PRESET_15M_SECS: u64 = 900;
+pub const DEADLINE_PRESET_1H_SECS: u64 = 3600;
+
 /// Operating profile for message delivery and storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageMode {
@@ -58,10 +63,24 @@ pub struct OutboxRecord {
 /// Explicit typed rejections for send admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendRejection {
-    QueueFull { current: usize, max: usize },
-    TotalBytesExceeded { current: usize, max: usize },
-    PayloadTooLarge { max: usize, actual: usize },
+    QueueFull {
+        current: usize,
+        max: usize,
+    },
+    TotalBytesExceeded {
+        current: usize,
+        max: usize,
+    },
+    PayloadTooLarge {
+        max: usize,
+        actual: usize,
+    },
     InvalidRecipient(String),
+    InvalidDeadline {
+        requested_secs: u64,
+        min_secs: u64,
+        max_secs: u64,
+    },
     StorageLocked,
     DiskFull,
     StorageError(String),
@@ -80,6 +99,14 @@ impl std::fmt::Display for SendRejection {
                 write!(f, "Payload too large: {actual} > max {max}")
             }
             SendRejection::InvalidRecipient(reason) => write!(f, "Invalid recipient: {reason}"),
+            SendRejection::InvalidDeadline {
+                requested_secs,
+                min_secs,
+                max_secs,
+            } => write!(
+                f,
+                "Invalid deadline {requested_secs}s (allowed: {min_secs}..={max_secs}s)"
+            ),
             SendRejection::StorageLocked => write!(f, "Storage keystore is locked"),
             SendRejection::DiskFull => write!(f, "Disk space full"),
             SendRejection::StorageError(err) => write!(f, "Storage error: {err}"),
@@ -133,6 +160,9 @@ pub trait OutboxStore: Send + Sync {
 
     /// Mark record cancelled (terminal state).
     fn mark_cancelled(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection>;
+
+    /// Mark record expired (terminal state).
+    fn mark_expired(&mut self, logical_id: &[u8; 16]) -> Result<(), SendRejection>;
 
     /// Retrieve a record by logical ID.
     fn get(&self, logical_id: &[u8; 16]) -> Result<Option<OutboxRecord>, SendRejection>;

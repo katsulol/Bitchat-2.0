@@ -143,6 +143,19 @@ fn hex_to_short_id(hex_str: &str) -> Result<ShortId, String> {
     })
 }
 
+fn parse_logical_id_hex(logical_id_hex: &str) -> Result<[u8; 16], String> {
+    let clean = logical_id_hex.trim().trim_start_matches("0x");
+    if clean.len() != 32 {
+        return Err("Invalid logical_id: expected 32 hex chars".to_string());
+    }
+    let mut logical_id = [0u8; 16];
+    for i in 0..16 {
+        logical_id[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("Invalid hex: {e}"))?;
+    }
+    Ok(logical_id)
+}
+
 impl BitchatCoreService {
     /// Construct a standalone `BitchatCoreService` instance rooted in `storage_path`,
     /// rehydrating any pending Normal-mode outbox records from encrypted SQLite.
@@ -199,7 +212,7 @@ impl BitchatCoreService {
                 if let Some(DeliveryAction::Expired(lid)) =
                     delivery_coord.rehydrate_record(rec, now_instant, now_secs, ack_timeout)
                 {
-                    let _ = outbox_mgr.mark_failed(&lid);
+                    let _ = outbox_mgr.mark_expired(&lid);
                     delivery_events.push(DeliveryEventRecord {
                         logical_id: hex::encode(lid),
                         state: "Expired".to_string(),
@@ -346,6 +359,17 @@ impl BitchatCoreService {
         text: String,
         mode_u8: u8,
     ) -> Result<String, String> {
+        self.send_message_with_deadline(recipient_hex, text, mode_u8, None)
+            .await
+    }
+
+    pub async fn send_message_with_deadline(
+        &mut self,
+        recipient_hex: String,
+        text: String,
+        mode_u8: u8,
+        deadline_secs: Option<u64>,
+    ) -> Result<String, String> {
         let mode = match mode_u8 {
             1 => MessageMode::Privacy,
             _ => MessageMode::Normal,
@@ -379,11 +403,12 @@ impl BitchatCoreService {
             .unwrap_or_default()
             .as_secs();
 
+        let ttl_override = deadline_secs.map(Duration::from_secs);
         let send_res = self.outbox_mgr.send_to(
             recipient_peer_id,
             text.as_bytes().to_vec(),
             mode,
-            None,
+            ttl_override,
             now_secs,
         );
 
@@ -392,13 +417,14 @@ impl BitchatCoreService {
             SendResult::Rejected(e) => return Err(format!("Send rejected: {e:?}")),
         };
 
+        let actual_ttl = ttl_override.unwrap_or_else(|| mode.default_ttl());
         let expires_at_unix = self
             .outbox_mgr
             .get(&logical_id)
             .ok()
             .flatten()
             .map(|r| r.expires_at)
-            .unwrap_or_else(|| now_secs.saturating_add(mode.default_ttl().as_secs()));
+            .unwrap_or_else(|| now_secs.saturating_add(actual_ttl.as_secs()));
 
         let logical_id_hex = hex::encode(logical_id);
         let recipient_label = recipient_peer_id.to_string();
@@ -409,7 +435,7 @@ impl BitchatCoreService {
                 recipient_peer_id,
                 recipient_short_id: target,
                 body: text.as_bytes().to_vec(),
-                ttl: mode.default_ttl(),
+                ttl: actual_ttl,
                 max_attempts: mode.max_attempts(),
                 is_privacy_mode: mode == MessageMode::Privacy,
             },
@@ -721,15 +747,7 @@ impl BitchatCoreService {
     }
 
     pub async fn get_delivery_state(&self, logical_id_hex: String) -> Result<String, String> {
-        let clean = logical_id_hex.trim().trim_start_matches("0x");
-        if clean.len() != 32 {
-            return Err("Invalid logical_id: expected 32 hex chars".to_string());
-        }
-        let mut logical_id = [0u8; 16];
-        for i in 0..16 {
-            logical_id[i] = u8::from_str_radix(&clean[i * 2..i * 2 + 2], 16)
-                .map_err(|e| format!("Invalid hex: {e}"))?;
-        }
+        let logical_id = parse_logical_id_hex(&logical_id_hex)?;
 
         if let Some(st) = self.delivery_coord.get_state(&logical_id) {
             return Ok(format!("{st:?}"));
@@ -738,6 +756,34 @@ impl BitchatCoreService {
             return Ok(format!("{:?}", rec.state));
         }
         Err("Logical message not found".to_string())
+    }
+
+    pub async fn cancel_message(&mut self, logical_id_hex: String) -> Result<bool, String> {
+        let logical_id = parse_logical_id_hex(&logical_id_hex)?;
+        let transitioned = self.delivery_coord.cancel(&logical_id);
+        let _ = self.outbox_mgr.mark_cancelled(&logical_id);
+        if transitioned {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let meta = self.delivery_coord.get_record(&logical_id);
+            self.delivery_events.push(DeliveryEventRecord {
+                logical_id: hex::encode(logical_id),
+                state: "Cancelled".to_string(),
+                recipient: meta
+                    .map(|r| r.recipient_peer_id.to_string())
+                    .unwrap_or_default(),
+                timestamp: now_secs,
+                reason: "Cancelled".to_string(),
+                transport: meta
+                    .map(|r| format!("{:?}", r.last_transport))
+                    .unwrap_or_else(|| "Unknown".to_string()),
+                attempt_count: meta.map(|r| r.attempts).unwrap_or(0),
+                expires_at: meta.map(|r| r.expires_at_unix).unwrap_or(0),
+            });
+        }
+        Ok(transitioned)
     }
 
     pub fn poll_delivery_events_vec(&mut self) -> Vec<DeliveryEventRecord> {
@@ -812,7 +858,7 @@ impl BitchatCoreService {
                     }
                 }
                 DeliveryAction::Expired(logical_id) => {
-                    let _ = self.outbox_mgr.mark_failed(&logical_id);
+                    let _ = self.outbox_mgr.mark_expired(&logical_id);
                     let meta = self.delivery_coord.get_record(&logical_id).cloned();
                     self.delivery_events.push(DeliveryEventRecord {
                         logical_id: hex::encode(logical_id),
@@ -950,6 +996,26 @@ pub async fn send_message(
     let mut lock = get_service().write().await;
     let svc = lock.as_mut().ok_or("Service not initialized")?;
     svc.send_message(recipient_short_id, text, mode_u8).await
+}
+
+/// Send an end-to-end encrypted direct chat message with an explicit optional deadline preset (seconds).
+pub async fn send_message_with_deadline(
+    recipient_short_id: String,
+    text: String,
+    mode_u8: u8,
+    deadline_secs: Option<u64>,
+) -> Result<String, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    svc.send_message_with_deadline(recipient_short_id, text, mode_u8, deadline_secs)
+        .await
+}
+
+/// Cancel a non-terminal outbound logical message by its 32-hex ID.
+pub async fn cancel_message(logical_id_hex: String) -> Result<bool, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    svc.cancel_message(logical_id_hex).await
 }
 
 /// Query current delivery state of a logical message.
