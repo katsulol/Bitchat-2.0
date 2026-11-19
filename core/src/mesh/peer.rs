@@ -20,7 +20,7 @@ use crate::crypto::{HandshakeFrame, Session};
 use crate::envelope::{Flags, MsgType};
 use crate::error::{Error, Result};
 use crate::identity::{PeerId, ShortId};
-use crate::mesh::relay::{InboundMessage, MeshNode};
+use crate::mesh::relay::{InboundMessage, MeshNode, SendTarget};
 use crate::mesh::MsgId;
 use crate::transport::Transport;
 
@@ -89,11 +89,22 @@ impl PeerSessionManager {
             .and_then(|m| m.verified_peer_id.or_else(|| m.session.peer_id()))
     }
 
-    /// Initiate a Noise XX handshake with a remote peer across the mesh.
+    /// Initiate a Noise XX handshake with a remote peer across the mesh or gateways.
     pub async fn initiate_handshake<T: Transport>(
         &mut self,
         node: &mut MeshNode<T>,
         peer: ShortId,
+    ) -> Result<MsgId> {
+        self.initiate_handshake_via(node, peer, SendTarget::Auto)
+            .await
+    }
+
+    /// Initiate a Noise XX handshake explicitly via the chosen transport target.
+    pub async fn initiate_handshake_via<T: Transport>(
+        &mut self,
+        node: &mut MeshNode<T>,
+        peer: ShortId,
+        target: SendTarget,
     ) -> Result<MsgId> {
         let mut session = Session::initiator(node.identity())?;
         let noise_payload = session.write_handshake_vec()?;
@@ -121,8 +132,13 @@ impl PeerSessionManager {
             },
         );
 
-        node.send_to_with_type(peer, MsgType::Handshake, Flags::default(), encoded)
-            .await
+        let res = node
+            .send_to_via(peer, MsgType::Handshake, Flags::default(), encoded, target)
+            .await;
+        if res.is_err() {
+            self.sessions.remove(&peer);
+        }
+        res
     }
 
     /// Process an inbound Handshake envelope and advance the mutual Noise XX state machine.
@@ -368,11 +384,24 @@ impl PeerSessionManager {
     }
 
     /// Encrypt plaintext with peer's established session and transmit across the mesh.
+    /// Encrypt and transmit an application payload to `recipient` via automatic route selection.
     pub async fn send_encrypted<T: Transport>(
         &mut self,
         node: &mut MeshNode<T>,
         recipient: ShortId,
         plaintext: &[u8],
+    ) -> Result<MsgId> {
+        self.send_encrypted_via(node, recipient, plaintext, SendTarget::Auto)
+            .await
+    }
+
+    /// Encrypt and transmit an application payload explicitly via the selected transport target.
+    pub async fn send_encrypted_via<T: Transport>(
+        &mut self,
+        node: &mut MeshNode<T>,
+        recipient: ShortId,
+        plaintext: &[u8],
+        target: SendTarget,
     ) -> Result<MsgId> {
         let managed = self.sessions.get_mut(&recipient).ok_or_else(|| {
             Error::Crypto(format!("No established session with peer {recipient}"))
@@ -385,8 +414,14 @@ impl PeerSessionManager {
         }
 
         let ciphertext = managed.session.encrypt(plaintext)?;
-        node.send_to_with_type(recipient, MsgType::Chat, Flags::default(), ciphertext)
-            .await
+        node.send_to_via(
+            recipient,
+            MsgType::Chat,
+            Flags::default(),
+            ciphertext,
+            target,
+        )
+        .await
     }
 
     /// Decrypt an inbound Chat envelope using the sender's active session.

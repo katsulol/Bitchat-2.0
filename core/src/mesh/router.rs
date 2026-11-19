@@ -10,11 +10,23 @@
 //! authenticated session does not block routing; it tags the decision with
 //! `needs_handshake = true` and `RouteReason::SessionHandshakeRequired`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::identity::{PeerId, ShortId};
 use crate::storage::MessageMode;
 
+/// Observed transport path for UI explanation (Task 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObservedTransport {
+    DirectBle,
+    BleMeshFlood,
+    IrohDirect,
+    IrohRelay,
+    Unknown,
+}
+
 /// Observed Iroh path status to a remote endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IrohPathObservation {
     /// Direct P2P UDP path established between endpoints.
     Direct,
@@ -27,7 +39,7 @@ pub enum IrohPathObservation {
 }
 
 /// Strictly typed reason codes for routing decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RouteReason {
     /// Recipient is a verified direct BLE neighbor.
     DirectBleNeighbor,
@@ -35,6 +47,12 @@ pub enum RouteReason {
     SessionHandshakeRequired,
     /// Approved Iroh gateway route is available.
     IrohGatewayAvailable,
+    /// Primary gateway failed or timed out; retrying sequentially via alternate gateway.
+    RetryingAlternateGateway,
+    /// Gateway opted-in but no fresh approved gateway route is currently available.
+    WaitingForApprovedGateway,
+    /// Transit or optional forwarding paused by local resource policy.
+    ResourcePolicyPaused,
     /// Falling back to bounded BLE mesh flood.
     MeshFloodCandidate,
     /// Iroh candidate blocked because Privacy Mode restricts relay-routed traffic.
@@ -93,10 +111,203 @@ pub struct RouteContext {
     pub ble_radio_ready: bool,
 }
 
+/// Ordered approved gateway candidate for multi-gateway fallback routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GatewayCandidate {
+    pub endpoint_id: iroh::EndpointId,
+    pub peer_id: PeerId,
+    pub path: IrohPathObservation,
+}
+
+/// Multi-gateway routing candidate outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteCandidateMulti {
+    DirectBle(ShortId),
+    IrohGateway {
+        endpoint_id: iroh::EndpointId,
+        gateway_peer_id: PeerId,
+        path: IrohPathObservation,
+    },
+    MeshFlood {
+        max_ttl: u8,
+    },
+    QueueBackoff {
+        next_retry_after_secs: u64,
+        round_exhausted: bool,
+    },
+}
+
+/// Multi-gateway routing decision outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteDecisionMulti {
+    pub candidate: RouteCandidateMulti,
+    pub reason: RouteReason,
+    pub needs_handshake: bool,
+    pub explanation: &'static str,
+}
+
+/// Inputs provided to `Router::decide_multi`.
+#[derive(Debug, Clone)]
+pub struct RouteContextMulti {
+    pub target_peer_id: PeerId,
+    pub target_short_id: ShortId,
+    pub mode: MessageMode,
+    pub is_direct_ble_neighbor: bool,
+    pub has_ble_neighbors: bool,
+    pub has_authenticated_session: bool,
+    pub gateway_candidates: Vec<GatewayCandidate>,
+    pub attempted_gateways: Vec<iroh::EndpointId>,
+    pub gateway_opted_in: bool,
+    pub privacy_block_relay: bool,
+    pub iroh_endpoint_relay_disabled: bool,
+    pub attempt_count: u32,
+    pub max_attempts: u32,
+    pub ble_radio_ready: bool,
+}
+
 /// Pure synchronous router.
 pub struct Router;
 
 impl Router {
+    /// Compute sequential multi-gateway / BLE routing decision with per-round gateway exclusion.
+    pub fn decide_multi(ctx: &RouteContextMulti) -> RouteDecisionMulti {
+        if ctx.attempt_count >= ctx.max_attempts {
+            return RouteDecisionMulti {
+                candidate: RouteCandidateMulti::QueueBackoff {
+                    next_retry_after_secs: 60,
+                    round_exhausted: false,
+                },
+                reason: RouteReason::ExhaustedAttemptsQueue,
+                needs_handshake: false,
+                explanation: "Attempt budget reached; backing off in queue",
+            };
+        }
+
+        if ctx.ble_radio_ready && ctx.is_direct_ble_neighbor {
+            if !ctx.has_authenticated_session {
+                return RouteDecisionMulti {
+                    candidate: RouteCandidateMulti::DirectBle(ctx.target_short_id),
+                    reason: RouteReason::SessionHandshakeRequired,
+                    needs_handshake: true,
+                    explanation: "Direct BLE neighbor reachable; session handshake required",
+                };
+            }
+            return RouteDecisionMulti {
+                candidate: RouteCandidateMulti::DirectBle(ctx.target_short_id),
+                reason: RouteReason::DirectBleNeighbor,
+                needs_handshake: false,
+                explanation: "Direct BLE neighbor reachable with established session",
+            };
+        }
+
+        let mut had_opted_out = false;
+        let mut had_privacy_blocked = false;
+        let mut permitted: Vec<&GatewayCandidate> = Vec::new();
+
+        if !ctx.gateway_candidates.is_empty() {
+            if !ctx.gateway_opted_in {
+                had_opted_out = true;
+            } else {
+                for c in &ctx.gateway_candidates {
+                    let blocked_by_privacy = ctx.mode == MessageMode::Privacy
+                        && ctx.privacy_block_relay
+                        && (!ctx.iroh_endpoint_relay_disabled
+                            || c.path != IrohPathObservation::Direct);
+                    if blocked_by_privacy {
+                        had_privacy_blocked = true;
+                    } else {
+                        permitted.push(c);
+                    }
+                }
+            }
+        }
+
+        if !permitted.is_empty() {
+            if let Some(c) = permitted
+                .iter()
+                .find(|c| !ctx.attempted_gateways.contains(&c.endpoint_id))
+            {
+                let reason = if !ctx.has_authenticated_session {
+                    RouteReason::SessionHandshakeRequired
+                } else if !ctx.attempted_gateways.is_empty() {
+                    RouteReason::RetryingAlternateGateway
+                } else {
+                    RouteReason::IrohGatewayAvailable
+                };
+                return RouteDecisionMulti {
+                    candidate: RouteCandidateMulti::IrohGateway {
+                        endpoint_id: c.endpoint_id,
+                        gateway_peer_id: c.peer_id,
+                        path: c.path,
+                    },
+                    reason,
+                    needs_handshake: !ctx.has_authenticated_session,
+                    explanation: if !ctx.attempted_gateways.is_empty() {
+                        "Retrying through an alternate approved gateway"
+                    } else if !ctx.has_authenticated_session {
+                        "Gateway route available; session handshake required"
+                    } else {
+                        "Approved gateway route available"
+                    },
+                };
+            }
+
+            return RouteDecisionMulti {
+                candidate: RouteCandidateMulti::QueueBackoff {
+                    next_retry_after_secs: 4,
+                    round_exhausted: true,
+                },
+                reason: RouteReason::RetryingAlternateGateway,
+                needs_handshake: false,
+                explanation: "All approved gateway candidates tried this round; backing off before next round",
+            };
+        }
+
+        if ctx.ble_radio_ready && ctx.has_ble_neighbors && ctx.mode != MessageMode::Privacy {
+            if !ctx.has_authenticated_session {
+                return RouteDecisionMulti {
+                    candidate: RouteCandidateMulti::MeshFlood { max_ttl: 7 },
+                    reason: RouteReason::SessionHandshakeRequired,
+                    needs_handshake: true,
+                    explanation: "Falling back to bounded BLE mesh flood; handshake required",
+                };
+            }
+            return RouteDecisionMulti {
+                candidate: RouteCandidateMulti::MeshFlood { max_ttl: 7 },
+                reason: RouteReason::MeshFloodCandidate,
+                needs_handshake: false,
+                explanation: "Falling back to bounded BLE mesh flood with established session",
+            };
+        }
+
+        let reason = if had_privacy_blocked {
+            RouteReason::PrivacyRelayRestricted
+        } else if had_opted_out {
+            RouteReason::GatewayOptedOut
+        } else if ctx.gateway_opted_in && ctx.gateway_candidates.is_empty() {
+            RouteReason::WaitingForApprovedGateway
+        } else {
+            RouteReason::NoRouteAvailable
+        };
+
+        RouteDecisionMulti {
+            candidate: RouteCandidateMulti::QueueBackoff {
+                next_retry_after_secs: 15,
+                round_exhausted: false,
+            },
+            reason,
+            needs_handshake: false,
+            explanation: match reason {
+                RouteReason::PrivacyRelayRestricted => {
+                    "Privacy mode restricts relay gateways; waiting for direct path"
+                }
+                RouteReason::GatewayOptedOut => "Gateway disabled by user; waiting for BLE route",
+                RouteReason::WaitingForApprovedGateway => "Waiting for an approved gateway",
+                _ => "No transport or route available; retaining in outbox queue",
+            },
+        }
+    }
+
     /// Compute the next transport routing decision.
     ///
     /// Pure function: zero I/O, deterministic output for identical inputs.

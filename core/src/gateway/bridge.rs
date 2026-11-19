@@ -31,12 +31,14 @@ pub struct ActiveGatewaySession {
     pub session_epoch: u64,
     pub next_sequence: AtomicU64,
     pub outbound_tx: mpsc::Sender<GatewayMessage>,
+    writer_abort: tokio::task::AbortHandle,
 }
 
 /// Core Internet Gateway Bridge coordinating mesh forwarding across authenticated Iroh QUIC streams.
 pub struct GatewayBridge {
     bitchat_identity: Identity,
     endpoint: Endpoint,
+    relay_mode: RelayMode,
     config: Arc<RwLock<GatewayConfig>>,
     trust_store: Arc<RwLock<TrustStore>>,
     routes: Arc<RwLock<GatewayRouteTable>>,
@@ -55,21 +57,33 @@ impl GatewayBridge {
         iroh_secret: Option<SecretKey>,
         relay_mode: RelayMode,
     ) -> Result<Self> {
-        let endpoint = create_endpoint(iroh_secret, relay_mode)
+        let local_peer_id = bitchat_identity.peer_id();
+        let trust_store = Arc::new(RwLock::new(TrustStore::new(
+            local_peer_id,
+            TrustQuotaConfig::default(),
+        )));
+        Self::new_with_trust_store(bitchat_identity, iroh_secret, relay_mode, trust_store).await
+    }
+
+    /// Create a new gateway bridge sharing an existing `TrustStore` instance.
+    pub async fn new_with_trust_store(
+        bitchat_identity: Identity,
+        iroh_secret: Option<SecretKey>,
+        relay_mode: RelayMode,
+        trust_store: Arc<RwLock<TrustStore>>,
+    ) -> Result<Self> {
+        let endpoint = create_endpoint(iroh_secret, relay_mode.clone())
             .await
             .map_err(|e| Error::Transport(format!("Failed to bind Iroh endpoint: {e}")))?;
 
         let (inbound_tx, inbound_rx) = mpsc::channel(128);
-        let local_peer_id = bitchat_identity.peer_id();
 
         Ok(Self {
             bitchat_identity,
             endpoint,
+            relay_mode,
             config: Arc::new(RwLock::new(GatewayConfig::new())),
-            trust_store: Arc::new(RwLock::new(TrustStore::new(
-                local_peer_id,
-                TrustQuotaConfig::default(),
-            ))),
+            trust_store,
             routes: Arc::new(RwLock::new(GatewayRouteTable::new())),
             stats: Arc::new(GatewayStats::new()),
             active_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -78,6 +92,20 @@ impl GatewayBridge {
             inbound_mesh_tx: inbound_tx,
             inbound_mesh_rx: Arc::new(tokio::sync::Mutex::new(inbound_rx)),
         })
+    }
+
+    /// Whether this Iroh endpoint was created with `RelayMode::Disabled`.
+    pub fn relay_disabled(&self) -> bool {
+        matches!(self.relay_mode, RelayMode::Disabled)
+    }
+
+    /// Observed Iroh path classification based on real endpoint relay configuration.
+    pub fn observed_path(&self) -> crate::mesh::router::IrohPathObservation {
+        if self.relay_disabled() {
+            crate::mesh::router::IrohPathObservation::Direct
+        } else {
+            crate::mesh::router::IrohPathObservation::Unknown
+        }
     }
 
     pub fn trust_store(&self) -> Arc<RwLock<TrustStore>> {
@@ -221,13 +249,68 @@ impl GatewayBridge {
                 ts.revoke_peer(pid, now_secs);
             }
         }
-        self.active_sessions.write().await.remove(&endpoint_id);
+        if let Some(session) = self.active_sessions.write().await.remove(&endpoint_id) {
+            session.writer_abort.abort();
+        }
         self.routes
             .write()
             .await
             .remove_routes_for_endpoint(&endpoint_id);
         self.stats
             .set_active_connections(self.active_sessions.read().await.len() as u64);
+    }
+
+    /// Revoke or block any active gateway sessions bound to a Bitchat `PeerId`.
+    pub async fn revoke_or_block_by_peer_id(&self, peer_id: &PeerId, block: bool) {
+        let matched: Vec<EndpointId> = self
+            .active_sessions
+            .read()
+            .await
+            .iter()
+            .filter(|(_, s)| s.remote_bitchat_pubkey == peer_id.0)
+            .map(|(ep, _)| *ep)
+            .collect();
+        for ep in matched {
+            self.revoke_or_block_peer(ep, block).await;
+        }
+    }
+
+    /// Cleanly drop an active gateway connection and its announced routes without revoking trust.
+    pub async fn disconnect_peer(&self, endpoint_id: &EndpointId) {
+        if let Some(session) = self.active_sessions.write().await.remove(endpoint_id) {
+            session.writer_abort.abort();
+        }
+        self.routes
+            .write()
+            .await
+            .remove_routes_for_endpoint(endpoint_id);
+        self.stats
+            .set_active_connections(self.active_sessions.read().await.len() as u64);
+    }
+
+    /// Abort the outbound writer stream for an active session while leaving its route entry
+    /// in place momentarily, simulating a pre-admission send failure on next dispatch.
+    #[doc(hidden)]
+    pub async fn simulate_broken_outbound(&self, endpoint_id: &EndpointId) {
+        let tx_opt = {
+            let sessions = self.active_sessions.read().await;
+            sessions.get(endpoint_id).map(|session| {
+                session.writer_abort.abort();
+                session.outbound_tx.clone()
+            })
+        };
+        if let Some(outbound_tx) = tx_opt {
+            for iter in 0..50 {
+                if outbound_tx.is_closed() {
+                    break;
+                }
+                if iter < 10 {
+                    tokio::task::yield_now().await;
+                } else {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+        }
     }
 
     /// Enable or disable gateway bridging.
@@ -504,12 +587,25 @@ impl GatewayBridge {
             )
             .unwrap_or(now_secs);
 
+        // Writer task (spawned before inserting session so its AbortHandle can be tracked)
+        let stats_writer = Arc::clone(&self.stats);
+        let writer_handle = tokio::spawn(async move {
+            while let Some(msg) = outbound_rx.recv().await {
+                if let Err(e) = msg.write_framed(&mut send_stream).await {
+                    stats_writer.record_error(format!("Gateway write error: {e}"));
+                    break;
+                }
+            }
+            let _ = send_stream.finish();
+        });
+
         let session = ActiveGatewaySession {
             remote_endpoint_id: remote_id,
             remote_bitchat_pubkey,
             session_epoch,
             next_sequence: AtomicU64::new(2),
             outbound_tx: outbound_tx.clone(),
+            writer_abort: writer_handle.abort_handle(),
         };
 
         self.active_sessions
@@ -534,18 +630,6 @@ impl GatewayBridge {
         initial_snapshot.sign(&self.bitchat_identity);
         let initial_sync = GatewayMessage::RouteSync(initial_snapshot);
         let _ = outbound_tx.send(initial_sync).await;
-
-        // Writer task
-        let stats_writer = Arc::clone(&self.stats);
-        tokio::spawn(async move {
-            while let Some(msg) = outbound_rx.recv().await {
-                if let Err(e) = msg.write_framed(&mut send_stream).await {
-                    stats_writer.record_error(format!("Gateway write error: {e}"));
-                    break;
-                }
-            }
-            let _ = send_stream.finish();
-        });
 
         // Reader task
         let inbound_mesh_tx = self.inbound_mesh_tx.clone();
@@ -638,19 +722,24 @@ impl GatewayBridge {
                             continue;
                         }
 
-                        // 3. Extract verified ShortIds (filter out local identity)
+                        // 3. Extract verified ShortIds and validated full PeerIds (filter out local identity)
                         let mut valid_recipients = Vec::new();
                         for r in &snapshot.recipients {
                             if let Some(sid) = crate::identity::ShortId::from_hex(&r.short_id_hex) {
                                 if sid != my_short {
-                                    valid_recipients.push(sid);
+                                    let pid = r
+                                        .public_key_hex
+                                        .as_deref()
+                                        .and_then(PeerId::from_hex)
+                                        .filter(|p| p.short_id() == sid);
+                                    valid_recipients.push((sid, pid));
                                 }
                             }
                         }
 
                         // 4. Apply snapshot with epoch & monotonic sequence validation
                         let lease = Duration::from_secs(snapshot.lease_seconds as u64);
-                        let _ = routes_reader.write().await.apply_snapshot(
+                        let _ = routes_reader.write().await.apply_snapshot_with_peers(
                             remote_id,
                             snapshot.session_epoch,
                             snapshot.sequence_number,
@@ -695,6 +784,132 @@ impl GatewayBridge {
         Ok(())
     }
 
+    /// Enumerate authorized, connected gateway candidates for a full verified `PeerId`,
+    /// ordered deterministically for sequential fallback.
+    pub async fn authorized_candidates_for_peer(
+        &self,
+        recipient: &PeerId,
+    ) -> Vec<(EndpointId, PeerId, crate::mesh::router::IrohPathObservation)> {
+        let cfg_guard = self.config.read().await;
+        if !cfg_guard.enabled {
+            return Vec::new();
+        }
+        let ts_guard = self.trust_store.read().await;
+        let sessions = self.active_sessions.read().await;
+        let path = self.observed_path();
+
+        let gws =
+            self.routes
+                .read()
+                .await
+                .candidates_for_peer_at(recipient, Instant::now(), |gw_id| {
+                    if !cfg_guard.is_approved(gw_id) {
+                        return false;
+                    }
+                    let Some(s) = sessions.get(gw_id) else {
+                        return false;
+                    };
+                    let pid = PeerId(s.remote_bitchat_pubkey);
+                    !matches!(
+                        ts_guard.peer_state(&pid),
+                        PeerTrustState::Blocked { .. } | PeerTrustState::Revoked { .. }
+                    )
+                });
+
+        gws.into_iter()
+            .filter_map(|gw_id| {
+                sessions
+                    .get(&gw_id)
+                    .map(|s| (gw_id, PeerId(s.remote_bitchat_pubkey), path))
+            })
+            .collect()
+    }
+
+    /// Lookup unambiguous full verified `PeerId` from active snapshots for `short_id`, if any.
+    pub async fn verified_peer_id_for_short(
+        &self,
+        short_id: &crate::identity::ShortId,
+    ) -> Option<PeerId> {
+        self.routes
+            .read()
+            .await
+            .peer_id_for_short_at(short_id, Instant::now())
+    }
+
+    /// Forward an eligible mesh packet across a specific approved gateway endpoint.
+    pub async fn forward_mesh_packet_via(
+        &self,
+        target_gw: EndpointId,
+        envelope: &Envelope,
+        raw_packet: Vec<u8>,
+    ) -> Result<bool> {
+        if envelope.recipient_short_id.is_broadcast() {
+            return Ok(false);
+        }
+
+        let cfg_guard = self.config.read().await;
+        if !cfg_guard.enabled {
+            return Ok(false);
+        }
+        if !cfg_guard.is_approved(&target_gw) {
+            self.stats.inc_rejected();
+            return Err(Error::Transport(format!(
+                "Target gateway {target_gw} is not approved"
+            )));
+        }
+
+        let ts_guard = self.trust_store.read().await;
+        let sessions = self.active_sessions.read().await;
+        let session = match sessions.get(&target_gw) {
+            Some(s) => s,
+            None => {
+                self.stats.inc_rejected();
+                return Err(Error::Transport(format!(
+                    "Gateway connection to {target_gw} is not currently active"
+                )));
+            }
+        };
+
+        let gw_pid = PeerId(session.remote_bitchat_pubkey);
+        if matches!(
+            ts_guard.peer_state(&gw_pid),
+            PeerTrustState::Blocked { .. } | PeerTrustState::Revoked { .. }
+        ) {
+            self.stats.inc_rejected();
+            return Err(Error::Transport(format!(
+                "Gateway peer {gw_pid:?} is blocked or revoked"
+            )));
+        }
+
+        let transfer_id = self.transfer_counter.fetch_add(1, Ordering::Relaxed);
+        let remaining_hops = envelope.ttl_max.saturating_sub(envelope.hop_count);
+
+        let fwd = GatewayForward {
+            wire_version: WIRE_VERSION,
+            transfer_id,
+            destination_short_id_hex: envelope.recipient_short_id.to_string(),
+            remaining_hops,
+            bridge_crossings: 1, // Marked as having crossed bridge
+            mesh_packet: raw_packet,
+        };
+
+        let outbound_tx = session.outbound_tx.clone();
+        drop(sessions);
+        drop(ts_guard);
+        drop(cfg_guard);
+
+        outbound_tx
+            .send(GatewayMessage::Forward(fwd))
+            .await
+            .map_err(|_| {
+                self.stats.inc_rejected();
+                Error::Transport("Failed to enqueue outbound forward".into())
+            })?;
+
+        self.stats.inc_exported();
+        Ok(true)
+    }
+
     /// Forward an eligible mesh packet across internet gateway to destination.
     /// Enforces:
     /// 1. Public broadcasts NEVER leave the local mesh.
@@ -710,70 +925,57 @@ impl GatewayBridge {
             return Ok(false);
         }
 
-        // Rule 2: Lookup route among currently approved and authorized gateways
-        let cfg_guard = self.config.read().await;
-        if !cfg_guard.enabled {
-            return Ok(false);
-        }
-        let ts_guard = self.trust_store.read().await;
-        let sessions = self.active_sessions.read().await;
+        // Rule 2: Collect authorized route candidates and try sequentially until one succeeds
+        let candidates = {
+            let cfg_guard = self.config.read().await;
+            if !cfg_guard.enabled {
+                return Ok(false);
+            }
+            let ts_guard = self.trust_store.read().await;
+            let sessions = self.active_sessions.read().await;
 
-        let target_gw = match self.routes.read().await.lookup_authorized_at(
-            &envelope.recipient_short_id,
-            Instant::now(),
-            |gw_id| {
-                if !cfg_guard.is_approved(gw_id) {
-                    return false;
-                }
-                if let Some(s) = sessions.get(gw_id) {
-                    let pid = PeerId(s.remote_bitchat_pubkey);
-                    if matches!(
-                        ts_guard.peer_state(&pid),
-                        PeerTrustState::Blocked { .. } | PeerTrustState::Revoked { .. }
-                    ) {
+            self.routes.read().await.candidates_for_short_at(
+                &envelope.recipient_short_id,
+                Instant::now(),
+                |gw_id| {
+                    if !cfg_guard.is_approved(gw_id) {
                         return false;
                     }
-                }
-                true
-            },
-        ) {
-            Some(gw) => gw,
-            None => return Ok(false), // No authorized route configured: local delivery only
+                    if let Some(s) = sessions.get(gw_id) {
+                        let pid = PeerId(s.remote_bitchat_pubkey);
+                        if matches!(
+                            ts_guard.peer_state(&pid),
+                            PeerTrustState::Blocked { .. } | PeerTrustState::Revoked { .. }
+                        ) {
+                            return false;
+                        }
+                    }
+                    true
+                },
+            )
         };
-        drop(ts_guard);
-        drop(cfg_guard);
 
-        // Rule 3: Session check
-        let session = match sessions.get(&target_gw) {
-            Some(s) => s,
-            None => {
-                self.stats.inc_rejected();
-                return Err(Error::Transport(format!(
-                    "Gateway connection to {target_gw} is not currently active"
-                )));
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+
+        let mut last_err = None;
+        for target_gw in candidates {
+            match self
+                .forward_mesh_packet_via(target_gw, envelope, raw_packet.clone())
+                .await
+            {
+                Ok(true) => return Ok(true),
+                Ok(false) => continue,
+                Err(e) => last_err = Some(e),
             }
-        };
+        }
 
-        let transfer_id = self.transfer_counter.fetch_add(1, Ordering::Relaxed);
-        let remaining_hops = envelope.ttl_max.saturating_sub(envelope.hop_count);
-
-        let fwd = GatewayForward {
-            wire_version: WIRE_VERSION,
-            transfer_id,
-            destination_short_id_hex: envelope.recipient_short_id.to_string(),
-            remaining_hops,
-            bridge_crossings: 1, // Marked as having crossed bridge
-            mesh_packet: raw_packet,
-        };
-
-        session
-            .outbound_tx
-            .send(GatewayMessage::Forward(fwd))
-            .await
-            .map_err(|_| Error::Transport("Failed to enqueue outbound forward".into()))?;
-
-        self.stats.inc_exported();
-        Ok(true)
+        if let Some(e) = last_err {
+            Err(e)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Receive the next raw mesh packet imported from remote gateways.
@@ -796,15 +998,24 @@ impl GatewayBridge {
         &self,
         peer_short_ids: &[crate::identity::ShortId],
     ) -> Result<()> {
+        let pairs: Vec<_> = peer_short_ids.iter().map(|&s| (s, None)).collect();
+        self.announce_local_verified_peers(&pairs).await
+    }
+
+    /// Announce local reachable peers (with verified full `PeerId`s when known) to active gateways.
+    pub async fn announce_local_verified_peers(
+        &self,
+        peers: &[(crate::identity::ShortId, Option<PeerId>)],
+    ) -> Result<()> {
         let mut recipients = vec![crate::gateway::wire::RouteRecipient {
             short_id_hex: self.bitchat_identity.short_id().to_string(),
             public_key_hex: Some(self.bitchat_identity.peer_id().to_string()),
         }];
-        for p in peer_short_ids {
-            if *p != self.bitchat_identity.short_id() {
+        for (short_id, peer_id) in peers {
+            if *short_id != self.bitchat_identity.short_id() {
                 recipients.push(crate::gateway::wire::RouteRecipient {
-                    short_id_hex: p.to_string(),
-                    public_key_hex: None,
+                    short_id_hex: short_id.to_string(),
+                    public_key_hex: peer_id.map(|p| p.to_string()),
                 });
             }
         }

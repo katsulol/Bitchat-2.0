@@ -42,6 +42,8 @@ class MeshBridge {
 
   String myShortId = "Initializing...";
   String myPeerId = "Generating...";
+  String? lastKeystoreError;
+  bool get hasKeystoreError => lastKeystoreError != null;
 
   Stream<ChatMessage> get messages => _messageController.stream;
   Stream<List<String>> get peers => _peersController.stream;
@@ -179,6 +181,8 @@ class MeshBridge {
   }
 
   Future<void> startMesh() async {
+    lastKeystoreError = null;
+
     // 1. Obtain Android storage path
     String storagePath = ".";
     try {
@@ -188,19 +192,38 @@ class MeshBridge {
       }
     } catch (_) {}
 
-    // 2. Obtain hardware-backed DEK from AndroidKeystoreProvider
+    // 2. Obtain hardware-backed DEK from AndroidKeystoreProvider (fail closed on platform error)
     Uint8List? dek;
+    bool pluginMissing = false;
     try {
       dek = await _channel.invokeMethod<Uint8List>('getPlatformDek');
-    } catch (_) {}
+    } on MissingPluginException {
+      pluginMissing = true;
+    } on PlatformException catch (e) {
+      lastKeystoreError =
+          '${e.code}: ${e.message ?? "Android Keystore unavailable"}';
+      return;
+    } catch (e) {
+      lastKeystoreError = 'KEYSTORE_ERROR: $e';
+      return;
+    }
 
     // 3. Initialize Rust bitchat2_core with encrypted SQLite outbox
     String? shortId;
-    if (dek != null && dek.length == 32) {
+    if (!pluginMissing) {
+      if (dek == null || dek.length != 32) {
+        lastKeystoreError =
+            'KEYSTORE_ERROR: Invalid DEK returned from platform keystore';
+        return;
+      }
       shortId = CoreFfi.instance.initWithKey(storagePath, dek);
-    }
-    if (shortId == null || shortId.isEmpty) {
-      // Fallback to legacy init if Keystore unavailable
+      if (shortId == null || shortId.isEmpty) {
+        lastKeystoreError =
+            'KEYSTORE_ERROR: Failed to unlock encrypted outbox database';
+        return;
+      }
+    } else {
+      // Non-Android / unit test fallback when platform channel plugin is unavailable
       shortId = CoreFfi.instance.initCore(storagePath);
     }
 

@@ -54,7 +54,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   @override
   void initState() {
     super.initState();
-    _bridge.startMesh();
+    _bridge.startMesh().then((_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
 
     _bridge.messages.listen((msg) {
       setState(() {
@@ -243,6 +247,24 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
               ],
             ),
           ),
+          if (_bridge.hasKeystoreError)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              color: Colors.red.shade900.withValues(alpha: 0.9),
+              child: Row(
+                children: [
+                  const Icon(Icons.lock_outline, size: 16, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Encrypted storage locked (fail-closed): ${_bridge.lastKeystoreError}',
+                      style: const TextStyle(fontSize: 12, color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           // Neighbors bar
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),

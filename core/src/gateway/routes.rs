@@ -3,21 +3,23 @@ use std::time::{Duration, Instant};
 
 use iroh::EndpointId;
 
-use crate::identity::ShortId;
+use crate::identity::{PeerId, ShortId};
 
 /// An individual route entry with lease expiry and sequence information.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteEntry {
     pub gateway: EndpointId,
+    pub recipient_peer_id: Option<PeerId>,
     pub expires_at: Instant,
     pub epoch: u64,
     pub sequence: u64,
 }
 
-/// Dynamic authenticated routing table mapping destination mesh ShortIds to remote gateway EndpointIds.
+/// Dynamic authenticated routing table mapping destination mesh identities to remote gateway EndpointIds.
 #[derive(Clone, Debug, Default)]
 pub struct GatewayRouteTable {
     routes: HashMap<ShortId, Vec<RouteEntry>>,
+    peer_routes: HashMap<PeerId, Vec<RouteEntry>>,
     gateway_state: HashMap<EndpointId, (u64, u64)>, // (epoch, last_sequence)
 }
 
@@ -25,6 +27,7 @@ impl GatewayRouteTable {
     pub fn new() -> Self {
         Self {
             routes: HashMap::new(),
+            peer_routes: HashMap::new(),
             gateway_state: HashMap::new(),
         }
     }
@@ -33,6 +36,7 @@ impl GatewayRouteTable {
     pub fn set_route(&mut self, recipient: ShortId, gateway: EndpointId) {
         let entry = RouteEntry {
             gateway,
+            recipient_peer_id: None,
             expires_at: Instant::now() + Duration::from_secs(86400 * 365), // 1 year
             epoch: 1,
             sequence: 1,
@@ -42,16 +46,37 @@ impl GatewayRouteTable {
         entries.push(entry);
     }
 
+    /// Add a manual/static route keyed by full verified `PeerId` (and indexed by its `ShortId`).
+    pub fn set_route_for_peer(&mut self, recipient: PeerId, gateway: EndpointId) {
+        let entry = RouteEntry {
+            gateway,
+            recipient_peer_id: Some(recipient),
+            expires_at: Instant::now() + Duration::from_secs(86400 * 365),
+            epoch: 1,
+            sequence: 1,
+        };
+        let short_id = recipient.short_id();
+        let short_entries = self.routes.entry(short_id).or_default();
+        short_entries.retain(|e| e.gateway != gateway);
+        short_entries.push(entry.clone());
+
+        let peer_entries = self.peer_routes.entry(recipient).or_default();
+        peer_entries.retain(|e| e.gateway != gateway);
+        peer_entries.push(entry);
+    }
+
     /// Remove route for recipient ShortId.
     pub fn remove_route(&mut self, recipient: &ShortId) -> Option<EndpointId> {
-        self.routes
-            .remove(recipient)
-            .and_then(|v| v.into_iter().next().map(|e| e.gateway))
+        let removed = self.routes.remove(recipient);
+        self.peer_routes
+            .retain(|pid, _| pid.short_id() != *recipient);
+        removed.and_then(|v| v.into_iter().next().map(|e| e.gateway))
     }
 
     /// Clear all active routes and gateway session records (atomic route withdrawal).
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.peer_routes.clear();
         self.gateway_state.clear();
     }
 
@@ -89,6 +114,77 @@ impl GatewayRouteTable {
             .map(|e| e.gateway)
     }
 
+    fn rank_candidates<F>(entries: &[RouteEntry], now: Instant, is_authorized: F) -> Vec<EndpointId>
+    where
+        F: Fn(&EndpointId) -> bool,
+    {
+        let mut eligible: Vec<&RouteEntry> = entries
+            .iter()
+            .filter(|e| e.expires_at > now && is_authorized(&e.gateway))
+            .collect();
+        eligible.sort_by(|a, b| {
+            b.sequence
+                .cmp(&a.sequence)
+                .then_with(|| b.expires_at.cmp(&a.expires_at))
+                .then_with(|| b.gateway.as_bytes().cmp(a.gateway.as_bytes()))
+        });
+        let mut out = Vec::with_capacity(eligible.len());
+        for entry in eligible {
+            if !out.contains(&entry.gateway) {
+                out.push(entry.gateway);
+            }
+        }
+        out
+    }
+
+    /// Return ordered, deduplicated, fresh, authorized gateway candidates for a full `PeerId`.
+    pub fn candidates_for_peer_at<F>(
+        &self,
+        recipient: &PeerId,
+        now: Instant,
+        is_authorized: F,
+    ) -> Vec<EndpointId>
+    where
+        F: Fn(&EndpointId) -> bool,
+    {
+        let Some(entries) = self.peer_routes.get(recipient) else {
+            return Vec::new();
+        };
+        Self::rank_candidates(entries, now, is_authorized)
+    }
+
+    /// Return ordered, deduplicated, fresh, authorized gateway candidates for a `ShortId`.
+    pub fn candidates_for_short_at<F>(
+        &self,
+        recipient: &ShortId,
+        now: Instant,
+        is_authorized: F,
+    ) -> Vec<EndpointId>
+    where
+        F: Fn(&EndpointId) -> bool,
+    {
+        let Some(entries) = self.routes.get(recipient) else {
+            return Vec::new();
+        };
+        Self::rank_candidates(entries, now, is_authorized)
+    }
+
+    /// Resolve a unique fresh `PeerId` associated with `short_id`, if unambiguous across active snapshots.
+    pub fn peer_id_for_short_at(&self, short_id: &ShortId, now: Instant) -> Option<PeerId> {
+        let entries = self.routes.get(short_id)?;
+        let mut found: Option<PeerId> = None;
+        for entry in entries.iter().filter(|e| e.expires_at > now) {
+            if let Some(pid) = entry.recipient_peer_id {
+                match found {
+                    None => found = Some(pid),
+                    Some(prev) if prev == pid => {}
+                    Some(_) => return None,
+                }
+            }
+        }
+        found
+    }
+
     /// Apply an authenticated RouteSnapshot atomically.
     ///
     /// Validates session epoch and strict sequence monotonicity.
@@ -100,6 +196,23 @@ impl GatewayRouteTable {
         epoch: u64,
         sequence: u64,
         recipients: Vec<ShortId>,
+        lease: Duration,
+        now: Instant,
+    ) -> Result<bool, &'static str> {
+        let pairs = recipients.into_iter().map(|sid| (sid, None)).collect();
+        self.apply_snapshot_with_peers(gateway, epoch, sequence, pairs, lease, now)
+    }
+
+    /// Apply an authenticated RouteSnapshot atomically with optional full `PeerId` bindings.
+    ///
+    /// Rejects stale epochs, duplicate/stale sequences, and `PeerId` bindings whose derived
+    /// `ShortId` does not match the announced `ShortId`.
+    pub fn apply_snapshot_with_peers(
+        &mut self,
+        gateway: EndpointId,
+        epoch: u64,
+        sequence: u64,
+        recipients: Vec<(ShortId, Option<PeerId>)>,
         lease: Duration,
         now: Instant,
     ) -> Result<bool, &'static str> {
@@ -118,8 +231,11 @@ impl GatewayRouteTable {
         self.gateway_state.insert(gateway, (epoch, sequence));
         let expires_at = now + lease;
 
-        // Atomic replace: remove existing routes for this gateway
+        // Atomic replace: remove existing routes for this gateway across both indexes
         for entries in self.routes.values_mut() {
+            entries.retain(|e| e.gateway != gateway);
+        }
+        for entries in self.peer_routes.values_mut() {
             entries.retain(|e| e.gateway != gateway);
         }
 
@@ -129,14 +245,23 @@ impl GatewayRouteTable {
             return Ok(true);
         }
 
-        for recipient in recipients {
+        for (recipient_short, maybe_peer_id) in recipients {
+            // Drop any mismatched PeerId so snapshots cannot spoof ShortId -> PeerId binding
+            let verified_peer = maybe_peer_id.filter(|pid| pid.short_id() == recipient_short);
             let entry = RouteEntry {
                 gateway,
+                recipient_peer_id: verified_peer,
                 expires_at,
                 epoch,
                 sequence,
             };
-            self.routes.entry(recipient).or_default().push(entry);
+            self.routes
+                .entry(recipient_short)
+                .or_default()
+                .push(entry.clone());
+            if let Some(pid) = verified_peer {
+                self.peer_routes.entry(pid).or_default().push(entry);
+            }
         }
 
         self.cleanup_empty();
@@ -173,11 +298,15 @@ impl GatewayRouteTable {
         for entries in self.routes.values_mut() {
             entries.retain(|e| e.gateway != *gateway);
         }
+        for entries in self.peer_routes.values_mut() {
+            entries.retain(|e| e.gateway != *gateway);
+        }
         self.cleanup_empty();
     }
 
     fn cleanup_empty(&mut self) {
         self.routes.retain(|_, v| !v.is_empty());
+        self.peer_routes.retain(|_, v| !v.is_empty());
     }
 
     /// List all configured active routes at current time.

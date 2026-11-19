@@ -9,11 +9,13 @@
 // 4. Duplicate received messages trigger a fresh ACK under the active session without duplicate display.
 // 5. Terminal states (Delivered, Failed, Expired, Cancelled) cannot be downgraded or resurrected by late ACKs.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
 use crate::identity::{PeerId, ShortId};
+use crate::mesh::router::{ObservedTransport, RouteReason};
+use crate::storage::{MessageMode, OutboxRecord};
 
 pub type LogicalMessageId = [u8; 16];
 
@@ -270,13 +272,21 @@ pub struct OutgoingRecord {
     pub state: DeliveryState,
     pub created_at: Instant,
     pub expires_at: Instant,
+    pub expires_at_unix: u64,
+    pub ack_timeout: Duration,
     pub attempts: u32,
     pub max_attempts: u32,
     pub handshake_attempts: u32,
     pub max_handshake_attempts: u32,
     pub next_attempt_at: Instant,
     pub body: Vec<u8>,
+    pub mode: MessageMode,
     pub is_privacy_mode: bool,
+    pub attempted_gateways: Vec<iroh::EndpointId>,
+    pub last_gateway: Option<iroh::EndpointId>,
+    pub last_reason: RouteReason,
+    pub last_transport: ObservedTransport,
+    last_emitted: Option<(DeliveryState, RouteReason)>,
 }
 
 /// Action produced by the delivery coordinator on timeout check.
@@ -289,6 +299,7 @@ pub enum DeliveryAction {
 
 pub const DEFAULT_MAX_HANDSHAKE_ATTEMPTS: u32 = 5;
 pub const DEFAULT_RECONNECT_WAKEUP_COOLDOWN: Duration = Duration::from_secs(5);
+pub const DEFAULT_ACK_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Sender delivery coordinator managing logical message states, retries, and authenticated ACKs.
 #[derive(Debug, Clone)]
@@ -322,6 +333,23 @@ impl DeliveryCoordinator {
     }
 
     pub fn enqueue(&mut self, req: EnqueueMessage, now: Instant) {
+        let mode = if req.is_privacy_mode {
+            MessageMode::Privacy
+        } else {
+            MessageMode::Normal
+        };
+        self.enqueue_with_meta(req, mode, 0, DEFAULT_ACK_TIMEOUT, now);
+    }
+
+    /// Enqueue with explicit mode, wall-clock expiry, and per-attempt ACK timeout.
+    pub fn enqueue_with_meta(
+        &mut self,
+        req: EnqueueMessage,
+        mode: MessageMode,
+        expires_at_unix: u64,
+        ack_timeout: Duration,
+        now: Instant,
+    ) {
         let record = OutgoingRecord {
             logical_id: req.logical_id,
             recipient_peer_id: req.recipient_peer_id,
@@ -329,15 +357,139 @@ impl DeliveryCoordinator {
             state: DeliveryState::Queued,
             created_at: now,
             expires_at: now + req.ttl,
+            expires_at_unix,
+            ack_timeout,
             attempts: 0,
             max_attempts: req.max_attempts,
             handshake_attempts: 0,
             max_handshake_attempts: DEFAULT_MAX_HANDSHAKE_ATTEMPTS,
             next_attempt_at: now,
             body: req.body,
-            is_privacy_mode: req.is_privacy_mode,
+            mode,
+            is_privacy_mode: req.is_privacy_mode || mode == MessageMode::Privacy,
+            attempted_gateways: Vec::new(),
+            last_gateway: None,
+            last_reason: RouteReason::NoRouteAvailable,
+            last_transport: ObservedTransport::Unknown,
+            last_emitted: None,
         };
         self.records.insert(req.logical_id, record);
+    }
+
+    /// Rehydrate a pending `OutboxRecord` from persistent storage after restart using
+    /// conservative remaining TTL (bounded by original `expires_at - created_at` against clock rollback).
+    pub fn rehydrate_record(
+        &mut self,
+        rec: OutboxRecord,
+        now_instant: Instant,
+        now_secs: u64,
+        ack_timeout: Duration,
+    ) -> Option<DeliveryAction> {
+        if rec.state.is_terminal() {
+            return None;
+        }
+        let original_ttl_secs = rec.expires_at.saturating_sub(rec.created_at);
+        if now_secs >= rec.expires_at {
+            return Some(DeliveryAction::Expired(rec.logical_id));
+        }
+        let remaining_secs = rec
+            .expires_at
+            .saturating_sub(now_secs)
+            .min(original_ttl_secs);
+        if remaining_secs == 0 {
+            return Some(DeliveryAction::Expired(rec.logical_id));
+        }
+
+        let record = OutgoingRecord {
+            logical_id: rec.logical_id,
+            recipient_peer_id: rec.recipient,
+            recipient_short_id: rec.recipient.short_id(),
+            state: DeliveryState::Queued,
+            created_at: now_instant,
+            expires_at: now_instant + Duration::from_secs(remaining_secs),
+            expires_at_unix: rec.expires_at,
+            ack_timeout,
+            attempts: rec.attempt_count,
+            max_attempts: rec.mode.max_attempts(),
+            handshake_attempts: 0,
+            max_handshake_attempts: DEFAULT_MAX_HANDSHAKE_ATTEMPTS,
+            next_attempt_at: now_instant,
+            body: rec.body,
+            mode: rec.mode,
+            is_privacy_mode: rec.mode == MessageMode::Privacy,
+            attempted_gateways: Vec::new(),
+            last_gateway: None,
+            last_reason: RouteReason::NoRouteAvailable,
+            last_transport: ObservedTransport::Unknown,
+            last_emitted: None,
+        };
+        self.records.insert(rec.logical_id, record);
+        None
+    }
+
+    pub fn record_gateway_attempt(
+        &mut self,
+        logical_id: &LogicalMessageId,
+        gateway: iroh::EndpointId,
+    ) {
+        if let Some(rec) = self.records.get_mut(logical_id) {
+            if !rec.attempted_gateways.contains(&gateway) {
+                rec.attempted_gateways.push(gateway);
+            }
+            rec.last_gateway = Some(gateway);
+        }
+    }
+
+    pub fn clear_attempted_gateways(&mut self, logical_id: &LogicalMessageId) {
+        if let Some(rec) = self.records.get_mut(logical_id) {
+            rec.attempted_gateways.clear();
+        }
+    }
+
+    pub fn clear_attempted_gateways_for_peer(&mut self, recipient: &ShortId) {
+        for rec in self.records.values_mut() {
+            if rec.recipient_short_id == *recipient && !rec.state.is_terminal() {
+                rec.attempted_gateways.clear();
+            }
+        }
+    }
+
+    pub fn record_emitted_event(
+        &mut self,
+        logical_id: &LogicalMessageId,
+        state: DeliveryState,
+        reason: RouteReason,
+    ) -> bool {
+        if let Some(rec) = self.records.get_mut(logical_id) {
+            let key = (state, reason);
+            if rec.last_emitted == Some(key) {
+                return false;
+            }
+            rec.last_emitted = Some(key);
+            true
+        } else {
+            true
+        }
+    }
+
+    pub fn set_route_meta(
+        &mut self,
+        logical_id: &LogicalMessageId,
+        reason: RouteReason,
+        transport: ObservedTransport,
+    ) {
+        if let Some(rec) = self.records.get_mut(logical_id) {
+            rec.last_reason = reason;
+            rec.last_transport = transport;
+        }
+    }
+
+    pub fn has_active_in_flight_for(&self, recipient: &PeerId, now: Instant) -> bool {
+        self.records.values().any(|r| {
+            r.recipient_peer_id == *recipient
+                && r.state == DeliveryState::InFlight
+                && now < r.next_attempt_at
+        })
     }
 
     pub fn get_state(&self, logical_id: &LogicalMessageId) -> Option<DeliveryState> {
@@ -417,6 +569,7 @@ impl DeliveryCoordinator {
         if has_route {
             record.handshake_attempts = record.handshake_attempts.saturating_add(1);
         }
+        record.state = DeliveryState::Queued;
         record.next_attempt_at = now + backoff_delay;
         Ok(())
     }
@@ -514,15 +667,16 @@ impl DeliveryCoordinator {
         let _ = self.reset_backoff_for_verified_peer(recipient, true, now);
     }
 
-    /// Check timers, advancing expired or exhausted messages to terminal states.
+    /// Check timers, advancing expired/exhausted messages to terminal states and emitting
+    /// at most one active retry candidate per recipient peer.
     pub fn check_timeouts(&mut self, now: Instant) -> Vec<DeliveryAction> {
         let mut actions = Vec::new();
 
+        // Pass 1: Enforce hard expiry and retry/handshake budget exhaustion first.
         for record in self.records.values_mut() {
             if record.state.is_terminal() {
                 continue;
             }
-
             if now >= record.expires_at {
                 record.state = DeliveryState::Expired;
                 actions.push(DeliveryAction::Expired(record.logical_id));
@@ -531,8 +685,46 @@ impl DeliveryCoordinator {
             {
                 record.state = DeliveryState::Failed;
                 actions.push(DeliveryAction::Failed(record.logical_id));
-            } else if now >= record.next_attempt_at {
-                actions.push(DeliveryAction::ReadyToRetry(record.logical_id));
+            }
+        }
+
+        // Pass 2: Identify recipients that already have an active InFlight attempt waiting for ACK.
+        let busy_recipients: HashSet<PeerId> = self
+            .records
+            .values()
+            .filter(|r| r.state == DeliveryState::InFlight && now < r.next_attempt_at)
+            .map(|r| r.recipient_peer_id)
+            .collect();
+
+        // Pass 3: Collect ready records and emit at most 1 ReadyToRetry per recipient.
+        let mut ready: Vec<(PeerId, Instant, Instant, LogicalMessageId)> = self
+            .records
+            .values()
+            .filter(|r| {
+                !r.state.is_terminal()
+                    && !busy_recipients.contains(&r.recipient_peer_id)
+                    && now >= r.next_attempt_at
+            })
+            .map(|r| {
+                (
+                    r.recipient_peer_id,
+                    r.expires_at,
+                    r.created_at,
+                    r.logical_id,
+                )
+            })
+            .collect();
+
+        ready.sort_by(|a, b| {
+            a.1.cmp(&b.1)
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(&b.3))
+        });
+
+        let mut picked_recipients = HashSet::new();
+        for (recipient, _, _, logical_id) in ready {
+            if picked_recipients.insert(recipient) {
+                actions.push(DeliveryAction::ReadyToRetry(logical_id));
             }
         }
 

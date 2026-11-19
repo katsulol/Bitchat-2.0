@@ -18,6 +18,15 @@ pub const DEFAULT_MESH_MTU: usize = 512;
 pub const DEFAULT_SEEN_CACHE_CAPACITY: usize = 1000;
 pub const DEFAULT_SEEN_CACHE_TTL: Duration = Duration::from_secs(120);
 
+/// Explicit outbound transport target for addressed mesh dispatches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendTarget {
+    Auto,
+    DirectBle,
+    Gateway(iroh::EndpointId),
+    BleMeshFlood,
+}
+
 /// An inbound envelope delivered to local application layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundMessage {
@@ -172,7 +181,20 @@ impl<T: Transport> MeshNode<T> {
         flags: Flags,
         payload: Vec<u8>,
     ) -> Result<MsgId> {
-        self.send_envelope(recipient, msg_type, flags, payload)
+        self.send_to_via(recipient, msg_type, flags, payload, SendTarget::Auto)
+            .await
+    }
+
+    /// Send addressed message explicitly via the selected transport target.
+    pub async fn send_to_via(
+        &mut self,
+        recipient: ShortId,
+        msg_type: MsgType,
+        flags: Flags,
+        payload: Vec<u8>,
+        target: SendTarget,
+    ) -> Result<MsgId> {
+        self.send_envelope_via(recipient, msg_type, flags, payload, target)
             .await
     }
 
@@ -182,6 +204,18 @@ impl<T: Transport> MeshNode<T> {
         msg_type: MsgType,
         flags: Flags,
         payload: Vec<u8>,
+    ) -> Result<MsgId> {
+        self.send_envelope_via(recipient, msg_type, flags, payload, SendTarget::Auto)
+            .await
+    }
+
+    async fn send_envelope_via(
+        &mut self,
+        recipient: ShortId,
+        msg_type: MsgType,
+        flags: Flags,
+        payload: Vec<u8>,
+        target: SendTarget,
     ) -> Result<MsgId> {
         self.origin_counter = self.origin_counter.saturating_add(1);
         let msg_id = compute_msg_id(&self.identity.peer_id(), self.origin_counter, &payload);
@@ -202,25 +236,65 @@ impl<T: Transport> MeshNode<T> {
         self.seen_cache.check_and_insert(msg_id, Instant::now());
 
         let encoded = env.encode()?;
-        let fragments = self.fragmenter.split(&encoded, self.mtu)?;
 
-        // Unicast shortcut: if addressed to an immediate neighbor, send directly
-        if !recipient.is_broadcast() && self.transport.neighbors().contains(&recipient) {
-            for frag in fragments {
-                self.transport.send(recipient, frag).await?;
+        match target {
+            SendTarget::Auto => {
+                let fragments = self.fragmenter.split(&encoded, self.mtu)?;
+                // Unicast shortcut: if addressed to an immediate neighbor, send directly
+                if !recipient.is_broadcast() && self.transport.neighbors().contains(&recipient) {
+                    for frag in fragments {
+                        self.transport.send(recipient, frag).await?;
+                        self.stats.inc_transmissions();
+                    }
+                } else {
+                    for frag in fragments {
+                        self.transport.broadcast(frag).await?;
+                        self.stats.inc_transmissions();
+                    }
+                }
+
+                // Forward to internet gateway if remote route configured
+                if let Some(bridge) = &self.gateway_bridge {
+                    if !recipient.is_broadcast() {
+                        let _ = bridge.forward_mesh_packet(&env, encoded).await;
+                    }
+                }
+            }
+            SendTarget::DirectBle => {
+                if recipient.is_broadcast() || !self.transport.neighbors().contains(&recipient) {
+                    return Err(crate::error::Error::Transport(format!(
+                        "Peer {recipient} is not a direct BLE neighbor"
+                    )));
+                }
+                let fragments = self.fragmenter.split(&encoded, self.mtu)?;
+                for frag in fragments {
+                    self.transport.send(recipient, frag).await?;
+                    self.stats.inc_transmissions();
+                }
+            }
+            SendTarget::Gateway(gw_ep) => {
+                if recipient.is_broadcast() {
+                    return Err(crate::error::Error::Transport(
+                        "Public broadcast cannot traverse internet gateway".into(),
+                    ));
+                }
+                let bridge = self.gateway_bridge.as_ref().ok_or_else(|| {
+                    crate::error::Error::Transport("Gateway bridge is not active".into())
+                })?;
+                let forwarded = bridge.forward_mesh_packet_via(gw_ep, &env, encoded).await?;
+                if !forwarded {
+                    return Err(crate::error::Error::Transport(
+                        "Gateway forward declined".into(),
+                    ));
+                }
                 self.stats.inc_transmissions();
             }
-        } else {
-            for frag in fragments {
-                self.transport.broadcast(frag).await?;
-                self.stats.inc_transmissions();
-            }
-        }
-
-        // Forward to internet gateway if remote route configured
-        if let Some(bridge) = &self.gateway_bridge {
-            if !recipient.is_broadcast() {
-                let _ = bridge.forward_mesh_packet(&env, encoded).await;
+            SendTarget::BleMeshFlood => {
+                let fragments = self.fragmenter.split(&encoded, self.mtu)?;
+                for frag in fragments {
+                    self.transport.broadcast(frag).await?;
+                    self.stats.inc_transmissions();
+                }
             }
         }
 
