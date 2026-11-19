@@ -17,3 +17,10 @@ app/android/local.properties
 app/android/app/build/
 app/ios/.symlinks/
 app/ios/Pods/
+
+# Release signing secrets (never commit)
+*.jks
+*.keystore
+*.p12
+app/android/key.properties
+bitchat_release_secrets*

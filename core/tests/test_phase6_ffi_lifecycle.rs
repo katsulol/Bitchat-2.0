@@ -54,10 +54,11 @@ fn test_t5_ffi_lifecycle_generations_validation_and_abi() {
         let _ = api::shutdown().await;
     });
 
-    // 1. Provenance & ABI version checking
+    // 1. Provenance & ABI version checking (including stale ABI v1 rejection)
     unsafe {
         assert_eq!(bitchat_abi_version(), CORE_ABI_VERSION);
         assert_eq!(bitchat_check_abi_version(CORE_ABI_VERSION), 0);
+        assert_eq!(bitchat_check_abi_version(1), -1);
         assert_eq!(bitchat_check_abi_version(CORE_ABI_VERSION + 77), -1);
         let mismatch_err =
             take_c_string(bitchat_last_error()).expect("ABI mismatch must set last_error");
