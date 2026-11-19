@@ -14,5 +14,6 @@ pub mod gateway;
 pub mod identity;
 pub mod mesh;
 pub mod storage;
+pub mod sync;
 pub mod transport;
 pub mod trust;

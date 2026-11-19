@@ -34,6 +34,10 @@ use crate::storage::{
     InjectedKeyProvider, KeyProvider, MemoryOutboxStore, MessageMode, OutboxLimits, OutboxManager,
     SendResult, SqliteOutboxStore,
 };
+use crate::sync::{
+    conversation_id, SqliteSyncStore, SyncRecord, SyncRecordKind, SyncSessionManager,
+    SyncSessionMetrics, SYNC_MAGIC,
+};
 use crate::transport::bridge::{BridgeHandle, BridgeTransport};
 use crate::transport::Transport;
 use crate::trust::{
@@ -170,6 +174,10 @@ pub struct BitchatCoreService {
     proximity_tracker: ProximityTracker,
     volatile_mgr: VolatileSessionManager,
     cover_mgr: CoverTrafficManager,
+    storage_path: PathBuf,
+    key_provider: Arc<dyn KeyProvider>,
+    sync_store: Option<SqliteSyncStore>,
+    sync_mgr: SyncSessionManager,
     known_peer_ids: HashMap<ShortId, PeerId>,
     ack_timeout: Duration,
     gateway_opted_in: bool,
@@ -286,6 +294,7 @@ impl BitchatCoreService {
                 let protected_exists = [
                     "bitchat_outbox.db",
                     "bitchat_trust.db",
+                    "bitchat_sync.db",
                     "identity.enc",
                     "identity.key",
                 ]
@@ -325,6 +334,9 @@ impl BitchatCoreService {
             "bitchat_trust.db",
             "bitchat_trust.db-wal",
             "bitchat_trust.db-shm",
+            "bitchat_sync.db",
+            "bitchat_sync.db-wal",
+            "bitchat_sync.db-shm",
             "bitchat_dek.enc",
         ] {
             let p = dir.join(name);
@@ -380,7 +392,7 @@ impl BitchatCoreService {
 
         let db_path = PathBuf::from(&storage_path).join("bitchat_outbox.db");
         let limits = OutboxLimits::default();
-        let sqlite_store = SqliteOutboxStore::open(&db_path, key_provider, limits)
+        let sqlite_store = SqliteOutboxStore::open(&db_path, Arc::clone(&key_provider), limits)
             .map_err(|e| format!("Failed to open SQLite store: {e:?}"))?;
         let memory_store = MemoryOutboxStore::new(limits);
         let mut outbox_mgr = OutboxManager::new(peer_id, sqlite_store, memory_store, limits);
@@ -434,6 +446,10 @@ impl BitchatCoreService {
             proximity_tracker: ProximityTracker::default(),
             volatile_mgr: VolatileSessionManager::new(true),
             cover_mgr: CoverTrafficManager::default(),
+            storage_path: PathBuf::from(&storage_path),
+            key_provider,
+            sync_store: None,
+            sync_mgr: SyncSessionManager::default(),
             known_peer_ids: HashMap::new(),
             ack_timeout,
             gateway_opted_in: false,
@@ -766,6 +782,23 @@ impl BitchatCoreService {
             .flatten()
             .map(|r| r.expires_at)
             .unwrap_or_else(|| now_secs.saturating_add(actual_ttl.as_secs()));
+
+        if self.sync_mgr.is_enabled() && mode == MessageMode::Normal && !track_volatile_send {
+            if let Some(ref store) = self.sync_store {
+                if let Ok(rec) = SyncRecord::create_signed(
+                    self.node.identity(),
+                    recipient_peer_id,
+                    logical_id,
+                    now_secs,
+                    expires_at_unix,
+                    SyncRecordKind::Message,
+                    text.as_bytes().to_vec(),
+                ) {
+                    let cid = rec.conv_id;
+                    let _ = store.upsert_records_atomic(&cid, &[rec], now_secs);
+                }
+            }
+        }
 
         let logical_id_hex = hex::encode(logical_id);
         let recipient_label = recipient_peer_id.to_string();
@@ -1358,11 +1391,12 @@ impl BitchatCoreService {
         Ok(handled)
     }
 
-    async fn send_direct_control_frame(
+    async fn send_control_frame_via(
         &mut self,
         recipient_peer_id: PeerId,
         target_short_id: ShortId,
         payload: Vec<u8>,
+        target: SendTarget,
     ) {
         if !self.peer_mgr.is_session_ready(&target_short_id) {
             return;
@@ -1384,14 +1418,24 @@ impl BitchatCoreService {
         if let Ok(padded) = pad_inner_payload(&app_frame.encode(), true) {
             let _ = self
                 .peer_mgr
-                .send_encrypted_via(
-                    &mut self.node,
-                    target_short_id,
-                    &padded,
-                    SendTarget::DirectBle,
-                )
+                .send_encrypted_via(&mut self.node, target_short_id, &padded, target)
                 .await;
         }
+    }
+
+    async fn send_direct_control_frame(
+        &mut self,
+        recipient_peer_id: PeerId,
+        target_short_id: ShortId,
+        payload: Vec<u8>,
+    ) {
+        self.send_control_frame_via(
+            recipient_peer_id,
+            target_short_id,
+            payload,
+            SendTarget::DirectBle,
+        )
+        .await;
     }
 
     pub async fn initiate_handshake(&mut self, recipient_short_id: String) -> Result<(), String> {
@@ -1680,6 +1724,7 @@ impl BitchatCoreService {
             .or_else(|| self.known_peer_ids.get(&peer).copied())
         {
             self.cover_mgr.remove_peer(&pid);
+            self.sync_mgr.abort_peer(&pid);
         }
         self.handle.on_peer_disconnected(peer);
         self.link_identities.remove(&link_key);
@@ -1718,7 +1763,10 @@ impl BitchatCoreService {
             }
         }
 
-        if let Some(msg) = self.node.recv_inbound() {
+        for _drain in 0..64 {
+            let Some(msg) = self.node.recv_inbound() else {
+                break;
+            };
             let now_inst = Instant::now();
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1788,7 +1836,7 @@ impl BitchatCoreService {
                         self.spawn_announce_local_peers();
                     }
                 }
-                return Ok(None);
+                continue;
             }
 
             if !msg.recipient.is_broadcast() {
@@ -1804,7 +1852,7 @@ impl BitchatCoreService {
                             capability: "ReceiveDirectMessage".to_string(),
                             timestamp: now_secs,
                         });
-                        return Ok(None);
+                        continue;
                     }
                 };
 
@@ -1822,7 +1870,7 @@ impl BitchatCoreService {
                         capability: "ReceiveDirectMessage".to_string(),
                         timestamp: now_secs,
                     });
-                    return Ok(None);
+                    continue;
                 };
 
                 let Ok(app_frame) = ApplicationFrame::decode(&unpadded) else {
@@ -1835,7 +1883,7 @@ impl BitchatCoreService {
                         capability: "ReceiveDirectMessage".to_string(),
                         timestamp: now_secs,
                     });
-                    return Ok(None);
+                    continue;
                 };
 
                 match app_frame.kind {
@@ -1852,7 +1900,7 @@ impl BitchatCoreService {
                                 capability: "ReceiveDirectMessage".to_string(),
                                 timestamp: now_secs,
                             });
-                            return Ok(None);
+                            continue;
                         }
 
                         let auth_ctx = AuthorizationContext {
@@ -1871,6 +1919,7 @@ impl BitchatCoreService {
                             )
                         };
                         if trust_dec.outcome == AuthOutcome::Deny {
+                            self.sync_mgr.abort_peer(&auth_sender);
                             self.push_auth_event(InboundAuthEvent {
                                 peer_id: auth_sender.to_string(),
                                 short_id: decrypted.origin_sender.to_string(),
@@ -1880,7 +1929,7 @@ impl BitchatCoreService {
                                 capability: "ReceiveDirectMessage".to_string(),
                                 timestamp: now_secs,
                             });
-                            return Ok(None);
+                            continue;
                         }
 
                         if app_frame.body.starts_with(VOLATILE_MAGIC) {
@@ -1920,7 +1969,7 @@ impl BitchatCoreService {
                                     }
                                 }
                             }
-                            return Ok(None);
+                            continue;
                         }
 
                         if app_frame.body.starts_with(COVER_MAGIC) {
@@ -1942,7 +1991,37 @@ impl BitchatCoreService {
                                     }
                                 }
                             }
-                            return Ok(None);
+                            continue;
+                        }
+
+                        if app_frame.body.starts_with(SYNC_MAGIC) {
+                            if trust_dec.outcome != AuthOutcome::Allow {
+                                self.sync_mgr.abort_peer(&auth_sender);
+                                continue;
+                            }
+                            let my_pid = self.node.identity().peer_id();
+                            let outcome = self.sync_mgr.handle_inbound_chunk(
+                                my_pid,
+                                auth_sender,
+                                &app_frame.body,
+                                self.sync_store.as_ref(),
+                                now_inst,
+                                now_secs,
+                            );
+                            for msg_lid in outcome.imported_message_ids {
+                                let _ =
+                                    self.dedup.check_or_insert(&auth_sender, &msg_lid, now_inst);
+                            }
+                            for out_chunk in outcome.outbound_chunks {
+                                self.send_control_frame_via(
+                                    auth_sender,
+                                    decrypted.origin_sender,
+                                    out_chunk,
+                                    SendTarget::Auto,
+                                )
+                                .await;
+                            }
+                            continue;
                         }
 
                         let auth_status = if trust_dec.outcome == AuthOutcome::Pending {
@@ -1960,7 +2039,7 @@ impl BitchatCoreService {
                                     capability: "ReceiveDirectMessage".to_string(),
                                     timestamp: now_secs,
                                 });
-                                return Ok(None);
+                                continue;
                             }
                             let is_vol = !matches!(
                                 self.volatile_mgr.session_state(&auth_sender),
@@ -2039,7 +2118,7 @@ impl BitchatCoreService {
                                 auth_status,
                             }));
                         }
-                        return Ok(None);
+                        continue;
                     }
                     ApplicationFrameKind::Ack => {
                         if let Ok(true) = self.delivery_coord.handle_ack(&app_frame, &auth_sender) {
@@ -2061,7 +2140,7 @@ impl BitchatCoreService {
                                 expires_at,
                             });
                         }
-                        return Ok(None);
+                        continue;
                     }
                 }
             }
@@ -2078,8 +2157,6 @@ impl BitchatCoreService {
                     auth_status: "Broadcast".to_string(),
                 }));
             }
-
-            return Ok(None);
         }
 
         Ok(None)
@@ -2647,6 +2724,7 @@ impl BitchatCoreService {
                 });
             }
             self.cover_mgr.remove_peer(&pid);
+            self.sync_mgr.abort_peer(&pid);
         }
         self.clear_pending_requests_for(&pid);
 
@@ -3094,6 +3172,196 @@ impl BitchatCoreService {
         })
         .to_string()
     }
+
+    /// Enable or disable experimental bounded Normal-mode sync (`bitchat_sync.db`, Default OFF).
+    pub fn set_sync_enabled(&mut self, enabled: bool) -> Result<bool, String> {
+        if enabled && self.sync_store.is_none() {
+            let db_path = self.storage_path.join("bitchat_sync.db");
+            let store = SqliteSyncStore::open(
+                &db_path,
+                self.node.identity().peer_id(),
+                Arc::clone(&self.key_provider),
+            )
+            .map_err(|e| format!("SYNC_STORAGE_ERROR: {e}"))?;
+            self.sync_store = Some(store);
+        }
+        self.sync_mgr.set_enabled(enabled);
+        Ok(self.sync_mgr.is_enabled())
+    }
+
+    pub fn sync_store(&self) -> Option<&SqliteSyncStore> {
+        self.sync_store.as_ref()
+    }
+
+    /// Initiate bounded conversation reconciliation (`Merkle` or `IdInventory` baseline) with an approved peer.
+    pub async fn initiate_sync(
+        &mut self,
+        peer_hex: &str,
+        use_merkle: bool,
+    ) -> Result<String, String> {
+        if !self.sync_mgr.is_enabled() {
+            return Err("SYNC_DISABLED: Enable sync before initiating reconciliation".into());
+        }
+        let Some((remote_pid, target_short)) = self.resolve_verified_peer_id(peer_hex).await?
+        else {
+            return Err("SYNC_UNVERIFIED_PEER: Full verified PeerId required".into());
+        };
+        if !self.peer_mgr.is_session_ready(&target_short) {
+            return Err("SYNC_NO_SESSION: Established Noise XX session required".into());
+        }
+        let now_inst = Instant::now();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let auth_ctx = AuthorizationContext {
+            now_monotonic: now_inst,
+            now_unix: Some(now_secs),
+            gateway_opted_in: self.gateway_opted_in,
+            allow_vouched_gateway_forwarding: false,
+        };
+        let allowed = {
+            let mut ts = self.trust_store.write().await;
+            TrustPolicy::authorize(
+                &mut ts,
+                &remote_pid,
+                Capability::ReceiveDirectMessage,
+                &auth_ctx,
+            )
+            .outcome
+                == AuthOutcome::Allow
+        };
+        if !allowed {
+            return Err("SYNC_UNAUTHORIZED_PEER: Peer must be explicitly approved".into());
+        }
+
+        let chunks = {
+            let store = self
+                .sync_store
+                .as_ref()
+                .ok_or_else(|| "SYNC_STORAGE_ERROR: Sync archive unavailable".to_string())?;
+            self.sync_mgr
+                .initiate_session(
+                    self.node.identity().peer_id(),
+                    remote_pid,
+                    store,
+                    use_merkle,
+                    now_inst,
+                    now_secs,
+                )
+                .map_err(|e| format!("SYNC_INIT_FAILED: {e}"))?
+        };
+        for c in chunks {
+            self.send_control_frame_via(remote_pid, target_short, c, SendTarget::Auto)
+                .await;
+        }
+        let cid = conversation_id(&self.node.identity().peer_id(), &remote_pid);
+        Ok(serde_json::json!({
+            "initiated": true,
+            "mode": if use_merkle { "merkle" } else { "id_inventory" },
+            "conv_id": hex::encode(cid),
+        })
+        .to_string())
+    }
+
+    /// Delete a retained Normal-mode sync record by creating a signed Tombstone without extending TTL.
+    pub async fn delete_sync_record(
+        &mut self,
+        peer_hex: &str,
+        logical_id_hex: &str,
+    ) -> Result<(), String> {
+        let store = self
+            .sync_store
+            .as_ref()
+            .ok_or_else(|| "SYNC_DISABLED: Sync archive is not open".to_string())?;
+        let Some((remote_pid, _)) = self.resolve_verified_peer_id(peer_hex).await? else {
+            return Err("SYNC_UNVERIFIED_PEER: Full verified PeerId required".into());
+        };
+        let lid = parse_logical_id_hex(logical_id_hex)?;
+        let cid = conversation_id(&self.node.identity().peer_id(), &remote_pid);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let existing = store
+            .list_records(&cid, now_secs)
+            .map_err(|e| format!("SYNC_STORAGE_ERROR: {e}"))?;
+        let (created_at, expires_at) = existing
+            .into_iter()
+            .find(|r| r.logical_id == lid)
+            .map(|r| (r.created_at_unix, r.expires_at_unix))
+            .unwrap_or((now_secs, now_secs.saturating_add(86_400)));
+
+        let tomb = SyncRecord::create_signed(
+            self.node.identity(),
+            remote_pid,
+            lid,
+            created_at,
+            expires_at,
+            SyncRecordKind::Tombstone,
+            Vec::new(),
+        )
+        .map_err(|e| format!("SYNC_TOMBSTONE_ERROR: {e}"))?;
+        store
+            .upsert_records_atomic(&cid, &[tomb], now_secs)
+            .map_err(|e| format!("SYNC_STORAGE_ERROR: {e}"))?;
+        Ok(())
+    }
+
+    /// Evict old sync tombstones/records up to `cutoff_created_at`, advancing anti-resurrection horizon.
+    pub async fn evict_sync_tombstones_before(
+        &self,
+        peer_hex: &str,
+        cutoff_created_at: u64,
+    ) -> Result<u64, String> {
+        let store = self
+            .sync_store
+            .as_ref()
+            .ok_or_else(|| "SYNC_DISABLED: Sync archive is not open".to_string())?;
+        let Some((remote_pid, _)) = self.resolve_verified_peer_id(peer_hex).await? else {
+            return Err("SYNC_UNVERIFIED_PEER: Full verified PeerId required".into());
+        };
+        let cid = conversation_id(&self.node.identity().peer_id(), &remote_pid);
+        let (_, new_horizon) = store
+            .evict_tombstones_before(&cid, cutoff_created_at)
+            .map_err(|e| format!("SYNC_STORAGE_ERROR: {e}"))?;
+        Ok(new_horizon)
+    }
+
+    pub async fn list_sync_records(&self, peer_hex: &str) -> Result<Vec<SyncRecord>, String> {
+        let store = self
+            .sync_store
+            .as_ref()
+            .ok_or_else(|| "SYNC_DISABLED: Sync archive is not open".to_string())?;
+        let Some((remote_pid, _)) = self.resolve_verified_peer_id(peer_hex).await? else {
+            return Err("SYNC_UNVERIFIED_PEER: Full verified PeerId required".into());
+        };
+        let cid = conversation_id(&self.node.identity().peer_id(), &remote_pid);
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        store
+            .list_records(&cid, now_secs)
+            .map_err(|e| format!("SYNC_STORAGE_ERROR: {e}"))
+    }
+
+    pub fn last_sync_metrics(&self, peer_id: &PeerId) -> Option<&SyncSessionMetrics> {
+        self.sync_mgr.metrics_for(peer_id)
+    }
+
+    /// Query experimental conversation sync configuration & counters as JSON.
+    pub fn get_sync_status(&self) -> String {
+        serde_json::json!({
+            "enabled": self.sync_mgr.is_enabled(),
+            "experimental": true,
+            "pending_crypto_review": true,
+            "active_sessions": self.sync_mgr.active_session_count(),
+            "max_records_per_conversation": crate::sync::MAX_SYNC_RECORDS_PER_CONVERSATION,
+            "max_session_bytes": crate::sync::MAX_SYNC_SESSION_BYTES,
+        })
+        .to_string()
+    }
 }
 
 fn verify_generation(generation: u64) -> Result<(), String> {
@@ -3387,6 +3655,27 @@ pub async fn get_cover_status() -> Result<String, String> {
     let lock = get_service().read().await;
     let svc = lock.as_ref().ok_or("Service not initialized")?;
     Ok(svc.get_cover_status())
+}
+
+/// Enable or disable experimental Normal-mode bounded sync (`bitchat_sync.db`, Default OFF).
+pub async fn set_sync_enabled(enabled: bool) -> Result<bool, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    svc.set_sync_enabled(enabled)
+}
+
+/// Initiate bounded reconciliation (`use_merkle = true` or `false` baseline) with an approved peer.
+pub async fn initiate_sync(peer_hex: String, use_merkle: bool) -> Result<String, String> {
+    let mut lock = get_service().write().await;
+    let svc = lock.as_mut().ok_or("Service not initialized")?;
+    svc.initiate_sync(&peer_hex, use_merkle).await
+}
+
+/// Query experimental sync state and resource limits as JSON string.
+pub async fn get_sync_status() -> Result<String, String> {
+    let lock = get_service().read().await;
+    let svc = lock.as_ref().ok_or("Service not initialized")?;
+    Ok(svc.get_sync_status())
 }
 
 mod hex {

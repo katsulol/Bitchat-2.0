@@ -1539,6 +1539,71 @@ pub unsafe extern "C" fn bitchat_get_cover_status() -> *mut c_char {
     })
 }
 
+/// Enable (`enabled != 0`) or disable (`enabled == 0`) experimental bounded Normal-mode sync (Default OFF).
+///
+/// # Safety
+///
+/// Returns `1` if enabled, `0` if disabled, or `-1` on error.
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_set_sync_enabled(enabled: u8) -> i32 {
+    ffi_guard_i32(|| {
+        let rt = match require_rt() {
+            Ok(r) => r,
+            Err(e) => return record_and_err_code(e),
+        };
+        match rt.block_on(api::set_sync_enabled(enabled != 0)) {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(e) => record_and_err_code(e),
+        }
+    })
+}
+
+/// Initiate bounded reconciliation (`use_merkle != 0` or ID-inventory baseline) with `peer_id`.
+///
+/// # Safety
+///
+/// `peer_id` must be a valid NUL-terminated C string. Returned JSON string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_initiate_sync(
+    peer_id: *const c_char,
+    use_merkle: u8,
+) -> *mut c_char {
+    ffi_guard_ptr(|| {
+        let target = match c_str_to_string_bounded(peer_id, MAX_FFI_STRING_LEN) {
+            Ok(s) => s,
+            Err(e) => return record_and_null(e),
+        };
+        let rt = match require_rt() {
+            Ok(r) => r,
+            Err(e) => return record_and_null(e),
+        };
+        match rt.block_on(api::initiate_sync(target, use_merkle != 0)) {
+            Ok(json) => string_to_c_char(json),
+            Err(e) => record_and_null(e),
+        }
+    })
+}
+
+/// Query experimental sync configuration and session counts as JSON.
+///
+/// # Safety
+///
+/// Returned JSON string must be freed via [`bitchat_free_string`].
+#[no_mangle]
+pub unsafe extern "C" fn bitchat_get_sync_status() -> *mut c_char {
+    ffi_guard_ptr(|| {
+        let rt = match require_rt() {
+            Ok(r) => r,
+            Err(e) => return record_and_null(e),
+        };
+        match rt.block_on(api::get_sync_status()) {
+            Ok(json) => string_to_c_char(json),
+            Err(e) => record_and_null(e),
+        }
+    })
+}
+
 /// Free a C string allocated by Bitchat core.
 ///
 /// # Safety
