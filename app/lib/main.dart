@@ -51,9 +51,14 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
   final List<ChatMessage> _messages = [];
   List<String> _peers = [];
   String? _selectedRecipient; // null = Broadcast
+  bool _selectedViaGateway = false;
   bool _isPrivacyMode = false;
+  bool _showComposerOptions = false;
   int? _selectedDeadlineSecs;
   bool _lastSessionReady = false;
+  String _lastVolatileState = 'NotRequested';
+  int _lastVolatileRetentionSecs = 0;
+  bool _lastSecureScreen = false;
   Timer? _pollTimer;
   Timer? _gatewayDialogTimer;
   StreamSubscription<ChatMessage>? _msgSub;
@@ -117,9 +122,33 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
       if (mounted) {
         final ready = _selectedRecipient != null ? _bridge.isSessionReady(_selectedRecipient!) : false;
         final gwPeersCount = _bridge.getGatewayRoutes().length;
-        if (ready != _lastSessionReady || gwPeersCount > 0) {
+        final volState = _selectedRecipient != null
+            ? _bridge.getVolatileState(_selectedRecipient!)
+            : null;
+        final volStateStr = volState?.state ?? 'NotRequested';
+        final volRetention = volState?.retentionSecs ?? 0;
+        final allTrackedPeers = <String>{
+          ..._peers,
+          ..._bridge.knownPeers,
+          ..._bridge.getGatewayRoutes(),
+        };
+        final anyActiveVolatile = allTrackedPeers.any(
+          (p) => _bridge.getVolatileState(p).state == 'Active',
+        );
+        final shouldSecure = anyActiveVolatile ||
+            volStateStr == 'Active' ||
+            volStateStr == 'PendingNegotiation';
+        if (shouldSecure != _lastSecureScreen) {
+          _lastSecureScreen = shouldSecure;
+          _bridge.setSecureScreen(shouldSecure);
+        }
+        final volChanged = volStateStr != _lastVolatileState ||
+            volRetention != _lastVolatileRetentionSecs;
+        if (ready != _lastSessionReady || gwPeersCount > 0 || volChanged) {
           setState(() {
             _lastSessionReady = ready;
+            _lastVolatileState = volStateStr;
+            _lastVolatileRetentionSecs = volRetention;
           });
         }
       }
@@ -272,31 +301,70 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                     ],
                   ),
                 ),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2E7D32).withValues(alpha: 0.2),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFF4CAF50), width: 0.8),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: const BoxDecoration(
-                          color: Color(0xFF4CAF50),
-                          shape: BoxShape.circle,
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    InkWell(
+                      borderRadius: BorderRadius.circular(12),
+                      onTap: () {
+                        final next = _bridge.cycleRelayContributionMode();
+                        setState(() {});
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Resource Profile: ${_formatRelayModeLabel(next)}'),
+                            duration: const Duration(seconds: 1),
+                          ),
+                        );
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.shade900.withValues(alpha: 0.25),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.amberAccent, width: 0.8),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.battery_saver, size: 12, color: Colors.amberAccent),
+                            const SizedBox(width: 4),
+                            Text(
+                              _formatRelayModeLabel(_bridge.relayContributionMode),
+                              style: const TextStyle(fontSize: 11, color: Colors.amberAccent, fontWeight: FontWeight.w600),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(width: 5),
-                      Text(
-                        '${_peers.length} peers',
-                        style: const TextStyle(fontSize: 11, color: Color(0xFF81C784), fontWeight: FontWeight.w600),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2E7D32).withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFF4CAF50), width: 0.8),
                       ),
-                    ],
-                  ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFF4CAF50),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                          Text(
+                            '${_peers.length} peers',
+                            style: const TextStyle(fontSize: 11, color: Color(0xFF81C784), fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
@@ -363,70 +431,140 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                 ],
               ),
             ),
-          // Neighbors bar
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            color: const Color(0xFF181818),
-            child: Row(
-              children: [
-                Icon(
-                  Icons.bluetooth,
-                  size: 18,
-                  color: _peers.isNotEmpty ? Colors.blue : Colors.grey,
-                ),
-                const SizedBox(width: 6),
-                Flexible(
-                  child: Text(
-                    '${_peers.length} Neighbors:',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: _peers.isEmpty
-                      ? const Text(
-                          'Scanning for BLE mesh peers...',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
-                        )
-                      : SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            children: _peers.map((peer) {
-                              final isSelected = _selectedRecipient == peer;
-                              final prox = _bridge.getPeerProximity(peer);
-                              final shortLabel = peer.length > 8 ? peer.substring(0, 8) : peer;
-                              final chipText = prox == 'Unknown' ? shortLabel : '$shortLabel ($prox)';
-                              return Padding(
-                                padding: const EdgeInsets.only(right: 6),
-                                child: Tooltip(
-                                  message: 'Signal category: $prox (coarse local BLE RSSI category, not distance in meters)',
-                                  child: FilterChip(
-                                    selected: isSelected,
-                                    label: Text(
-                                      chipText,
-                                      style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+          // Neighbors bar (includes online BLE peers + remembered offline peers so offline queueing works)
+          Builder(
+            builder: (ctx) {
+              final allPeers = <String>[
+                ..._peers,
+                ..._bridge.knownPeers.where((p) => !_peers.contains(p)),
+              ];
+              return Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                color: const Color(0xFF181818),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.bluetooth,
+                      size: 18,
+                      color: _peers.isNotEmpty ? Colors.blue : Colors.grey,
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        '${_peers.length} Neighbors:',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: allPeers.isEmpty
+                          ? const Text(
+                              'Scanning for BLE mesh peers...',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
+                            )
+                          : SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: allPeers.map((peer) {
+                                  final isOnline = _peers.contains(peer);
+                                  final isSelected = _selectedRecipient == peer && !_selectedViaGateway;
+                                  final prox = isOnline ? _bridge.getPeerProximity(peer) : 'Unknown';
+                                  final shortLabel = peer.length > 8 ? peer.substring(0, 8) : peer;
+                                  final chipText = !isOnline
+                                      ? '$shortLabel (Saved)'
+                                      : (prox == 'Unknown' ? shortLabel : '$shortLabel ($prox)');
+                                  return Padding(
+                                    padding: const EdgeInsets.only(right: 6),
+                                    child: Tooltip(
+                                      message: isOnline
+                                          ? 'Signal category: $prox (coarse local BLE RSSI category, not distance in meters)'
+                                          : 'Offline peer (messages will queue in outbox until reconnect)',
+                                      child: FilterChip(
+                                        selected: isSelected,
+                                        label: Text(
+                                          chipText,
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontFamily: 'monospace',
+                                            color: isOnline ? Colors.white : Colors.orangeAccent,
+                                          ),
+                                        ),
+                                        onSelected: (selected) {
+                                          setState(() {
+                                            _selectedRecipient = selected ? peer : null;
+                                            _selectedViaGateway = false;
+                                          });
+                                          if (selected && isOnline) {
+                                            _bridge.initiateHandshake(peer);
+                                          }
+                                        },
+                                      ),
                                     ),
-                                    onSelected: (selected) {
-                                      setState(() {
-                                        _selectedRecipient = selected ? peer : null;
-                                      });
-                                      if (selected) {
-                                        _bridge.initiateHandshake(peer);
-                                      }
-                                    },
-                                  ),
-                                ),
-                              );
-                            }).toList(),
-                          ),
-                        ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
+              );
+            },
+          ),
+
+          // Main-Screen Pending Message Requests Banner (quarantined until user approves)
+          Builder(
+            builder: (ctx) {
+              final pendingReqs = _bridge.getPendingMessageRequests();
+              if (pendingReqs.isEmpty) return const SizedBox.shrink();
+              final first = pendingReqs.first;
+              return Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                color: const Color(0xFF332600),
+                child: Row(
+                  children: [
+                    const Icon(Icons.mark_chat_unread_outlined, size: 16, color: Colors.amberAccent),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Message Request from ${first.senderShortId.length > 8 ? first.senderShortId.substring(0, 8) : first.senderShortId} (${pendingReqs.length} pending)',
+                        style: const TextStyle(fontSize: 11, color: Colors.amberAccent, fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      onPressed: () {
+                        _bridge.setPeerTrustState(first.senderPeerId, 'approve');
+                        setState(() {});
+                      },
+                      child: const Text('Accept', style: TextStyle(fontSize: 11, color: Colors.greenAccent, fontWeight: FontWeight.bold)),
+                    ),
+                    const SizedBox(width: 4),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        minimumSize: Size.zero,
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      onPressed: () {
+                        _bridge.setPeerTrustState(first.senderPeerId, 'block');
+                        setState(() {});
+                      },
+                      child: const Text('Reject', style: TextStyle(fontSize: 11, color: Colors.redAccent)),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
 
           // Gateway routes bar (peers reachable over Iroh QUIC tunnels)
@@ -455,7 +593,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                         scrollDirection: Axis.horizontal,
                         child: Row(
                           children: gwRoutes.map((peer) {
-                            final isSelected = _selectedRecipient == peer;
+                            final isSelected = _selectedRecipient == peer && _selectedViaGateway;
                             return Padding(
                               padding: const EdgeInsets.only(right: 6),
                               child: FilterChip(
@@ -467,6 +605,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                 onSelected: (selected) {
                                   setState(() {
                                     _selectedRecipient = selected ? peer : null;
+                                    _selectedViaGateway = selected;
                                   });
                                   if (selected) {
                                     _bridge.initiateHandshake(peer);
@@ -534,7 +673,10 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           GestureDetector(
                             onTap: () {
                               _bridge.setSecureScreen(false);
-                              setState(() => _selectedRecipient = null);
+                              setState(() {
+                                _selectedRecipient = null;
+                                _selectedViaGateway = false;
+                              });
                             },
                             child: const Text('Cancel', style: TextStyle(fontSize: 12, color: Colors.white70)),
                           ),
@@ -727,135 +869,233 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                   ),
           ),
 
-          // Message input bar
+          // Stacked options drawer above message input bar (toggled by 3-lines menu button)
+          if (_showComposerOptions)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: const BoxDecoration(
+                color: Color(0xFF181818),
+                border: Border(
+                  top: BorderSide(color: Colors.white12, width: 1),
+                  bottom: BorderSide(color: Colors.white12, width: 1),
+                ),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Row 1: Target Mode (Broadcast vs Direct) & Privacy Mode
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      const Text(
+                        'Mode:',
+                        style: TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.bold),
+                      ),
+                      ActionChip(
+                        visualDensity: VisualDensity.compact,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        avatar: Icon(
+                          _selectedRecipient == null ? Icons.campaign : Icons.lock,
+                          size: 15,
+                          color: _selectedRecipient == null ? Colors.amber : Colors.purpleAccent,
+                        ),
+                        label: Text(
+                          _selectedRecipient == null ? 'Broadcast' : 'Direct',
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        onPressed: () {
+                          final candidates = <String>[
+                            ..._peers,
+                            ..._bridge.knownPeers.where((p) => !_peers.contains(p)),
+                          ];
+                          if (candidates.isNotEmpty && _selectedRecipient == null) {
+                            setState(() {
+                              _selectedRecipient = candidates.first;
+                              _selectedViaGateway = !_peers.contains(candidates.first) &&
+                                  _bridge.getGatewayRoutes().contains(candidates.first);
+                            });
+                          } else {
+                            setState(() {
+                              _selectedRecipient = null;
+                              _selectedViaGateway = false;
+                            });
+                          }
+                        },
+                      ),
+                      if (_selectedRecipient != null)
+                        FilterChip(
+                          visualDensity: VisualDensity.compact,
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          selected: _isPrivacyMode,
+                          avatar: Icon(
+                            _isPrivacyMode ? Icons.security : Icons.security_outlined,
+                            size: 15,
+                            color: _isPrivacyMode ? Colors.tealAccent : Colors.grey,
+                          ),
+                          label: Text(
+                            _isPrivacyMode ? 'Privacy Mode: ON (BLE Only)' : 'Privacy Mode: OFF',
+                            style: const TextStyle(fontSize: 11),
+                          ),
+                          onSelected: (val) {
+                            setState(() {
+                              _isPrivacyMode = val;
+                            });
+                          },
+                        ),
+                    ],
+                  ),
+                  if (_selectedRecipient != null) ...[
+                    const SizedBox(height: 8),
+                    // Row 2: Delivery Deadline Presets
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        const Icon(Icons.hourglass_bottom, size: 14, color: Colors.lightGreenAccent),
+                        const Text(
+                          'Deadline:',
+                          style: TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.bold),
+                        ),
+                        for (final preset in const <(int?, String)>[
+                          (null, 'Default'),
+                          (DeliveryExplanation.preset2mSecs, '2m'),
+                          (DeliveryExplanation.preset15mSecs, '15m'),
+                          (DeliveryExplanation.preset1hSecs, '1h'),
+                        ])
+                          ChoiceChip(
+                            visualDensity: VisualDensity.compact,
+                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            selected: _selectedDeadlineSecs == preset.$1,
+                            label: Text(preset.$2, style: const TextStyle(fontSize: 11)),
+                            onSelected: (_) {
+                              if (!DeliveryExplanation.isDeadlineCompatibleWithMode(
+                                preset.$1,
+                                isPrivacy: _isPrivacyMode,
+                              )) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Selected deadline exceeds current mode maximum TTL'),
+                                  ),
+                                );
+                                return;
+                              }
+                              setState(() {
+                                _selectedDeadlineSecs = preset.$1;
+                              });
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    // Row 3: Volatile Chat Retention
+                    Builder(
+                      builder: (ctx) {
+                        final vs = _bridge.getVolatileState(_selectedRecipient!);
+                        return Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            const Icon(Icons.timer_outlined, size: 14, color: Colors.orangeAccent),
+                            const Text(
+                              'Volatile:',
+                              style: TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.bold),
+                            ),
+                            for (final entry in const <(int, String)>[
+                              (0, 'Persistent (Off)'),
+                              (300, '5m RAM-Only'),
+                              (900, '15m RAM-Only'),
+                            ])
+                              ChoiceChip(
+                                visualDensity: VisualDensity.compact,
+                                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                selected: (entry.$1 == 0 && vs.state == 'NotRequested') ||
+                                    (entry.$1 > 0 && vs.state != 'NotRequested' && vs.retentionSecs == entry.$1),
+                                label: Text(entry.$2, style: const TextStyle(fontSize: 11)),
+                                onSelected: (_) {
+                                  final state = _bridge.setVolatileSession(_selectedRecipient!, entry.$1);
+                                  _bridge.setSecureScreen(entry.$1 > 0);
+                                  setState(() {});
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        entry.$1 == 0
+                                            ? 'Volatile chat disabled (Persistent E2EE)'
+                                            : 'Volatile chat requested (${entry.$1}s): ${state ?? "Unavailable (handshake required)"}',
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  // Row 4: Resource-Budgeted Relaying Profile
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      const Icon(Icons.battery_saver, size: 14, color: Colors.amberAccent),
+                      const Text(
+                        'Relay Profile:',
+                        style: TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.bold),
+                      ),
+                      for (final entry in const [
+                        ('balanced', 'Balanced'),
+                        ('help_network', 'Help Network'),
+                        ('minimal', 'Minimal'),
+                        ('receive_only', 'Paused'),
+                      ])
+                        ChoiceChip(
+                          visualDensity: VisualDensity.compact,
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          selected: _bridge.relayContributionMode == entry.$1,
+                          label: Text(entry.$2, style: const TextStyle(fontSize: 11)),
+                          onSelected: (_) {
+                            _bridge.setRelayContributionMode(entry.$1);
+                            setState(() {});
+                          },
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+          // Message input bar (3-lines button on left, wide multi-line typing box in middle, Send on right)
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
             color: const Color(0xFF1E1E1E),
             child: SafeArea(
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  ActionChip(
-                    visualDensity: VisualDensity.compact,
-                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    padding: const EdgeInsets.symmetric(horizontal: 2),
-                    avatar: Icon(
-                      _selectedRecipient == null ? Icons.campaign : Icons.lock,
-                      size: 15,
-                      color: _selectedRecipient == null ? Colors.amber : Colors.purpleAccent,
-                    ),
-                    label: Text(
-                      _selectedRecipient == null ? 'Broadcast' : 'Direct',
-                      style: const TextStyle(fontSize: 12),
+                  IconButton(
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+                    tooltip: 'Chat & Delivery Options',
+                    icon: Icon(
+                      _showComposerOptions ? Icons.close : Icons.menu,
+                      color: _showComposerOptions
+                          ? Colors.amberAccent
+                          : (_selectedRecipient != null ? Colors.purpleAccent : Colors.white70),
+                      size: 24,
                     ),
                     onPressed: () {
-                      if (_peers.isNotEmpty && _selectedRecipient == null) {
-                        setState(() {
-                          _selectedRecipient = _peers.first;
-                        });
-                      } else {
-                        setState(() {
-                          _selectedRecipient = null;
-                        });
-                      }
+                      setState(() {
+                        _showComposerOptions = !_showComposerOptions;
+                      });
                     },
                   ),
-                  if (_selectedRecipient != null) ...[
-                    const SizedBox(width: 4),
-                    IconButton(
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                      icon: Icon(
-                        _isPrivacyMode ? Icons.security : Icons.security_outlined,
-                        color: _isPrivacyMode ? Colors.tealAccent : Colors.grey,
-                        size: 20,
-                      ),
-                      tooltip: _isPrivacyMode ? 'Privacy Mode (Direct transport only)' : 'Standard Mode',
-                      onPressed: () {
-                        setState(() {
-                          _isPrivacyMode = !_isPrivacyMode;
-                        });
-                      },
-                    ),
-                    PopupMenuButton<int?>(
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                      tooltip: 'Delivery Deadline (${DeliveryExplanation.formatDeadlineLabel(_selectedDeadlineSecs)})',
-                      icon: Icon(
-                        Icons.hourglass_bottom,
-                        color: _selectedDeadlineSecs != null ? Colors.lightGreenAccent : Colors.grey,
-                        size: 20,
-                      ),
-                      onSelected: (secs) {
-                        if (!DeliveryExplanation.isDeadlineCompatibleWithMode(
-                          secs,
-                          isPrivacy: _isPrivacyMode,
-                        )) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Selected deadline exceeds current mode maximum TTL'),
-                            ),
-                          );
-                          return;
-                        }
-                        setState(() {
-                          _selectedDeadlineSecs = secs;
-                        });
-                      },
-                      itemBuilder: (ctx) => [
-                        const PopupMenuItem(
-                          value: null,
-                          child: Text('Delivery Deadline: Mode Default (24h / 15m)'),
-                        ),
-                        const PopupMenuItem(
-                          value: DeliveryExplanation.preset2mSecs,
-                          child: Text('Delivery Deadline: 2 minutes (120s)'),
-                        ),
-                        const PopupMenuItem(
-                          value: DeliveryExplanation.preset15mSecs,
-                          child: Text('Delivery Deadline: 15 minutes (900s)'),
-                        ),
-                        const PopupMenuItem(
-                          value: DeliveryExplanation.preset1hSecs,
-                          child: Text('Delivery Deadline: 1 hour (3600s)'),
-                        ),
-                      ],
-                    ),
-                    PopupMenuButton<int>(
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                      tooltip: 'Volatile Chat Retention',
-                      icon: Builder(
-                        builder: (ctx) {
-                          final vs = _bridge.getVolatileState(_selectedRecipient!);
-                          final active = vs.state != 'NotRequested' && vs.state != 'UnsupportedByPeer';
-                          return Icon(
-                            active ? Icons.timer : Icons.timer_outlined,
-                            color: active ? Colors.orangeAccent : Colors.grey,
-                            size: 20,
-                          );
-                        },
-                      ),
-                      onSelected: (ttlSecs) {
-                        final state = _bridge.setVolatileSession(_selectedRecipient!, ttlSecs);
-                        _bridge.setSecureScreen(ttlSecs > 0);
-                        setState(() {});
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              ttlSecs == 0
-                                  ? 'Volatile chat disabled (Persistent E2EE)'
-                                  : 'Volatile chat requested (${ttlSecs}s): ${state ?? "Unavailable (handshake required)"}',
-                            ),
-                          ),
-                        );
-                      },
-                      itemBuilder: (ctx) => const [
-                        PopupMenuItem(value: 0, child: Text('Persistent Chat (Default)')),
-                        PopupMenuItem(value: 300, child: Text('Volatile Chat: 5 min (300s)')),
-                        PopupMenuItem(value: 900, child: Text('Volatile Chat: 15 min (900s)')),
-                      ],
-                    ),
-                  ],
                   const SizedBox(width: 6),
                   Expanded(
                     child: Builder(
@@ -867,20 +1107,25 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                           controller: _inputController,
                           enableSuggestions: !isVolatileInput,
                           autocorrect: !isVolatileInput,
+                          minLines: 1,
+                          maxLines: 4,
+                          textInputAction: TextInputAction.send,
+                          style: const TextStyle(fontSize: 15),
                           decoration: InputDecoration(
-                            isDense: true,
                             hintText: _selectedRecipient == null
-                                ? 'Broadcast...'
-                                : 'Private message...',
+                                ? 'Broadcast message...'
+                                : (_isPrivacyMode
+                                    ? 'Direct (Privacy BLE)...'
+                                    : 'Direct encrypted message...'),
                             border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
+                              borderRadius: BorderRadius.circular(22),
                               borderSide: BorderSide.none,
                             ),
                             filled: true,
                             fillColor: const Color(0xFF2C2C2C),
                             contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 8,
+                              horizontal: 16,
+                              vertical: 12,
                             ),
                           ),
                           onSubmitted: (_) => _sendMessage(),
@@ -888,11 +1133,11 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       },
                     ),
                   ),
-                  const SizedBox(width: 4),
+                  const SizedBox(width: 6),
                   IconButton(
                     padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-                    icon: const Icon(Icons.send, color: Color(0xFF4CAF50)),
+                    constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                    icon: const Icon(Icons.send, color: Color(0xFF4CAF50), size: 24),
                     onPressed: _sendMessage,
                   ),
                 ],
@@ -902,6 +1147,22 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
         ],
       ),
     );
+  }
+
+  String _formatRelayModeLabel(String mode) {
+    switch (mode) {
+      case 'receive_only':
+      case 'paused':
+        return 'Paused';
+      case 'minimal':
+        return 'Minimal';
+      case 'help_network':
+      case 'assisted':
+        return 'Help Net';
+      case 'balanced':
+      default:
+        return 'Balanced';
+    }
   }
 
   Widget _buildDeliveryStatusIcon(String state) {
@@ -1345,71 +1606,136 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       Builder(
                         builder: (ctx) {
                           final pending = _bridge.getPendingGatewayPeers();
-                          if (pending.isEmpty) return const SizedBox.shrink();
+                          final diag = _bridge.getDiagnostics();
+                          final approvedCount = diag?.approvedGatewayCount ?? _bridge.approvedGatewayContacts.length;
+                          final approvedIds = _bridge.approvedGatewayContacts.toList();
                           return Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               const SizedBox(height: 12),
                               Text(
-                                'Pending Gateway Consent (${pending.length}):',
-                                style: const TextStyle(fontSize: 11, color: Colors.amberAccent, fontWeight: FontWeight.bold),
+                                'Gateway Consent List (Approved: $approvedCount | Pending: ${pending.length}):',
+                                style: const TextStyle(fontSize: 11, color: Colors.tealAccent, fontWeight: FontWeight.bold),
                               ),
-                              const SizedBox(height: 4),
-                              const Text(
-                                'Uninvited peers verified identity-key ownership but cannot use your gateway until approved.',
-                                style: TextStyle(fontSize: 10, color: Colors.grey),
-                              ),
-                              const SizedBox(height: 6),
-                              ...pending.map((p) {
-                                return Card(
-                                  color: const Color(0xFF282828),
-                                  margin: const EdgeInsets.only(bottom: 6),
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                    child: Row(
-                                      children: [
-                                        Expanded(
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              Text(
-                                                'ShortId: ${p.shortId}',
-                                                style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.bold),
-                                              ),
-                                              Text(
-                                                'PeerId: ${p.peerId.length > 16 ? "${p.peerId.substring(0, 16)}..." : p.peerId}',
-                                                style: const TextStyle(fontSize: 9, fontFamily: 'monospace', color: Colors.grey),
-                                              ),
-                                            ],
+                              if (pending.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                Text(
+                                  'Pending Gateway Consent (${pending.length}):',
+                                  style: const TextStyle(fontSize: 11, color: Colors.amberAccent, fontWeight: FontWeight.bold),
+                                ),
+                                const SizedBox(height: 4),
+                                const Text(
+                                  'Uninvited peers verified identity-key ownership but cannot use your gateway until approved.',
+                                  style: TextStyle(fontSize: 10, color: Colors.grey),
+                                ),
+                                const SizedBox(height: 6),
+                                ...pending.map((p) {
+                                  return Card(
+                                    color: const Color(0xFF282828),
+                                    margin: const EdgeInsets.only(bottom: 6),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                      child: Row(
+                                        children: [
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  'ShortId: ${p.shortId}',
+                                                  style: const TextStyle(fontSize: 11, fontFamily: 'monospace', fontWeight: FontWeight.bold),
+                                                ),
+                                                Text(
+                                                  'PeerId: ${p.peerId.length > 16 ? "${p.peerId.substring(0, 16)}..." : p.peerId}',
+                                                  style: const TextStyle(fontSize: 9, fontFamily: 'monospace', color: Colors.grey),
+                                                ),
+                                              ],
+                                            ),
                                           ),
-                                        ),
-                                        TextButton(
-                                          onPressed: () {
-                                            final ok = _bridge.approveGatewayPeer(p.endpointId);
-                                            setModalState(() {});
-                                            setState(() {});
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                              SnackBar(content: Text(ok ? 'Approved gateway peer ${p.shortId}' : 'Approval failed')),
-                                            );
-                                          },
-                                          child: const Text('Approve', style: TextStyle(fontSize: 11, color: Colors.greenAccent)),
-                                        ),
-                                        TextButton(
-                                          onPressed: () {
-                                            final ok = _bridge.revokeOrBlockGatewayPeer(p.endpointId, block: true);
-                                            setModalState(() {});
-                                            setState(() {});
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                              SnackBar(content: Text(ok ? 'Blocked gateway peer ${p.shortId}' : 'Block failed')),
-                                            );
-                                          },
-                                          child: const Text('Block', style: TextStyle(fontSize: 11, color: Colors.redAccent)),
-                                        ),
-                                      ],
+                                          TextButton(
+                                            onPressed: () {
+                                              final ok = _bridge.approveGatewayPeer(p.endpointId);
+                                              setModalState(() {});
+                                              setState(() {});
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text(ok ? 'Approved gateway peer ${p.shortId}' : 'Approval failed')),
+                                              );
+                                            },
+                                            child: const Text('Approve', style: TextStyle(fontSize: 11, color: Colors.greenAccent)),
+                                          ),
+                                          TextButton(
+                                            onPressed: () {
+                                              final ok = _bridge.revokeOrBlockGatewayPeer(p.endpointId, block: true);
+                                              setModalState(() {});
+                                              setState(() {});
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text(ok ? 'Blocked gateway peer ${p.shortId}' : 'Block failed')),
+                                              );
+                                            },
+                                            child: const Text('Block', style: TextStyle(fontSize: 11, color: Colors.redAccent)),
+                                          ),
+                                        ],
+                                      ),
                                     ),
-                                  ),
-                                );
-                              }),
+                                  );
+                                }),
+                              ] else if (approvedIds.isEmpty) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  approvedCount > 0
+                                      ? '$approvedCount gateway peer(s) approved via single-use 5-min QR pairing token.'
+                                      : 'No pending or approved gateway peers yet. Scan a Gateway QR or enter a contact URI.',
+                                  style: const TextStyle(fontSize: 10, color: Colors.grey),
+                                ),
+                              ],
+                              if (approvedIds.isNotEmpty) ...[
+                                const SizedBox(height: 6),
+                                ...approvedIds.map((ep) {
+                                  final shortEp = ep.length > 16 ? '${ep.substring(0, 16)}...' : ep;
+                                  return Card(
+                                    color: const Color(0xFF1E2A24),
+                                    margin: const EdgeInsets.only(bottom: 6),
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.verified, size: 14, color: Colors.greenAccent),
+                                          const SizedBox(width: 6),
+                                          Expanded(
+                                            child: Text(
+                                              'Approved: $shortEp',
+                                              style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ),
+                                          TextButton(
+                                            onPressed: () {
+                                              final ok = _bridge.revokeOrBlockGatewayPeer(ep, block: false);
+                                              setModalState(() {});
+                                              setState(() {});
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text(ok ? 'Revoked gateway $shortEp' : 'Revoke failed')),
+                                              );
+                                            },
+                                            child: const Text('Revoke', style: TextStyle(fontSize: 11, color: Colors.amberAccent)),
+                                          ),
+                                          TextButton(
+                                            onPressed: () {
+                                              final ok = _bridge.revokeOrBlockGatewayPeer(ep, block: true);
+                                              setModalState(() {});
+                                              setState(() {});
+                                              ScaffoldMessenger.of(context).showSnackBar(
+                                                SnackBar(content: Text(ok ? 'Blocked gateway $shortEp' : 'Block failed')),
+                                              );
+                                            },
+                                            child: const Text('Block', style: TextStyle(fontSize: 11, color: Colors.redAccent)),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  );
+                                }),
+                              ],
                             ],
                           );
                         },
@@ -1442,6 +1768,7 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                     onPressed: () {
                                       setState(() {
                                         _selectedRecipient = r;
+                                        _selectedViaGateway = true;
                                       });
                                       Navigator.pop(ctx);
                                     },
@@ -1955,39 +2282,55 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       ),
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
-                    if (_peers.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          const Text('Connected peers:', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                          for (final p in _peers)
-                            ActionChip(
-                              avatar: const Icon(Icons.bluetooth, size: 12, color: Colors.tealAccent),
-                              label: Text(p, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
-                              padding: EdgeInsets.zero,
-                              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              onPressed: () {
-                                final full = _bridge.getPeerFullId(p);
-                                if (full != null && full.length >= 64) {
-                                  peerTrustCtrl.text = full;
-                                  setModalState(() {
-                                    statusSuccess = true;
-                                    statusMessage = 'Target set to neighbor $p (64-hex).';
-                                  });
-                                } else {
-                                  setModalState(() {
-                                    statusSuccess = false;
-                                    statusMessage = 'Neighbor $p key not synced yet. Scan "Show My QR" from the other phone.';
-                                  });
-                                }
-                              },
-                            ),
-                        ],
-                      ),
-                    ],
+                    Builder(
+                      builder: (ctx) {
+                        final candidatePeers = <String>[
+                          ..._peers,
+                          ..._bridge.knownPeers.where((p) => !_peers.contains(p)),
+                        ];
+                        if (candidatePeers.isEmpty) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              const Text('Known peers:', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                              for (final p in candidatePeers)
+                                ActionChip(
+                                  avatar: Icon(
+                                    _peers.contains(p) ? Icons.bluetooth : Icons.history,
+                                    size: 12,
+                                    color: _peers.contains(p) ? Colors.tealAccent : Colors.orangeAccent,
+                                  ),
+                                  label: Text(
+                                    '${p.length > 8 ? p.substring(0, 8) : p}${_peers.contains(p) ? "" : " (Off)"}',
+                                    style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
+                                  ),
+                                  padding: EdgeInsets.zero,
+                                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  onPressed: () {
+                                    final full = _bridge.getPeerFullId(p);
+                                    if (full != null && full.length >= 64) {
+                                      peerTrustCtrl.text = full;
+                                      setModalState(() {
+                                        statusSuccess = true;
+                                        statusMessage = 'Target set to peer $p (64-hex).';
+                                      });
+                                    } else {
+                                      setModalState(() {
+                                        statusSuccess = false;
+                                        statusMessage = 'Peer $p key not synced yet. Scan "Show My QR" from the other phone.';
+                                      });
+                                    }
+                                  },
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
                     const SizedBox(height: 8),
                     Wrap(
                       spacing: 6,
@@ -2122,39 +2465,51 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                       ),
                       style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
                     ),
-                    if (_peers.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        crossAxisAlignment: WrapCrossAlignment.center,
-                        children: [
-                          const Text('Audience from mesh:', style: TextStyle(fontSize: 10, color: Colors.grey)),
-                          for (final p in _peers)
-                            ActionChip(
-                              avatar: const Icon(Icons.devices, size: 12, color: Colors.greenAccent),
-                              label: Text(p, style: const TextStyle(fontSize: 10, fontFamily: 'monospace')),
-                              padding: EdgeInsets.zero,
-                              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              onPressed: () {
-                                final full = _bridge.getPeerFullId(p);
-                                if (full != null && full.length >= 64) {
-                                  audienceCtrl.text = full;
-                                  setModalState(() {
-                                    statusSuccess = true;
-                                    statusMessage = 'Audience set to neighbor $p (64-hex).';
-                                  });
-                                } else {
-                                  setModalState(() {
-                                    statusSuccess = false;
-                                    statusMessage = 'Neighbor $p key not synced yet. Scan "Show My QR" from the other phone.';
-                                  });
-                                }
-                              },
-                            ),
-                        ],
-                      ),
-                    ],
+                    Builder(
+                      builder: (ctx) {
+                        final candidatePeers = <String>[
+                          ..._peers,
+                          ..._bridge.knownPeers.where((p) => !_peers.contains(p)),
+                        ];
+                        if (candidatePeers.isEmpty) return const SizedBox.shrink();
+                        return Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              const Text('Audience from mesh:', style: TextStyle(fontSize: 10, color: Colors.grey)),
+                              for (final p in candidatePeers)
+                                ActionChip(
+                                  avatar: const Icon(Icons.devices, size: 12, color: Colors.greenAccent),
+                                  label: Text(
+                                    '${p.length > 8 ? p.substring(0, 8) : p}${_peers.contains(p) ? "" : " (Off)"}',
+                                    style: const TextStyle(fontSize: 10, fontFamily: 'monospace'),
+                                  ),
+                                  padding: EdgeInsets.zero,
+                                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  onPressed: () {
+                                    final full = _bridge.getPeerFullId(p);
+                                    if (full != null && full.length >= 64) {
+                                      audienceCtrl.text = full;
+                                      setModalState(() {
+                                        statusSuccess = true;
+                                        statusMessage = 'Audience set to peer $p (64-hex).';
+                                      });
+                                    } else {
+                                      setModalState(() {
+                                        statusSuccess = false;
+                                        statusMessage = 'Peer $p key not synced yet. Scan "Show My QR" from the other phone.';
+                                      });
+                                    }
+                                  },
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -2275,7 +2630,14 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                         statusMessage = 'SUCCESS: Peer $subjectShortId introduced via 1-hop voucher (scoped capability authorized)!';
                                       } else {
                                         statusSuccess = false;
-                                        statusMessage = 'REJECTED: Untrusted introducer, wrong audience, or expired.';
+                                        final err = _bridge.lastCoreError ?? '';
+                                        if (err.contains('not a locally approved introducer')) {
+                                          statusMessage = 'REJECTED: Issuer is not approved as an Introducer. Select the issuer peer above -> tap "Approve + Introducer", then retry.';
+                                        } else {
+                                          statusMessage = err.isNotEmpty
+                                              ? 'REJECTED: $err'
+                                              : 'REJECTED: Untrusted introducer, wrong audience, or expired.';
+                                        }
                                       }
                                     });
                                     setState(() {});
@@ -2299,7 +2661,14 @@ class _MeshChatScreenState extends State<MeshChatScreen> {
                                 statusMessage = 'SUCCESS: Peer $subjectShortId introduced via 1-hop voucher!';
                               } else {
                                 statusSuccess = false;
-                                statusMessage = 'REJECTED: Untrusted introducer, wrong audience, or expired.';
+                                final err = _bridge.lastCoreError ?? '';
+                                if (err.contains('not a locally approved introducer')) {
+                                  statusMessage = 'REJECTED: Issuer is not approved as an Introducer. Select the issuer peer above -> tap "Approve + Introducer", then retry.';
+                                } else {
+                                  statusMessage = err.isNotEmpty
+                                      ? 'REJECTED: $err'
+                                      : 'REJECTED: Untrusted introducer, wrong audience, or expired.';
+                                }
                               }
                             });
                             setState(() {});

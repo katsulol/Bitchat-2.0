@@ -507,7 +507,7 @@ void main() {
       findsOneWidget,
     );
 
-    // Disconnect peer: must stay selected showing (Offline), NEVER revert to Broadcast!
+    // Disconnect peer: must stay selected showing (Offline) and chip stays visible as (Saved)
     final discMsg = const StandardMethodCodec().encodeMethodCall(
       const MethodCall('onPeerDisconnected', {'shortId': peerShort}),
     );
@@ -515,7 +515,7 @@ void main() {
         .handlePlatformMessage(channel.name, discMsg, (_) {});
     await tester.pump();
     expect(find.textContaining('Offline'), findsOneWidget);
-    expect(find.text('Direct'), findsOneWidget);
+    expect(find.textContaining('22334455 (Saved)'), findsOneWidget);
 
     // Enter draft, attempt send under UnsupportedByPeer -> blocked, draft preserved in TextField!
     const draft = 'Secret unsent volatile draft';

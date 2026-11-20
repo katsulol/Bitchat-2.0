@@ -321,6 +321,7 @@ class BitchatBleService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun stopMeshInternal() {
+        val previouslyConnected = shortIdToLinks.keys.toList()
         stopAdvertising()
         stopScanning()
         closeGattServer()
@@ -334,6 +335,10 @@ class BitchatBleService : Service() {
         subscribedClients.clear()
         peerMtu.clear()
         isGattServerReady = false
+        for (shortId in previouslyConnected) {
+            Log.i(TAG, "Peer disconnected on radio stop: ShortId $shortId")
+            listener?.onPeerDisconnected(shortId)
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -991,7 +996,7 @@ class BitchatBleService : Service() {
 
         val contactedAddrs = HashSet<String>()
 
-        // 1. Client GATT write priority (Single-path: prevents 2x duplicate delivery)
+        // 1. Client GATT write (Central -> Peripheral)
         for (addr in candidateAddrs) {
             val gatt = outgoingGatts[addr]
             if (gatt != null) {
@@ -1001,12 +1006,14 @@ class BitchatBleService : Service() {
             }
         }
 
-        // 2. Server notification fallback for devices connected to our GATT server not reached via Central
+        // 2. Server GATT notification (Peripheral -> Central): also send over server notification channel
+        // so asymmetric / half-open dual-role BLE links between two Android phones never drop ACKs or messages.
+        // Rust SeenCache and InboxDeduplicator deduplicate any double arrival in O(1).
         val notifyChar = gattServer?.getService(SERVICE_UUID)?.getCharacteristic(CHAR_NOTIFY_UUID)
         if (notifyChar != null) {
             for (dev in serverConnectedDevices) {
                 val addr = dev.address
-                if (!contactedAddrs.contains(addr) && subscribedClients.contains(addr)) {
+                if (subscribedClients.contains(addr)) {
                     if (normTarget == null || addrToShortId[addr]?.uppercase() == normTarget) {
                         enqueueServerNotification(dev, notifyChar, data)
                         sentCount++

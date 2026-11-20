@@ -295,8 +295,12 @@ class MeshBridge {
   final _stateController = StreamController<void>.broadcast();
 
   final Set<String> _connectedPeers = {};
+  final Set<String> _knownPeers = {};
   final Set<String> _seenMsgIds = {};
   final List<RustAuthEvent> recentAuthEvents = [];
+  final List<ChatMessage> _quarantinedMessages = [];
+  final Map<String, String> peerTrustStates = {}; // peerIdHex -> 'approve' | 'introducer' | 'block' | 'revoke'
+  final Set<String> approvedGatewayContacts = {}; // endpointId / URI summary
 
   String myShortId = "Initializing...";
   String myPeerId = "Generating...";
@@ -319,6 +323,8 @@ class MeshBridge {
   Stream<RustDeliveryEvent> get deliveryEvents => _deliveryEventController.stream;
   Stream<void> get stateChanges => _stateController.stream;
   List<String> get currentPeers => _connectedPeers.toList();
+  List<String> get knownPeers => _knownPeers.toList();
+  List<ChatMessage> get quarantinedMessages => List.unmodifiable(_quarantinedMessages);
 
   int transmissions = 0;
   int deliveries = 0;
@@ -412,15 +418,27 @@ class MeshBridge {
   }
 
   String? importAndApproveGatewayContact(String contactStr) {
-    return _core.gatewayImportAndApproveContact(contactStr);
+    final res = _core.gatewayImportAndApproveContact(contactStr);
+    if (res != null && res.isNotEmpty) {
+      approvedGatewayContacts.add(res);
+      _notifyState();
+    }
+    return res;
   }
 
   bool connectToGatewayContact(String contactStr) {
-    return _core.gatewayConnectToContact(contactStr);
+    final ok = _core.gatewayConnectToContact(contactStr);
+    _notifyState();
+    return ok;
   }
 
   bool setGatewayRoute(String recipientShortId, String targetEndpointIdHex) {
-    return _core.gatewaySetRoute(recipientShortId, targetEndpointIdHex);
+    if (recipientShortId.isNotEmpty && recipientShortId != myShortId) {
+      _knownPeers.add(recipientShortId.toUpperCase());
+    }
+    final ok = _core.gatewaySetRoute(recipientShortId, targetEndpointIdHex);
+    _notifyState();
+    return ok;
   }
 
   RustGatewayStats? getGatewayStats() {
@@ -428,7 +446,13 @@ class MeshBridge {
   }
 
   List<String> getGatewayRoutes() {
-    return _core.gatewayGetRoutes();
+    final routes = _core.gatewayGetRoutes();
+    for (final r in routes) {
+      if (r != myShortId) {
+        _knownPeers.add(r);
+      }
+    }
+    return routes;
   }
 
   List<RustPendingGatewayPeer> getPendingGatewayPeers() {
@@ -436,15 +460,51 @@ class MeshBridge {
   }
 
   bool approveGatewayPeer(String endpointIdHex) {
-    return _core.gatewayApprovePeer(endpointIdHex);
+    final ok = _core.gatewayApprovePeer(endpointIdHex);
+    if (ok) {
+      approvedGatewayContacts.add(endpointIdHex);
+      _notifyState();
+    }
+    return ok;
   }
 
   bool revokeOrBlockGatewayPeer(String endpointIdHex, {required bool block}) {
-    return _core.gatewayRevokeOrBlockPeer(endpointIdHex, block: block);
+    final ok = _core.gatewayRevokeOrBlockPeer(endpointIdHex, block: block);
+    if (ok) {
+      approvedGatewayContacts.remove(endpointIdHex);
+      _notifyState();
+    }
+    return ok;
   }
 
   bool setPeerTrustState(String peerIdHex, String action) {
     final ok = _core.trustSetPeerState(peerIdHex, action);
+    if (ok) {
+      peerTrustStates[peerIdHex.toLowerCase()] = action;
+      if (action == 'approve' || action == 'introducer') {
+        final released = <ChatMessage>[];
+        _quarantinedMessages.removeWhere((m) {
+          final senderFull = _core.getPeerId(m.sender)?.toLowerCase();
+          final matches = senderFull == peerIdHex.toLowerCase() ||
+              peerIdHex.toUpperCase().startsWith(m.sender.toUpperCase());
+          if (matches) {
+            released.add(m);
+          }
+          return matches;
+        });
+        for (final m in released) {
+          if (!_isDisposed && !_messageController.isClosed) {
+            _messageController.add(m);
+          }
+        }
+      } else if (action == 'block' || action == 'revoke') {
+        _quarantinedMessages.removeWhere((m) {
+          final senderFull = _core.getPeerId(m.sender)?.toLowerCase();
+          return senderFull == peerIdHex.toLowerCase() ||
+              peerIdHex.toUpperCase().startsWith(m.sender.toUpperCase());
+        });
+      }
+    }
     _notifyState();
     return ok;
   }
@@ -466,6 +526,8 @@ class MeshBridge {
   Map<String, dynamic>? importVoucher(String voucherUri) {
     return _core.trustImportVoucher(voucherUri);
   }
+
+  String? get lastCoreError => _core.getLastError();
 
   String? getPeerFullId(String shortIdHex) {
     return _core.getPeerId(shortIdHex);
@@ -501,6 +563,21 @@ class MeshBridge {
       userPaused: userPausedRelaying,
     );
     _notifyState();
+  }
+
+  String cycleRelayContributionMode() {
+    const order = ['balanced', 'help_network', 'minimal', 'receive_only'];
+    final idx = order.indexOf(relayContributionMode);
+    final next = order[(idx + 1) % order.length];
+    setRelayContributionMode(next);
+    return next;
+  }
+
+  void rememberPeer(String shortId) {
+    if (shortId.isNotEmpty && shortId != myShortId) {
+      _knownPeers.add(shortId.toUpperCase());
+      _notifyState();
+    }
   }
 
   String? setRelayContributionMode(String mode) {
@@ -803,19 +880,31 @@ class MeshBridge {
         continue; // Suppress duplicate
       }
       _seenMsgIds.add(m.msgId);
-      deliveries++;
+      if (m.sender.isNotEmpty && m.sender != myShortId) {
+        _knownPeers.add(m.sender);
+      }
 
+      final chatMsg = ChatMessage(
+        msgId: m.msgId,
+        logicalId: null,
+        sender: m.sender,
+        recipient: m.recipient,
+        text: m.text,
+        hopCount: m.hopCount,
+        isBroadcast: m.isBroadcast,
+        deliveryState: 'Delivered',
+      );
+
+      // Hold PendingRequest messages in quarantine until explicitly approved by user
+      if (!m.isBroadcast && m.authStatus == 'PendingRequest') {
+        _quarantinedMessages.add(chatMsg);
+        _notifyState();
+        continue;
+      }
+
+      deliveries++;
       if (!_isDisposed && !_messageController.isClosed) {
-        _messageController.add(ChatMessage(
-          msgId: m.msgId,
-          logicalId: null,
-          sender: m.sender,
-          recipient: m.recipient,
-          text: m.text,
-          hopCount: m.hopCount,
-          isBroadcast: m.isBroadcast,
-          deliveryState: 'Delivered',
-        ));
+        _messageController.add(chatMsg);
       }
     }
   }
@@ -837,6 +926,7 @@ class MeshBridge {
         final shortId = call.arguments['shortId'] as String;
         if (shortId != myShortId) {
           _connectedPeers.add(shortId);
+          _knownPeers.add(shortId);
           _core.onPeerConnected(shortId);
           _drainOutbound();
           if (!_peersController.isClosed) {
